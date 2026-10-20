@@ -212,7 +212,6 @@ func (s *Service) writeRevision(ctx context.Context, tx Tx, snapshot Memory, ope
 		Reason:    reason,
 		Snapshot:  snapshot,
 		Evidence:  evidence,
-		CreatedAt: snapshot.UpdatedAt,
 	}
 	if err := tx.InsertRevision(ctx, revision); err != nil {
 		return err
@@ -237,12 +236,6 @@ func (s *Service) syncSearchDocument(ctx context.Context, tx Tx, item Memory) er
 	}
 	if document.MemoryID == "" {
 		document.MemoryID = item.ID
-	}
-	if document.State == "" {
-		document.State = item.State
-	}
-	if document.UpdatedAt.IsZero() {
-		document.UpdatedAt = item.UpdatedAt
 	}
 	return tx.UpsertSearchDocument(ctx, document)
 }

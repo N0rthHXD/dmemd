@@ -38,7 +38,7 @@ P4（T4.1–T4.8）关键词检索落定的契约，补充《系统 AI 记忆服
 | --- | --- |
 | `sources` | 原始 JSON 以 BLOB 原样保存；`app_id`、`external_id` 可选且没有唯一约束；`redacted` 与 `redacted_at` 表示显式清除 |
 | `memories` | 当前快照；`id` 主键；`version >= 1`；`created_by_app` 为创建时来源应用快照；`origin_source_id` 关联首次来源 |
-| `memory_revisions` | 完整历史快照；主键 `(memory_id, version)`；操作类型和原因；随记忆永久清除级联删除 |
+| `memory_revisions` | 完整历史快照；主键 `(memory_id, version)`；操作类型和原因；版本时间取快照 `updated_at`；随记忆永久清除级联删除 |
 | `evidence` | 来源引用、可选消息 ID、原文片段、可选定位、模型名和 redacted 状态；来源行保留 |
 | `revision_evidence` | 版本完整证据集合；主键 `(memory_id, version, evidence_id)`，关联版本和证据 |
 | `ingest_jobs` | 状态、尝试次数、下次执行时间、脱敏错误和 `memory_ids` 结果摘要；不保存原始模型响应 |
@@ -100,7 +100,7 @@ P4（T4.1–T4.8）关键词检索落定的契约，补充《系统 AI 记忆服
   表示新结论没有支持证据，旧版本证据仍可查询。`add_evidence` 在内容不变时合并当前集合，
   重复 ID 合并为一次关联；内容、证据均未变化时不生成无意义版本。
 - 状态变化（归档、重新激活、逻辑删除）生成完整新版本并复制当前证据集合。归档保留搜索文档并
-  更新状态；逻辑删除保留墓碑、历史和证据，但移除搜索文档；重复归档/删除不增加版本。
+  更新 `memories.state`；逻辑删除保留墓碑、历史和证据，但移除搜索文档；重复归档/删除不增加版本。
 - 恢复指定历史版本复制其内容、创建应用、`observed_at` 和证据集合，生成高于当前版本的新
   `active` 版本；旧版本不改写，已清除来源的证据保持 `redacted` 且不恢复片段。
 - 永久清除在一个事务内删除当前快照、全部版本、版本证据关联、搜索文档和仅被该记忆引用的证据；
@@ -127,7 +127,7 @@ P4（T4.1–T4.8）关键词检索落定的契约，补充《系统 AI 记忆服
   `active`，显式请求可查 `archived`，`deleted` 在服务层和存储层都被移除，永不返回。排序固定为
   `bm25(memory_fts, 4, 1) ASC, updated_at DESC, id ASC`，返回 `score=-bm25` 和 Top-K。
 - `memory_search_docs` 是派生数据，`memory_fts` 是外部内容 FTS5 表。插入、更新、删除文档由
-  触发器在同一事务内同步 FTS。归档只更新 `state` 并保留索引；逻辑删除删除搜索文档。
+  触发器在同一事务内同步 FTS。归档只更新 `memories.state` 并保留索引；逻辑删除删除搜索文档。
 - `Store.RebuildSearchDocuments` 在一个写事务内从 `memories` 重新生成全部未删除（`active` 与
   `archived`）搜索文档，再重建 FTS；`deleted` 不进入派生索引。构造器或 SQL 失败时事务整体
   回滚，返回错误且不报告部分成功。`retrieval.Service.RebuildIndex` 包装该能力并只记录数量、

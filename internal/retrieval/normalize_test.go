@@ -124,7 +124,7 @@ func TestDocumentBuilderProducesNormalizedTerms(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if document.MemoryID != item.ID || document.State != item.State {
+	if document.MemoryID != item.ID {
 		t.Fatalf("document identity = %+v", document)
 	}
 	if document.TitleTerms != "answer language" {
@@ -132,8 +132,5 @@ func TestDocumentBuilderProducesNormalizedTerms(t *testing.T) {
 	}
 	if document.ContentTerms != "用 户 希 望 默 认 使 用 中 文 回 答" {
 		t.Fatalf("content terms = %q", document.ContentTerms)
-	}
-	if !document.UpdatedAt.Equal(item.UpdatedAt) {
-		t.Fatalf("updated_at = %v", document.UpdatedAt)
 	}
 }

@@ -143,14 +143,14 @@ func TestCreateWritesSnapshotRevisionEvidenceAndIndex(t *testing.T) {
 	}
 
 	db := testutil.OpenInspector(t, f.store.Path())
-	var memoryID, state, titleTerms string
+	var memoryID, titleTerms string
 	if err := db.QueryRowContext(context.Background(),
-		`SELECT memory_id, state, title_terms FROM memory_search_docs WHERE memory_id = ?`,
-		created.ID).Scan(&memoryID, &state, &titleTerms); err != nil {
+		`SELECT memory_id, title_terms FROM memory_search_docs WHERE memory_id = ?`,
+		created.ID).Scan(&memoryID, &titleTerms); err != nil {
 		t.Fatal(err)
 	}
-	if memoryID != created.ID || state != string(memory.StateActive) || titleTerms != "answer language" {
-		t.Fatalf("search document = %s %s %q", memoryID, state, titleTerms)
+	if memoryID != created.ID || titleTerms != "answer language" {
+		t.Fatalf("search document = %s %q", memoryID, titleTerms)
 	}
 }
 
@@ -435,7 +435,7 @@ func TestLifecycleArchiveDeleteRestoreAndEvidenceQueries(t *testing.T) {
 	if restoreRevision.Operation != memory.OperationRestore || len(restoreRevision.Evidence) != 1 {
 		t.Fatalf("restore revision = %+v", restoreRevision)
 	}
-	if count := countRows(t, db, `SELECT COUNT(*) FROM memory_search_docs WHERE memory_id = ? AND state = 'active'`, created.ID); count != 1 {
+	if count := countRows(t, db, `SELECT COUNT(*) FROM memory_search_docs WHERE memory_id = ?`, created.ID); count != 1 {
 		t.Fatalf("restored search document count = %d", count)
 	}
 	activeList, err := f.memory.List(ctx, memory.ListOptions{States: []memory.State{memory.StateActive}})
@@ -518,7 +518,7 @@ func TestDeleteRollsBackStateRevisionAndIndexTogether(t *testing.T) {
 		t.Fatalf("versions after rollback = %+v", versions)
 	}
 	db := testutil.OpenInspector(t, f.store.Path())
-	if count := countRows(t, db, `SELECT COUNT(*) FROM memory_search_docs WHERE memory_id = ? AND state = 'active'`, created.ID); count != 1 {
+	if count := countRows(t, db, `SELECT COUNT(*) FROM memory_search_docs WHERE memory_id = ?`, created.ID); count != 1 {
 		t.Fatalf("search documents after rollback = %d", count)
 	}
 }

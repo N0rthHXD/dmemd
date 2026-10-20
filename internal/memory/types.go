@@ -62,7 +62,8 @@ type Memory struct {
 
 // Revision is a complete, immutable snapshot of a memory plus the full
 // evidence set that supported that version. Evidence is supplied by the source
-// package and linked through revision_evidence.
+// package and linked through revision_evidence. CreatedAt is the revision time;
+// storage derives it from the snapshot's UpdatedAt.
 type Revision struct {
 	MemoryID  string            `json:"memory_id"`
 	Version   int               `json:"version"`
@@ -89,10 +90,8 @@ type ListOptions struct {
 // by FTS5; original title and content stay in the memory snapshot.
 type SearchDocument struct {
 	MemoryID     string
-	State        State
 	TitleTerms   string
 	ContentTerms string
-	UpdatedAt    time.Time
 }
 
 // DocumentBuilder is injected into the write path. P4 provides the production

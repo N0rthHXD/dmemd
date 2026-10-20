@@ -5,14 +5,10 @@
 CREATE TABLE memory_search_docs (
     row_id        INTEGER PRIMARY KEY,
     memory_id     TEXT NOT NULL UNIQUE,
-    state         TEXT NOT NULL,
     title_terms   TEXT NOT NULL,
     content_terms TEXT NOT NULL,
-    updated_at    TEXT NOT NULL,
     FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
 );
-
-CREATE INDEX idx_memory_search_docs_state ON memory_search_docs(state);
 
 CREATE VIRTUAL TABLE memory_fts USING fts5(
     title_terms,

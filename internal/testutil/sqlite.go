@@ -116,10 +116,8 @@ type DocumentBuilder struct{}
 func (DocumentBuilder) BuildDocument(item memory.Memory) (memory.SearchDocument, error) {
 	return memory.SearchDocument{
 		MemoryID:     item.ID,
-		State:        item.State,
 		TitleTerms:   strings.ToLower(item.Title),
 		ContentTerms: strings.ToLower(item.Content),
-		UpdatedAt:    item.UpdatedAt,
 	}, nil
 }
 

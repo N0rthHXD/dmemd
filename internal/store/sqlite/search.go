@@ -119,12 +119,6 @@ func (s *Store) RebuildSearchDocuments(ctx context.Context, builder memory.Docum
 			if document.MemoryID != item.ID {
 				return fmt.Errorf("搜索文档记忆 ID %s 与快照 %s 不一致", document.MemoryID, item.ID)
 			}
-			if document.State == "" {
-				document.State = item.State
-			}
-			if document.UpdatedAt.IsZero() {
-				document.UpdatedAt = item.UpdatedAt
-			}
 			if err := tx.UpsertSearchDocument(ctx, document); err != nil {
 				return err
 			}

@@ -12,8 +12,6 @@ CREATE TABLE sources (
     created_at   TEXT NOT NULL
 );
 
-CREATE INDEX idx_sources_created_at ON sources(created_at);
-
 CREATE TABLE memories (
     id               TEXT NOT NULL PRIMARY KEY,
     kind             TEXT NOT NULL,
@@ -51,7 +49,6 @@ CREATE TABLE memory_revisions (
     updated_at       TEXT NOT NULL,
     created_by_app   TEXT NOT NULL DEFAULT '',
     origin_source_id TEXT,
-    revision_at      TEXT NOT NULL,
     PRIMARY KEY (memory_id, version),
     FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
 );

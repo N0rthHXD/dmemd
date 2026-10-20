@@ -114,21 +114,18 @@ func (t *Tx) UpdateMemory(ctx context.Context, item memory.Memory) error {
 }
 
 const revisionColumns = `memory_id, version, operation, reason, kind, title, content, state,
-	observed_at, created_at, updated_at, created_by_app, origin_source_id, revision_at`
+	observed_at, created_at, updated_at, created_by_app, origin_source_id`
 
-// InsertRevision stores one complete historical snapshot.
+// InsertRevision stores one complete historical snapshot. Its revision time is
+// the snapshot's updated_at.
 func (t *Tx) InsertRevision(ctx context.Context, revision memory.Revision) error {
 	snapshot := revision.Snapshot
-	revisionAt := revision.CreatedAt
-	if revisionAt.IsZero() {
-		revisionAt = snapshot.UpdatedAt
-	}
 	_, err := t.tx.ExecContext(ctx, `INSERT INTO memory_revisions(`+revisionColumns+`) VALUES
-		(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		revision.MemoryID, revision.Version, string(revision.Operation), revision.Reason,
 		string(snapshot.Kind), snapshot.Title, snapshot.Content, string(snapshot.State),
 		formatTime(snapshot.ObservedAt), formatTime(snapshot.CreatedAt), formatTime(snapshot.UpdatedAt),
-		snapshot.CreatedByApp, nullableString(snapshot.OriginSourceID), formatTime(revisionAt),
+		snapshot.CreatedByApp, nullableString(snapshot.OriginSourceID),
 	)
 	if err != nil {
 		return fmt.Errorf("写入记忆版本 %s@%d: %w", revision.MemoryID, revision.Version, err)
@@ -208,12 +205,12 @@ func listRevisions(ctx context.Context, q revisionQueryer, memoryID string, limi
 func scanRevision(row rowScanner) (memory.Revision, error) {
 	var item memory.Revision
 	var operation, kind, state string
-	var observedAt, createdAt, updatedAt, revisionAt string
+	var observedAt, createdAt, updatedAt string
 	var origin sql.NullString
 	if err := row.Scan(
 		&item.MemoryID, &item.Version, &operation, &item.Reason,
 		&kind, &item.Snapshot.Title, &item.Snapshot.Content, &state,
-		&observedAt, &createdAt, &updatedAt, &item.Snapshot.CreatedByApp, &origin, &revisionAt,
+		&observedAt, &createdAt, &updatedAt, &item.Snapshot.CreatedByApp, &origin,
 	); err != nil {
 		return memory.Revision{}, err
 	}
@@ -235,9 +232,7 @@ func scanRevision(row rowScanner) (memory.Revision, error) {
 	if item.Snapshot.UpdatedAt, err = parseTime(updatedAt); err != nil {
 		return memory.Revision{}, err
 	}
-	if item.CreatedAt, err = parseTime(revisionAt); err != nil {
-		return memory.Revision{}, err
-	}
+	item.CreatedAt = item.Snapshot.UpdatedAt
 	return item, nil
 }
 
@@ -280,15 +275,12 @@ func listRevisionEvidence(ctx context.Context, q revisionQueryer, memoryID strin
 // external-content FTS index in the same statement.
 func (t *Tx) UpsertSearchDocument(ctx context.Context, document memory.SearchDocument) error {
 	_, err := t.tx.ExecContext(ctx, `INSERT INTO memory_search_docs
-		(memory_id, state, title_terms, content_terms, updated_at)
-		VALUES (?, ?, ?, ?, ?)
+		(memory_id, title_terms, content_terms)
+		VALUES (?, ?, ?)
 		ON CONFLICT(memory_id) DO UPDATE SET
-			state = excluded.state,
 			title_terms = excluded.title_terms,
-			content_terms = excluded.content_terms,
-			updated_at = excluded.updated_at`,
-		document.MemoryID, string(document.State),
-		document.TitleTerms, document.ContentTerms, formatTime(document.UpdatedAt),
+			content_terms = excluded.content_terms`,
+		document.MemoryID, document.TitleTerms, document.ContentTerms,
 	)
 	if err != nil {
 		return fmt.Errorf("写入搜索文档 %s: %w", document.MemoryID, err)

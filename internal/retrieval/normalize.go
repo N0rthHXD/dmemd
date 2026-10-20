@@ -140,9 +140,7 @@ func NewDocumentBuilder() DocumentBuilder { return DocumentBuilder{} }
 func (DocumentBuilder) BuildDocument(item memory.Memory) (memory.SearchDocument, error) {
 	return memory.SearchDocument{
 		MemoryID:     item.ID,
-		State:        item.State,
 		TitleTerms:   IndexText(item.Title),
 		ContentTerms: IndexText(item.Content),
-		UpdatedAt:    item.UpdatedAt,
 	}, nil
 }

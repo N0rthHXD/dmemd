@@ -73,34 +73,49 @@ func run(args []string, stdout, stderr io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	lock, err := appruntime.AcquireInstance(loaded.Config.DataDir)
+	if err != nil {
+		return err
+	}
+
 	store, err := sqlite.Open(ctx, sqlite.Config{
 		Path:               loaded.Config.Database.Path,
 		BusyTimeout:        loaded.Config.Database.BusyTimeout.Std(),
 		MaxReadConnections: loaded.Config.Database.MaxReadConnections,
 	})
 	if err != nil {
+		_ = lock.Close()
 		return fmt.Errorf("初始化数据库: %w", err)
 	}
 	if err := store.Migrate(ctx); err != nil {
 		_ = store.Close()
+		_ = lock.Close()
 		return fmt.Errorf("应用数据库迁移: %w", err)
 	}
 	if err := store.CheckPermissions(); err != nil {
 		_ = store.Close()
+		_ = lock.Close()
 		return fmt.Errorf("检查数据库权限: %w", err)
 	}
 	logger.Info("database ready", "path", store.Path())
 
-	app, err := appruntime.New(loaded.Config, logger, store)
+	stack, err := appruntime.NewStack(loaded.Config, logger, store)
 	if err != nil {
 		_ = store.Close()
+		_ = lock.Close()
 		return err
 	}
+	if err := stack.Worker.Recover(ctx); err != nil {
+		_ = store.Close()
+		_ = lock.Close()
+		return fmt.Errorf("恢复后台任务: %w", err)
+	}
 
-	runErr := app.Run(ctx)
+	runErr := stack.App.Run(ctx)
 	closeErr := store.Close()
-	if runErr != nil || closeErr != nil {
-		return errors.Join(runErr, closeErr)
+	lockErr := lock.Close()
+	if runErr != nil || closeErr != nil || lockErr != nil {
+		return errors.Join(runErr, closeErr, lockErr)
 	}
 	return nil
 }

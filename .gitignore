@@ -5,6 +5,9 @@
 /coverage.out
 /coverage.html
 
+# Runtime instance lock (normally inside the user data directory)
+dmemd.lock
+
 # Local databases and SQLite sidecar files
 *.db
 *.db-journal

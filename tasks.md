@@ -2,7 +2,7 @@
 
 ## 执行说明
 
-本清单依据《系统 AI 记忆服务架构设计.md》（v1）及 `tech-stack.md`、`project-structure.md`、`plan.md`。共保留 67 个任务，当前执行 P1–P6 的 57 项；P7（T7.1–T7.10）共 10 项暂缓。P1（T1.1–T1.9）、P2（T2.1–T2.9）、P3（T3.1–T3.10）、P4（T4.1–T4.8）与 P5（T5.1–T5.12）已于 2026-10-20 完成验收并记录；P6 尚未开始，不能把规划文档、已完成阶段基础视为后续业务功能完成。
+本清单依据《系统 AI 记忆服务架构设计.md》（v1）及 `tech-stack.md`、`project-structure.md`、`plan.md`。共保留 67 个任务，P1–P6 的 57 项已完成验收；P7（T7.1–T7.10）共 10 项暂缓。P1（T1.1–T1.9）、P2（T2.1–T2.9）、P3（T3.1–T3.10）、P4（T4.1–T4.8）、P5（T5.1–T5.12）与 P6（T6.1–T6.9）已于 2026-10-20 完成验收并记录；P7 暂缓。不能把规划文档、已完成阶段基础或 P6 的 HTTP 契约视为 P7 容量、备份和发布能力已经完成。
 
 每个任务可以单独交给 Code Agent。执行时读取本任务、上述四份依据、适用的仓库指令和已完成依赖；只实现本任务范围，不提前引入后续功能。明确依赖是最低前置条件，阶段入口还要求上一阶段验收通过。当前在 T6.9 验收后结束，不自动进入 P7；用户明确恢复或指定执行后再开展暂缓任务。每项交付包含代码/文档、适当测试、运行命令和结果。测试不依赖真实模型或生产数据；CI 常规测试使用临时真实 SQLite 与可控假模型。P1–P6 原有的功能、事务、重试和恢复测试仍须完成。
 
@@ -217,7 +217,7 @@
 - **依赖**：T3.10。
 - **描述**：实现 NFC、英文大小写归一、英文数字按词、连续汉字逐字 token、标点边界；提供搜索文档构造器并接入 T3.1 的写入能力，替换测试注入用于生产的装配。
 - **验收标准**：文档与查询共享相同规则；规范化等价文本结果一致；一字/两字/长中文及中英文混合测试通过；所有创建/内容更正/恢复路径均写入同一规则的标题和正文文档；保留原正文用于摘要。
-- **执行记录**：新增 `internal/retrieval/normalize.go`、`normalize_test.go`，新增 `internal/runtime/services.go`、`services_test.go`。`Normalize` 使用 NFC + Unicode 小写；`Groups`/`Tokens` 按空白和标点分组，英文数字按词、连续汉字逐字 token；`DocumentBuilder` 保留原始标题/正文并写入规范化词项。`runtime.NewMemoryService` 在生产装配中注入该构造器，创建、内容更正、补证、归档、恢复、删除和永久清除沿用同一 `syncSearchDocument`。验证：`go test -count=1 ./internal/retrieval ./internal/runtime ./tests/integration` 通过 `TestGroupsChineseEnglishNumbersAndPunctuation`、`TestDocumentBuilderKeepsOriginalTextAndNormalizedTerms`、`TestProductionServicesUseSharedNormalization`、`TestP4NormalizationEquivalentInputs`；`make check` 通过。限制：该记录完成时 P5/P6 尚未开始；P5 后续已完成 ingest 组装，HTTP 仍属 P6；首版不做同义词或语义扩展。
+- **执行记录**：新增 `internal/retrieval/normalize.go`、`normalize_test.go`，新增 `internal/runtime/services.go`、`services_test.go`。`Normalize` 使用 NFC + Unicode 小写；`Groups`/`Tokens` 按空白和标点分组，英文数字按词、连续汉字逐字 token；`DocumentBuilder` 保留原始标题/正文并写入规范化词项。`runtime.NewMemoryService` 在生产装配中注入该构造器，创建、内容更正、补证、归档、恢复、删除和永久清除沿用同一 `syncSearchDocument`。验证：`go test -count=1 ./internal/retrieval ./internal/runtime ./tests/integration` 通过 `TestGroupsChineseEnglishNumbersAndPunctuation`、`TestDocumentBuilderKeepsOriginalTextAndNormalizedTerms`、`TestProductionServicesUseSharedNormalization`、`TestP4NormalizationEquivalentInputs`；`make check` 通过。限制：该记录完成时 P5/P6 尚未开始；P5/P6 后续已完成 ingest 组装和 HTTP 接入；首版不做同义词或语义扩展。
 
 ### [x] T4.2 实现普通关键词到 FTS 的安全编译
 
@@ -356,59 +356,68 @@
 
 ## P6：HTTP 完整接口与调用端联调
 
-### [ ] T6.1 实现 HTTP JSON 基础与错误映射
+### [x] T6.1 实现 HTTP JSON 基础与错误映射
 
 - **依赖**：T5.12。
 - **描述**：实现 net/http 路由基础、DTO、UTF-8 JSON 响应及简单错误对象；JSON 解码失败映射 400，不存在映射 404，执行错误映射 500，暂不可用映射 503。
 - **验收标准**：无认证、权限、业务字段、额外请求大小中间件；不存在版本冲突/业务校验专用错误；有响应体设置 application/json；不增加 Location、ETag 或版本控制头；未知/缺失业务辅助值按 T1.3 处理。
+- **执行记录**：新增 `internal/transport/http/{handler,response,request,dto,health}.go` 与 `handler_test.go`。使用标准库 `net/http` ServeMux 注册路由；JSON 解码失败或多值体返回 400，`memory/source/ingest.ErrNotFound` 返回 404，数据库未就绪返回 503，其余执行错误记录内部日志并返回 500；响应统一 `application/json` 与 `{"error":"..."}`，不安装认证、业务字段、请求大小或额外响应头中间件。验证：`go test -count=1 ./internal/transport/http` 通过 `TestHealthAndReadiness`、`TestUnknownRouteReturnsSimpleJSON404`、`TestMalformedJSONReturns400WithoutCallingService`、`TestServiceErrorMapping`、`TestReadinessBlocksBusinessRoutesWith503`、`TestListOptionsAndInvalidFilter`、`TestPatchIgnoresContentAndSearchParsing`、`TestRestoreRejectsInvalidVersionWithoutCallingService`。限制：未定义方法由 Go ServeMux 返回普通 405；架构未要求 JSON 405，不新增该协议。
 
-### [ ] T6.2 接入统一提交与任务查询路由
+### [x] T6.2 接入统一提交与任务查询路由
 
 - **依赖**：T6.1。
 - **描述**：接入 POST /v1/memories 和 GET /v1/ingest-jobs/{id}，复用业务服务，不在 HTTP 内执行模型调用。
 - **验收标准**：提交 202 且 JSON 含 source_id/job_id/status；缺少 Token、任意 Token、缺少 app_id 均成功接收；无幂等键/预期版本/证据字段要求；阻塞模型时 POST 已返回；任务完成可读 memory_ids，失败原因从任务查询返回。
+- **执行记录**：在 `memories.go`、`jobs.go`、`dto.go` 接入 `POST /v1/memories` 与 `GET /v1/ingest-jobs/{id}`；HTTP 只解码 JSON 并调用 `ingest.IngestService`，不调用模型，不增加幂等键、预期版本或证据字段要求。验证：`go test -count=1 ./tests/integration -run TestP6HTTPContract` 通过：阻塞假模型时 POST 在 2 秒阈值内返回 202，响应含 source_id/job_id/status=queued；缺少 app_id 和携带任意 Authorization 的提交均被接收；模型连续 500 三次后任务查询返回 failed、脱敏错误与空 memory_ids。限制：提取、重试和单 Worker 执行仍由 P5 链路负责，POST 不等待模型完成。
 
-### [ ] T6.3 接入记忆列表与当前快照路由
+### [x] T6.3 接入记忆列表与当前快照路由
 
 - **依赖**：T6.2。
 - **描述**：接入 GET /v1/memories、GET /v1/memories/{id}，映射过滤和可选 limit。
 - **验收标准**：默认最近更新 50 条；一次返回 items，无页码/游标/下一页；跨应用可读相同记忆；时间和字段命名符合契约；缺失 ID 返回简单 404。
+- **执行记录**：在 `memories.go` 实现 `GET /v1/memories` 与 `GET /v1/memories/{id}`，在 `request.go` 解析 kinds/states/created_by_app/updated_after/updated_before/limit；无效边界按 T1.3 忽略或使用默认 50，过滤列表存在但无可识别值时返回空 items。验证：P6 HTTP 集成测试覆盖默认 active/archived 列表、`states=archived`、`states=active&created_by_app=...`、当前快照与未知 ID 404；`TestListOptionsAndInvalidFilter` 验证参数映射及 `kinds=unknown` 空结果。限制：列表无分页，所有本地应用可读取相同记忆；app_id 不是授权或隔离条件。
 
-### [ ] T6.4 接入状态修改、删除与永久清除路由
+### [x] T6.4 接入状态修改、删除与永久清除路由
 
 - **依赖**：T6.3。
 - **描述**：接入 PATCH /v1/memories/{id} 与 DELETE 同路径，按 purge=true 区分永久清除；PATCH 只调用状态变更能力。
 - **验收标准**：归档/激活、逻辑删除及永久清除响应符合架构；PATCH 中附带 content 不形成内容直接写入捷径，未知辅助字段按契约处理；不要求版本头；共享来源保留。
+- **执行记录**：在 `memories.go` 实现 `PATCH /v1/memories/{id}` 与 `DELETE` 同路径；PATCH 只取 active/archived，忽略 content/title/kind/version，deleted 或未知值按无变化处理；DELETE 默认逻辑删除，`purge=true|TRUE|1` 永久清除并返回 id+purged。验证：P6 HTTP 集成测试验证归档/激活版本递增、PATCH 附带 content 不写入、PATCH deleted 不改变生命周期、逻辑删除后墓碑仍可按 ID 读取、purge 后 404 且共享来源仍存在。限制：逻辑删除不提供存储介质擦除；永久清除保留共享来源，不追加版本头。
 
-### [ ] T6.5 接入版本、恢复与证据路由
+### [x] T6.5 接入版本、恢复与证据路由
 
 - **依赖**：T6.4。
 - **描述**：接入版本列表、指定版本、POST restorations、GET evidence，准确使用契约的请求体、limit 和证据版本参数。
 - **验收标准**：旧版本可读且恢复生成新版本；当前/历史证据均可追溯；恢复不存在版本为 404；清除后不经接口泄露原文副本；无分页和版本匹配协议。
+- **执行记录**：在 `memories.go` 实现 versions、versions/{version}、restorations、evidence；limit 缺失或非法使用 50，version 非正整数或不存在的恢复返回 404，evidence 的 version 缺失/0/非法取当前版本。验证：P6 HTTP 集成测试覆盖版本降序与完整 snapshot/evidence、恢复 version 1 生成更高版本、999 版本与证据查询 404、来源清除后证据保留 redacted/source_id 但不再返回 quote/location。限制：历史只读；恢复不覆盖旧版本，也不要求预期版本或冲突令牌。
 
-### [ ] T6.6 接入关键词检索路由
+### [x] T6.6 接入关键词检索路由
 
 - **依赖**：T6.5。
 - **描述**：接入 POST /v1/memories/search，映射 query、match、filters、top_k、explain，并返回契约中的 items。
 - **验收标准**：默认 all/20/active；返回 memory/score/snippet/matched_terms/evidence_refs，explanation 按需出现；静态 search 路由不会被当作记忆 ID；无搜索分页；中文与特殊字符测试复用真实 SQLite。
+- **执行记录**：在 `search.go` 接入 `POST /v1/memories/search`，解析 query/match/filters/top_k/explain 后委托 `retrieval.SearchService`；静态 search 路由独立注册。验证：P6 HTTP 集成测试使用真实 SQLite 与假模型覆盖中文关键词、kind 过滤、explain=true 返回 explanation、默认 active/top_k=20、删除后检索为空，以及包含 FTS 保留字符的输入返回 200 空 items；`TestPatchIgnoresContentAndSearchParsing` 验证参数透传。限制：一次请求完成 Top-K，无跨请求搜索快照或分页。
 
-### [ ] T6.7 接入来源查询与原文清除路由
+### [x] T6.7 接入来源查询与原文清除路由
 
 - **依赖**：T6.6。
 - **描述**：接入 GET /v1/sources/{id} 和 DELETE 同路径，分别返回原文/已清除状态及清除结果。
 - **验收标准**：未清除来源返回原始 content 形态；清除后返回 redacted 且保留标识；未完成任务取消且不能落库；不新增来源创建或提取提交接口；任意本地应用按相同规则访问。
+- **执行记录**：在 `sources.go` 接入 `GET/DELETE /v1/sources/{id}`，返回原样 content 或 redacted 状态及 cancelled_jobs；未新增来源创建或提取提交接口。验证：P6 HTTP 集成测试覆盖未清除来源的对象形态、清除后无 content、共享来源不随记忆 purge 删除；`TestP6SourceRedactionCancelsRunningJob` 在模型阻塞时清除来源，任务变为 cancelled、memory_ids 为空且未落库。限制：清除是逻辑清除，不承诺存储介质或远端模型侧副本擦除。
 
-### [ ] T6.8 完整组装启动、单实例与优雅关闭
+### [x] T6.8 完整组装启动、单实例与优雅关闭
 
 - **依赖**：T6.7、T1.9。
 - **描述**：组装配置→数据库/迁移→恢复任务→HTTP/Worker 的启动顺序；以用户数据目录为单位实现本地单实例保护，异常退出后可重新启动；关闭时停止接收/领取、取消模型等待、结束事务并关闭连接。
 - **验收标准**：相同用户数据目录第二实例不能同时运行，且不依赖单纯端口冲突判断；异常退出不遗留不可恢复锁；数据库未就绪 readyz=503，模型不可用仍就绪；SIGTERM 后无半事务、重启可恢复任务；无分布式租约。
+- **执行记录**：更新 `internal/runtime/app.go`、`services.go`，新增 `instance.go`，更新 `cmd/dmemd/main.go`、`.gitignore`：配置→目录/单实例锁→数据库迁移→恢复任务→HTTP/Worker；`App.Serve` 在接收请求前调用 `Worker.Recover`，取消时停止领取、取消模型等待并有界等待 Worker；`AcquireInstance` 使用数据目录 `dmemd.lock` 的 `flock`，异常退出由内核释放。验证：`go test -count=1 ./tests/e2e -run TestP6ProcessSingleInstanceShutdownAndRestart` 构建并启动真实二进制，验证不同端口、相同数据目录的第二实例被实例锁拒绝；阻塞模型时 SIGTERM 后进程正常退出；重启后 running 任务恢复、尝试次数保留并成功；随后强制 kill 进程，再次启动仍能获取数据目录锁并读取已提交记忆。`tests/integration/readiness_test.go` 验证模型不可达不影响 readyz。限制：单实例只覆盖本机同一数据目录，不实现跨机器租约或分布式调度。
 
-### [ ] T6.9 完成调用端示例与 HTTP 契约回归
+### [x] T6.9 完成调用端示例与 HTTP 契约回归
 
 - **依赖**：T6.8。
 - **描述**：更新 OpenAPI 与 README，提供 curl 提交文本/对话/结构化内容、查询任务、检索、归档、历史恢复、清除来源的示例；建立完整 API 契约集成测试。
 - **验收标准**：架构 API 清单所有方法/路径均覆盖；无需业务自定义请求头，只有带 JSON 请求体需 Content-Type；无 Token 和任意 Token 都可全流程使用；列表、错误、状态码、时间格式符合契约；示例不含真实凭据和用户内容。
+- **执行记录**：更新 `api/openapi.yaml`、`README.md`、`docs/testing.md`、`project-structure.md`、`plan.md`、`tech-stack.md`；README 提供文本/对话/结构化提交、任务查询、检索、归档、历史恢复、来源清除的 curl 示例，示例不含真实凭据或用户内容。验证：`go test -count=1 ./...` 通过；`CGO_ENABLED=1 go test -race -count=1 ./...` 通过；`make check` 通过；PyYAML 解析 OpenAPI 成功并确认 11 条路径、15 个操作覆盖架构清单；`npx @redocly/cli@latest lint api/openapi.yaml` 返回 valid（3 条非阻断 `operation-4xx-response` 警告）；`tests/e2e` 真实进程覆盖启动、单实例、SIGTERM 与重启；二进制冒烟验证 health/ready/提交/列表/检索/SIGTERM 退出。限制：未调用真实远端模型；未触发远端 GitHub Actions；P7 容量、备份恢复和发布验收未执行。
 
 ## P7：质量、容量、备份与发布准备（暂缓）
 

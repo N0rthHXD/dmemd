@@ -4,7 +4,7 @@
 
 - 使用 `.go-version` 固定的 Go `1.27.3`（或同一精确补丁版本）。
 - 首次构建需要能下载 `go.mod` 锁定的模块；测试本身不访问外网、不调用真实模型。
-- 生产构建和默认测试不要求 CGO。竞争检测需要 CGO，属于可选检查，不是当前 P1 门禁。
+- 生产构建和默认测试不要求 CGO。竞争检测需要 CGO，属于可选检查，不是默认 `make check` 门禁。
 
 ## 2. 统一命令
 
@@ -31,7 +31,7 @@ README 中的开发入口与这些命令保持一致。
 - `internal/testutil` 提供独立临时数据库、只读检查连接、确定性搜索文档构造器、事务故障注入点
   和可控假模型；存储契约见 `docs/contracts/storage.md`。
 
-## 4. 当前测试覆盖（P1–P5）
+## 4. 当前测试覆盖（P1–P6）
 
 | 测试 | 覆盖内容 |
 | --- | --- |
@@ -39,7 +39,7 @@ README 中的开发入口与这些命令保持一致。
 | `internal/idgen` | UUID v4 格式、变体位与唯一性 |
 | `internal/runtime/config_test.go` | 默认值、配置优先级、未知字段、权限、目录创建、架构参数校验 |
 | `internal/runtime/logging_test.go` | 结构化日志、凭据脱敏、正文/模型响应不落日志 |
-| `internal/runtime/app_test.go` | `/healthz`、`/readyz` 的 200/503、无业务占位路由、优雅关闭 |
+| `internal/runtime/app_test.go` | `/healthz`、`/readyz` 的 200/503、未装配业务路由时的 404、优雅关闭 |
 | `internal/store/sqlite/store_test.go` | 单写连接、读池逐连接 PRAGMA、读连接只读、文件/伴随文件权限、迁移前不就绪、重开数据库 |
 | `internal/store/sqlite/tx_test.go` | 提交、回调错误、SQL 失败、取消、嵌套事务拒绝、panic 回滚 |
 | `internal/store/sqlite/migrate_test.go` | 顺序迁移、重复启动、失败回滚与重试、未知版本、版本唯一键、来源标识非唯一 |
@@ -58,16 +58,20 @@ README 中的开发入口与这些命令保持一致。
 | `internal/model/parse_test.go` | 零/部分候选、默认字段、围栏、整体不可解析和证据类型容错 |
 | `internal/model/remote_test.go` | Chat Completions 请求/响应映射、凭据头、超时、连接失败、HTTP 错误分类和畸形响应 |
 | `internal/runtime/services_test.go` | 生产组装注入同一规范化构造器并完成创建→检索；模型/ingest/Worker 组装和拒绝多 Worker |
+| `internal/transport/http/handler_test.go` | JSON 400、404/500/503 映射、无认证/无额外头、列表与检索参数、PATCH 仅状态、恢复版本边界 |
 | `internal/testutil` | 临时数据库并行隔离、权限检查、故障注入点、假模型成功/失败/延迟/畸形/阻塞控制 |
 | `tests/integration/p2_transactions_test.go` | 真实 SQLite 跨表提交与分步失败回滚、FTS 一致性和任务结果字段 |
 | `tests/integration/p3_lifecycle_test.go` | 跨模块创建→更正→归档→删除→恢复→清除原文→永久清除，含任务取消与外键检查 |
 | `tests/integration/p4_search_test.go` | 中文一/二字/长词、中英混合、标点、大小写、规范化等价、all/any、过滤、摘要/证据/解释、生命周期、重建与相关 active 上下文 |
 | `tests/integration/p5_pipeline_test.go` | 统一提交→模型→合并→检索、清除/结果提交两种竞态、接收/running/事务中断/成功后的重启、模型不可用与恢复、部分/零候选 |
 | `tests/integration/readiness_test.go` | 真实数据库驱动 readyz、关闭后 503、模型地址不可达不影响就绪 |
+| `tests/integration/p6_http_test.go` | 完整 HTTP 契约：无 Token/任意 Token、202 提交、任务成功/失败、列表/检索/版本/恢复/证据、归档/删除/清除、来源清除取消在途任务 |
+| `tests/e2e/p6_process_test.go` | 构建并启动真实进程、同数据目录第二实例被拒绝、SIGTERM 优雅关闭、重启恢复 running 任务和持久化数据 |
 | `tests/integration/sqlite_baseline_test.go` | SQLite 版本、WAL、外键、FTS5、CGO=0 兼容 |
 | `tests/integration/unicode_baseline_test.go` | x/text NFC 基线与中文保持 |
 
-P6 继续增加 HTTP 契约、完整进程启动和单实例测试；未实现能力不提前创建占位测试。
+P6 已完成 HTTP 契约、完整进程启动、单实例与重启恢复测试；P7 的容量、备份恢复和
+发布准备仍未执行，不创建占位通过结果。
 
 ## 5. CI
 
@@ -83,6 +87,7 @@ CI 不保存凭据或用户数据库，也不配置生产部署。
 P2 已覆盖真实 SQLite 事务回滚、跨表原子性、索引触发器和测试用事务故障注入；P3 已覆盖记忆
 写入/删除/清除回滚、历史证据清除和来源任务取消；P4 已覆盖中文检索、FTS 注入防护、生命周期
 索引一致性、快照重建回滚和后台相关 active 上下文；P5 已覆盖模型超时/失败、在途取消竞态、
-事务中断、真实 SQLite 关闭/重开恢复和模型不可用降级。完整 HTTP 进程启动与路由联调仍按 P6
-任务继续验证。十万条容量与性能实测属于暂缓的 P7；其规格见
-`docs/performance.md`，当前未执行，不能宣称性能验收通过。
+事务中断、真实 SQLite 关闭/重开恢复和模型不可用降级；P6 已覆盖完整 HTTP 路由、错误映射、
+无认证调用、来源清除取消在途 HTTP 任务、单实例进程锁和 SIGTERM 重启恢复。十万条容量与
+性能实测、备份恢复和发布准备属于暂缓的 P7；其规格见 `docs/performance.md`，当前未执行，
+不能宣称性能验收通过。

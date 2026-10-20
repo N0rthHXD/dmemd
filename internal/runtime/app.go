@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +9,9 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/N0rthHXD/dmemd/internal/ingest"
+	httptransport "github.com/N0rthHXD/dmemd/internal/transport/http"
 )
 
 const shutdownTimeout = 10 * time.Second
@@ -31,18 +33,44 @@ func (f ReadinessFunc) Ready(ctx context.Context) error {
 	return f(ctx)
 }
 
-// App is the process runtime skeleton: configuration, HTTP lifecycle and
-// health endpoints. The database store supplies the real readiness probe.
+// Services is the complete business capability set exposed by the local HTTP
+// API. The runtime owns assembly; transport owns DTOs and response mapping.
+type Services = httptransport.Services
+
+// Option customizes the assembled application. Options are used by the full P6
+// process assembly while health-only tests can keep calling New with three
+// arguments.
+type Option func(*App)
+
+// WithServices installs the business services exposed under /v1.
+func WithServices(services Services) Option {
+	return func(app *App) {
+		app.services = services
+	}
+}
+
+// WithWorker installs the single sequential ingest worker. Serve recovers
+// leftover jobs before accepting HTTP traffic and stops the worker on shutdown.
+func WithWorker(worker *ingest.Worker) Option {
+	return func(app *App) {
+		app.worker = worker
+	}
+}
+
+// App is the process runtime: configuration, HTTP lifecycle, health endpoints,
+// business routes and the optional background worker.
 type App struct {
-	cfg    Config
-	logger *slog.Logger
-	ready  Readiness
-	server *http.Server
+	cfg      Config
+	logger   *slog.Logger
+	ready    Readiness
+	services Services
+	worker   *ingest.Worker
+	server   *http.Server
 }
 
 // New validates configuration and assembles the HTTP surface. Business routes
-// are added in later stages; P2 wires the real database readiness probe.
-func New(cfg Config, logger *slog.Logger, ready Readiness) (*App, error) {
+// are installed when services are supplied through WithServices.
+func New(cfg Config, logger *slog.Logger, ready Readiness, options ...Option) (*App, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -56,12 +84,19 @@ func New(cfg Config, logger *slog.Logger, ready Readiness) (*App, error) {
 	}
 
 	app := &App{cfg: cfg, logger: logger, ready: ready}
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", app.handleHealthz)
-	mux.HandleFunc("GET /readyz", app.handleReadyz)
+	for _, option := range options {
+		if option != nil {
+			option(app)
+		}
+	}
 
+	handler := httptransport.New(httptransport.Options{
+		Services: app.services,
+		Ready:    ready.Ready,
+		Logger:   logger,
+	})
 	app.server = &http.Server{
-		Handler:           app.withRequestLogging(mux),
+		Handler:           app.withRequestLogging(handler),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
@@ -82,65 +117,101 @@ func (a *App) Run(ctx context.Context) error {
 	return a.Serve(ctx, listener)
 }
 
-// Serve serves an already-created listener until ctx is cancelled, then shuts
-// the HTTP server down within a bounded timeout.
+// Serve serves an already-created listener until ctx is cancelled, then stops
+// accepting requests and waits for the worker to leave its current job without
+// committing a partial transaction.
 func (a *App) Serve(ctx context.Context, listener net.Listener) error {
 	if listener == nil {
 		return errors.New("HTTP listener 为空")
 	}
-	a.logger.Info("http server starting", "listen", listener.Addr().String())
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
+	var workerCtx context.Context
+	var cancelWorker context.CancelFunc
+	var workerDone chan error
+	workerFinished := true
+	if a.worker != nil {
+		workerCtx, cancelWorker = context.WithCancel(ctx)
+		if err := a.worker.Recover(workerCtx); err != nil {
+			cancelWorker()
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("恢复后台任务: %w", err)
+		}
+		workerDone = make(chan error, 1)
+		workerFinished = false
+		go func() {
+			workerDone <- a.worker.Run(workerCtx)
+		}()
+		a.logger.Info("ingest worker starting")
+	}
+	if cancelWorker != nil {
+		defer cancelWorker()
+	}
+
+	a.logger.Info("http server starting", "listen", listener.Addr().String())
 	serveErr := make(chan error, 1)
 	go func() {
 		serveErr <- a.server.Serve(listener)
 	}()
 
+	var runErr error
+	serveFinished := false
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-		shutdownErr := a.server.Shutdown(shutdownCtx)
-		if shutdownErr != nil {
-			_ = a.server.Close()
-		}
-		err := <-serveErr
-		if shutdownErr != nil {
-			return fmt.Errorf("关闭 HTTP 服务: %w", shutdownErr)
-		}
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("HTTP 服务: %w", err)
-		}
-		a.logger.Info("http server stopped")
-		return nil
+		// Normal shutdown path.
 	case err := <-serveErr:
+		serveFinished = true
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("HTTP 服务: %w", err)
+			runErr = fmt.Errorf("HTTP 服务: %w", err)
 		}
-		return nil
+	case err := <-workerDone:
+		workerFinished = true
+		if err == nil {
+			err = errors.New("后台任务意外退出")
+		}
+		runErr = fmt.Errorf("后台任务: %w", err)
 	}
-}
-
-type healthResponse struct {
-	Status string `json:"status"`
-}
-
-func (a *App) handleHealthz(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, healthResponse{Status: "ok"})
-}
-
-func (a *App) handleReadyz(w http.ResponseWriter, request *http.Request) {
-	if err := a.ready.Ready(request.Context()); err != nil {
-		a.logger.Warn("readiness check failed", "error", err)
-		writeJSON(w, http.StatusServiceUnavailable, healthResponse{Status: "unavailable"})
-		return
+	if cancelWorker != nil {
+		cancelWorker()
 	}
-	writeJSON(w, http.StatusOK, healthResponse{Status: "ready"})
-}
 
-func writeJSON(w http.ResponseWriter, status int, value any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	shutdownErr := a.server.Shutdown(shutdownCtx)
+	if shutdownErr != nil {
+		_ = a.server.Close()
+	}
+	if !serveFinished {
+		err := <-serveErr
+		if err != nil && !errors.Is(err, http.ErrServerClosed) && runErr == nil {
+			runErr = fmt.Errorf("HTTP 服务: %w", err)
+		}
+	}
+	if shutdownErr != nil && runErr == nil {
+		runErr = fmt.Errorf("关闭 HTTP 服务: %w", shutdownErr)
+	}
+
+	if !workerFinished {
+		select {
+		case err := <-workerDone:
+			if err != nil && runErr == nil {
+				runErr = fmt.Errorf("后台任务: %w", err)
+			}
+		case <-time.After(shutdownTimeout):
+			if runErr == nil {
+				runErr = errors.New("后台任务未在关闭期限内退出")
+			}
+		}
+	}
+
+	if runErr == nil {
+		a.logger.Info("http server stopped")
+	}
+	return runErr
 }
 
 type statusRecorder struct {

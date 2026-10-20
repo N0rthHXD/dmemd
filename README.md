@@ -1,20 +1,16 @@
 # dmemd
 
 `dmemd` 是面向同一操作系统用户的本地 AI 记忆服务。首版采用 Go 单进程、SQLite
-与 HTTP/1.1 JSON API，当前实施范围为 P1–P6，P7 暂缓。
+与 HTTP/1.1 JSON API。P1–P6 已于 2026-10-20 完成验收；P7 的质量、容量、备份和
+发布准备暂缓，不阻塞当前本地服务使用。
 
 ## 当前状态
 
-P1 已建立 Go Module、精确依赖基线、API/模型契约、测试与 CI 入口、配置、
-结构化日志和运行骨架。P2 已接入真实 SQLite：单写连接/小型读池、顺序迁移、
-业务表、外部内容 FTS5 触发器、短事务与来源/任务存取，`/readyz` 使用真实数据库
-探活。P3 已实现内部记忆写入与完整版本、证据定位、归档/删除/恢复、永久清除，
-以及来源原文清除和关联任务取消。P4 已实现中文关键词规范化、安全 FTS 查询、
-过滤与 BM25 排序、可读摘要/证据引用/按需解释、索引重建，以及后台相关 active
-记忆查询。P5 已实现统一异步接收、远端模型协议适配与容错解析、自动合并、原子
-结果提交、单 Worker、三次尝试、启动恢复，以及清除/崩溃竞态验证；生产组装入口
-位于 `internal/runtime/services.go`。HTTP 业务路由和完整进程启动仍由 P6 提供；
-当前还没有业务 HTTP 路由。
+P1–P5 已建立精确依赖基线、API/模型契约、配置与日志、真实 SQLite 单写连接/读池、
+顺序迁移、跨表事务、完整记忆版本与证据、来源清除、中文关键词检索、远端模型适配、
+统一异步接收、自动合并、单 Worker、三次尝试与崩溃恢复。P6 已提供架构规定的全部
+本地 HTTP API、完整进程组装、用户数据目录单实例锁、优雅关闭、调用端示例和 HTTP
+契约回归测试。当前没有认证、分页、幂等键、条件请求或独立前端。
 
 ## 环境
 
@@ -27,7 +23,7 @@ P1 已建立 Go Module、精确依赖基线、API/模型契约、测试与 CI �
 ```sh
 make fmt-check   # 只检查格式，不改写源码
 make vet
-make test        # 单元与集成测试，使用临时真实 SQLite，不访问外网
+make test        # 单元、集成与进程级测试，使用临时真实 SQLite，不访问外网
 make build       # CGO_ENABLED=0，输出 bin/dmemd
 make check       # 上述检查与构建
 ```
@@ -50,16 +46,125 @@ make build
 `${XDG_CONFIG_HOME:-$HOME/.config}/dmemd/`。配置也可通过
 `--config /path/to/config.json` 指定；显式指定的文件不存在时启动失败。
 
-健康检查：
+同一数据目录同时只允许一个进程运行。单实例保护使用数据目录内的进程锁，不依赖
+HTTP 端口冲突；进程崩溃后锁由操作系统释放，可直接重新启动。启动顺序为
+配置 → 目录/单实例锁 → 数据库/迁移 → 恢复遗留任务 → HTTP/Worker；`SIGINT`/
+`SIGTERM` 会停止接收请求、取消模型等待、结束事务并关闭连接。
+
+模型地址不可用时服务仍可启动，已有记忆的查询、检索和管理保持可用；新提交仍返回
+`202`，提取任务按三次总尝试重试，失败原因通过任务查询返回。
+
+## HTTP API 调用示例
+
+API 不验证 Token。`Authorization: Bearer ...` 可以省略，也可以填写任意值；`app_id`
+和 `external_id` 只是可选来源信息，不承担认证、隔离或唯一性。只有带 JSON 请求体时
+需要 `Content-Type: application/json`，没有其他自定义请求头要求。
+
+以下示例假设服务监听 `http://127.0.0.1:18432`。
+
+### 提交文本、对话和结构化内容
 
 ```sh
-curl -i http://127.0.0.1:18432/healthz
-curl -i http://127.0.0.1:18432/readyz
+# 简单文本
+curl -sS -X POST http://127.0.0.1:18432/v1/memories \
+  -H 'Content-Type: application/json' \
+  -d '{"content":"以后请默认使用中文回答。"}'
+
+# 对话对象
+curl -sS -X POST http://127.0.0.1:18432/v1/memories \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "app_id":"desktop-assistant",
+    "external_id":"conversation-42-batch-7",
+    "content":{"messages":[
+      {"role":"user","content":"以后请默认使用中文回答。","occurred_at":"2026-10-20T02:00:00Z"}
+    ]}
+  }'
+
+# 已有结构化内容
+curl -sS -X POST http://127.0.0.1:18432/v1/memories \
+  -H 'Content-Type: application/json' \
+  -d '{"content":{"preferences":{"answer_language":"zh-CN"}}}'
 ```
 
+提交成功返回 `202`。响应中的 `source_id`、`job_id` 用于后续查询：
+
+```json
+{"source_id":"22222222-2222-4222-8222-222222222222","job_id":"33333333-3333-4333-8333-333333333333","status":"queued"}
+```
+
+### 查询任务
+
+```sh
+curl -sS http://127.0.0.1:18432/v1/ingest-jobs/33333333-3333-4333-8333-333333333333
+```
+
+任务成功后可读取 `memory_ids`；失败时 `error` 是脱敏摘要，不包含完整模型响应或
+原始输入。
+
+### 列表、检索与当前记忆
+
+```sh
+# 默认返回最近更新的 50 条 active/archived 记忆，无分页
+curl -sS 'http://127.0.0.1:18432/v1/memories?limit=20'
+
+# 关键词检索；默认 match=all、top_k=20、仅 active
+curl -sS -X POST http://127.0.0.1:18432/v1/memories/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"回答 语言","filters":{"kinds":["preference"]},"explain":true}'
+
+curl -sS http://127.0.0.1:18432/v1/memories/11111111-1111-4111-8111-111111111111
+```
+
+### 归档、版本恢复与删除
+
+```sh
+# PATCH 只修改状态；active/archived 之外的 state 不产生变更
+curl -sS -X PATCH http://127.0.0.1:18432/v1/memories/11111111-1111-4111-8111-111111111111 \
+  -H 'Content-Type: application/json' \
+  -d '{"state":"archived"}'
+
+# 版本历史和指定版本
+curl -sS 'http://127.0.0.1:18432/v1/memories/11111111-1111-4111-8111-111111111111/versions?limit=10'
+curl -sS http://127.0.0.1:18432/v1/memories/11111111-1111-4111-8111-111111111111/versions/1
+
+# 从历史版本恢复为新的 active 版本
+curl -sS -X POST http://127.0.0.1:18432/v1/memories/11111111-1111-4111-8111-111111111111/restorations \
+  -H 'Content-Type: application/json' \
+  -d '{"version":1}'
+
+# 逻辑删除；加 ?purge=true 永久清除记忆及其历史
+curl -sS -X DELETE http://127.0.0.1:18432/v1/memories/11111111-1111-4111-8111-111111111111
+curl -sS -X DELETE 'http://127.0.0.1:18432/v1/memories/11111111-1111-4111-8111-111111111111?purge=true'
+```
+
+### 来源查询与原文清除
+
+```sh
+curl -sS http://127.0.0.1:18432/v1/sources/22222222-2222-4222-8222-222222222222
+
+# 清除原文、历史证据片段并取消未完成任务；已形成的记忆正文保留
+curl -sS -X DELETE http://127.0.0.1:18432/v1/sources/22222222-2222-4222-8222-222222222222
+```
+
+清除响应：
+
+```json
+{"id":"22222222-2222-4222-8222-222222222222","redacted":true,"cancelled_jobs":1}
+```
+
+### 健康检查
+
+```sh
+curl -sS http://127.0.0.1:18432/healthz
+curl -sS http://127.0.0.1:18432/readyz
+```
+
+`/healthz` 只反映进程存活；`/readyz` 检查数据库迁移和连接。模型不可达不影响
+`/readyz`。同步错误使用简单 JSON：`400` 解码失败、`404` 资源不存在、`500` 执行
+失败、`503` 服务暂不可用。响应不返回 `Location`、`ETag` 或版本控制头。
+
 `--version` 输出构建版本后退出；`--check-config` 只加载并校验配置后退出。
-启动时会打开并迁移 SQLite；数据库不可用时启动失败，运行中数据库失效时 `/readyz`
-返回 `503`。当前不提供业务占位接口。
 
 ## 文档
 

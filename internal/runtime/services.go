@@ -1,14 +1,18 @@
 package runtime
 
 import (
+	"context"
 	"errors"
+	"io"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/N0rthHXD/dmemd/internal/ingest"
 	"github.com/N0rthHXD/dmemd/internal/memory"
 	"github.com/N0rthHXD/dmemd/internal/model"
 	"github.com/N0rthHXD/dmemd/internal/retrieval"
+	"github.com/N0rthHXD/dmemd/internal/source"
 	"github.com/N0rthHXD/dmemd/internal/store/sqlite"
 )
 
@@ -29,6 +33,11 @@ func NewSearchService(store *sqlite.Store, logger *slog.Logger) *retrieval.Servi
 // source/job transaction.
 func NewIngestService(store *sqlite.Store) *ingest.Service {
 	return ingest.NewService(sqlite.IngestStore{Store: store}, store)
+}
+
+// NewSourceService wires source lookup and explicit redaction.
+func NewSourceService(store *sqlite.Store) *source.Service {
+	return source.NewService(store, sqlite.SourceStore{Store: store})
 }
 
 // NewModelProvider maps the local model configuration to the first remote
@@ -78,4 +87,70 @@ func NewIngestWorker(store *sqlite.Store, processor *ingest.Processor, cfg Worke
 		ingest.WithRetryDelays(retryDelays...),
 		ingest.WithWorkerLogger(logger),
 	), nil
+}
+
+// Stack is the complete P6 process assembly. It contains the HTTP application,
+// the single background worker and the business services exposed by local HTTP.
+type Stack struct {
+	App      *App
+	Worker   *ingest.Worker
+	Services Services
+}
+
+// NewStack assembles configuration, business services, the remote extraction
+// provider, one worker and the full HTTP API. A missing model base URL is a
+// valid degraded state: submissions are accepted and jobs fail after the normal
+// retry budget, while reads, search and management keep working.
+func NewStack(cfg Config, logger *slog.Logger, store *sqlite.Store) (*Stack, error) {
+	cfg.applyDefaults()
+	if store == nil {
+		return nil, errors.New("数据库未初始化")
+	}
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	memories := NewMemoryService(store)
+	search := NewSearchService(store, logger)
+	ingestService := NewIngestService(store)
+	sourceService := NewSourceService(store)
+
+	var provider ingest.ExtractionProvider
+	if strings.TrimSpace(cfg.Model.BaseURL) == "" {
+		logger.Warn("model provider not configured; submissions will be queued but extraction will fail")
+		provider = unavailableProvider{}
+	} else {
+		remote, err := NewModelProvider(cfg.Model)
+		if err != nil {
+			return nil, err
+		}
+		provider = remote
+	}
+
+	processor := NewIngestProcessor(store, memories, search, provider, cfg.Model.Name, logger)
+	worker, err := NewIngestWorker(store, processor, cfg.Worker, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	services := Services{
+		Ingest:   ingestService,
+		Memories: memories,
+		Sources:  sourceService,
+		Search:   search,
+	}
+	app, err := New(cfg, logger, store, WithServices(services), WithWorker(worker))
+	if err != nil {
+		return nil, err
+	}
+	return &Stack{App: app, Worker: worker, Services: services}, nil
+}
+
+type unavailableProvider struct{}
+
+func (unavailableProvider) Extract(context.Context, ingest.ExtractionRequest) (ingest.ExtractionResult, error) {
+	return ingest.ExtractionResult{}, &ingest.ProviderError{
+		Operation: "configuration",
+		Retryable: true,
+		Err:       errors.New("模型服务未配置"),
+	}
 }

@@ -10,6 +10,11 @@ info:
     it does not generate authentication or business validation. There is no
     authentication: Authorization headers are optional and ignored. Lists are
     returned in one response and have no pagination metadata.
+
+    P6 implements every path below in internal/transport/http and assembles the
+    process in internal/runtime. The HTTP contract is exercised end to end by
+    tests/integration/p6_http_test.go and the process lifecycle by
+    tests/e2e/p6_process_test.go.
 servers:
   - url: http://127.0.0.1:18432
 security: []

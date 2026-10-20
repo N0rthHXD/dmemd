@@ -1,9 +1,13 @@
 package runtime
 
 import (
+	"errors"
 	"log/slog"
+	"time"
 
+	"github.com/N0rthHXD/dmemd/internal/ingest"
 	"github.com/N0rthHXD/dmemd/internal/memory"
+	"github.com/N0rthHXD/dmemd/internal/model"
 	"github.com/N0rthHXD/dmemd/internal/retrieval"
 	"github.com/N0rthHXD/dmemd/internal/store/sqlite"
 )
@@ -19,4 +23,59 @@ func NewMemoryService(store *sqlite.Store) *memory.Service {
 // production normalization rules used by NewMemoryService.
 func NewSearchService(store *sqlite.Store, logger *slog.Logger) *retrieval.Service {
 	return retrieval.NewService(store, retrieval.NewDocumentBuilder(), retrieval.WithLogger(logger))
+}
+
+// NewIngestService wires unified submission and task queries over the durable
+// source/job transaction.
+func NewIngestService(store *sqlite.Store) *ingest.Service {
+	return ingest.NewService(sqlite.IngestStore{Store: store}, store)
+}
+
+// NewModelProvider maps the local model configuration to the first remote
+// protocol adapter. It performs no network request.
+func NewModelProvider(cfg ModelConfig) (*model.Provider, error) {
+	return model.NewProvider(model.Config{
+		Name:    cfg.Name,
+		BaseURL: cfg.BaseURL,
+		APIKey:  cfg.APIKey,
+		Timeout: cfg.Timeout.Std(),
+	})
+}
+
+// NewIngestProcessor wires source loading, related active-memory selection,
+// remote extraction and the unified memory write unit.
+func NewIngestProcessor(store *sqlite.Store, memories *memory.Service, related retrieval.RelatedService, provider ingest.ExtractionProvider, modelName string, logger *slog.Logger) *ingest.Processor {
+	return ingest.NewProcessor(
+		sqlite.IngestStore{Store: store},
+		store,
+		related,
+		memories,
+		provider,
+		ingest.WithModelName(modelName),
+		ingest.WithProcessorLogger(logger),
+	)
+}
+
+// NewIngestWorker constructs the one sequential worker required by the first
+// release. Configuration with a different worker count is rejected rather than
+// silently starting multiple executors.
+func NewIngestWorker(store *sqlite.Store, processor *ingest.Processor, cfg WorkerConfig, logger *slog.Logger) (*ingest.Worker, error) {
+	if cfg.Workers != DefaultWorkerCount {
+		return nil, errors.New("首版只允许一个 Worker")
+	}
+	if cfg.MaxAttempts != DefaultMaxAttempts {
+		return nil, errors.New("首版任务最多尝试三次")
+	}
+	retryDelays := make([]time.Duration, 0, len(cfg.RetryDelays))
+	for _, delay := range cfg.RetryDelays {
+		retryDelays = append(retryDelays, delay.Std())
+	}
+	return ingest.NewWorker(
+		sqlite.IngestStore{Store: store},
+		store,
+		processor,
+		ingest.WithMaxAttempts(cfg.MaxAttempts),
+		ingest.WithRetryDelays(retryDelays...),
+		ingest.WithWorkerLogger(logger),
+	), nil
 }

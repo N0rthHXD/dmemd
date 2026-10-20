@@ -179,6 +179,30 @@ func (t *Tx) RequeueRunningJobs(ctx context.Context, now time.Time) (int64, erro
 	return count, nil
 }
 
+// FailExhaustedJobs marks queued jobs whose persisted attempt count already
+// reached the retry budget as failed. Startup recovery calls this after
+// RequeueRunningJobs so an interrupted final attempt is never retried a fourth
+// time.
+func (t *Tx) FailExhaustedJobs(ctx context.Context, maxAttempts int, reason string, now time.Time) (int64, error) {
+	if maxAttempts <= 0 {
+		return 0, nil
+	}
+	result, err := t.tx.ExecContext(ctx, `UPDATE ingest_jobs SET
+		status = ?, error = ?, next_attempt_at = NULL, updated_at = ?, finished_at = ?
+		WHERE status = ? AND attempts >= ?`,
+		string(ingest.JobFailed), reason, formatTime(now), formatTime(now),
+		string(ingest.JobQueued), maxAttempts,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("标记耗尽重试预算的任务: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("标记耗尽重试预算的任务: %w", err)
+	}
+	return count, nil
+}
+
 func encodeMemoryIDs(ids []string) (string, error) {
 	if ids == nil {
 		return "[]", nil

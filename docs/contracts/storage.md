@@ -68,6 +68,9 @@ P4（T4.1–T4.8）关键词检索落定的契约，补充《系统 AI 记忆服
   被普通领取。
 - `RequeueRunningJobs` 把遗留 `running` 改回 `queued`，保留尝试次数和首次开始时间，并把下次
   执行时间设为当前时间。
+- `FailExhaustedJobs` 只把 `attempts` 已达到最大预算的 `queued` 任务置为 `failed`，写入固定
+  脱敏原因和结束时间；成功、取消及其他状态不变。Worker 启动恢复先重排 running，再调用它，
+  防止中断的第三次尝试变成第四次模型调用。
 - `UpdateJob` 持久化终态、脱敏错误和 `memory_ids`；`memory_ids` 始终是 JSON 数组，没有结果时
   为 `[]`。
 - `CancelJobsBySource` 只取消该来源的 `queued`/`running` 任务，保留尝试次数，不改变终态任务
@@ -146,6 +149,11 @@ P4（T4.1–T4.8）关键词检索落定的契约，补充《系统 AI 记忆服
 当前限制：
 
 - P4 已提供生产搜索文档构造器、关键词查询、过滤/排序、摘要/证据/解释、索引重建和后台相关
-  active 记忆选择；Worker、模型处理链和 HTTP 业务路由仍由 P5–P6 提供。
-- P5 的 ingest 上下文组装使用 `retrieval.RelatedService`；公共搜索 HTTP DTO 在 P6 接入。
+  active 记忆选择；P5 已提供统一来源/任务接收、远端模型适配、容错解析、合并决策、原子结果
+  提交、单 Worker、三次尝试和启动恢复；HTTP 业务路由仍由 P6 提供。
+- P5 的结果事务在同一 `ingest.Tx` 中检查 cancelled、读取来源/记忆当前状态，并复用
+  `memory.Writer` 写入快照、版本、完整证据和搜索文档，最后写入任务 `succeeded` 与
+  `memory_ids`。事务回调内不调用模型。
+- 启动恢复在单写事务中先 `RequeueRunningJobs`，再 `FailExhaustedJobs`；不引入租约、心跳或
+  分布式协调。
 - 备份/恢复实现属于暂缓的 P7，当前未执行。

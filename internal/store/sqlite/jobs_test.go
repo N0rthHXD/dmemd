@@ -246,6 +246,49 @@ func TestCancelJobsBySourceOnlyCancelsPendingWork(t *testing.T) {
 	}
 }
 
+func TestRecoveryRequeuesRunningAndFailsExhaustedBudget(t *testing.T) {
+	store := newTestStore(t)
+	sourceID := "source-recovery"
+	seedSource(t, store, sourceID)
+	ctx := context.Background()
+	base := testTime(0)
+	insertTestJob(t, store, ingest.Job{ID: "running-three", SourceID: sourceID, Status: ingest.JobRunning, Attempts: 3, CreatedAt: base, UpdatedAt: base})
+	insertTestJob(t, store, ingest.Job{ID: "queued-three", SourceID: sourceID, Status: ingest.JobQueued, Attempts: 3, CreatedAt: base, UpdatedAt: base})
+	insertTestJob(t, store, ingest.Job{ID: "queued-two", SourceID: sourceID, Status: ingest.JobQueued, Attempts: 2, CreatedAt: base, UpdatedAt: base})
+	insertTestJob(t, store, ingest.Job{ID: "succeeded-three", SourceID: sourceID, Status: ingest.JobSucceeded, Attempts: 3, CreatedAt: base, UpdatedAt: base})
+
+	var requeued, failed int64
+	if err := store.WithTx(ctx, func(ctx context.Context, tx *Tx) error {
+		var err error
+		requeued, err = tx.RequeueRunningJobs(ctx, base)
+		if err != nil {
+			return err
+		}
+		failed, err = tx.FailExhaustedJobs(ctx, 3, "retry attempts exhausted", base)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if requeued != 1 || failed != 2 {
+		t.Fatalf("requeued=%d failed=%d", requeued, failed)
+	}
+	for _, id := range []string{"running-three", "queued-three"} {
+		job, err := store.GetJob(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if job.Status != ingest.JobFailed || job.Attempts != 3 || job.Error == "" || job.FinishedAt == nil {
+			t.Fatalf("%s = %+v", id, job)
+		}
+	}
+	if job, err := store.GetJob(ctx, "queued-two"); err != nil || job.Status != ingest.JobQueued || job.Attempts != 2 {
+		t.Fatalf("queued-two = %+v err=%v", job, err)
+	}
+	if job, err := store.GetJob(ctx, "succeeded-three"); err != nil || job.Status != ingest.JobSucceeded {
+		t.Fatalf("succeeded-three = %+v err=%v", job, err)
+	}
+}
+
 func insertTestJob(t *testing.T, store *Store, job ingest.Job) ingest.Job {
 	t.Helper()
 	if err := store.WithTx(context.Background(), func(ctx context.Context, tx *Tx) error {

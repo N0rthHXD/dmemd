@@ -31,7 +31,7 @@ README 中的开发入口与这些命令保持一致。
 - `internal/testutil` 提供独立临时数据库、只读检查连接、确定性搜索文档构造器、事务故障注入点
   和可控假模型；存储契约见 `docs/contracts/storage.md`。
 
-## 4. 当前测试覆盖（P1–P4）
+## 4. 当前测试覆盖（P1–P5）
 
 | 测试 | 覆盖内容 |
 | --- | --- |
@@ -46,22 +46,28 @@ README 中的开发入口与这些命令保持一致。
 | `internal/store/sqlite/search_test.go` | 外部内容 FTS5 插入/更新/删除触发器、归档保留、FTS 重建 |
 | `internal/store/sqlite/search_query_test.go` | 中文短语、过滤、BM25 权重、时间/ID 平局排序、Top-K、快照重建与失败回滚 |
 | `internal/retrieval/*_test.go` | NFC/大小写/中英文分词、安全 FTS 编译、命中组、可读摘要和文档构造器 |
-| `internal/runtime/services_test.go` | 生产组装注入同一规范化构造器并完成创建→检索 |
 | `internal/store/sqlite/sources_test.go` | 来源/任务原子插入与回滚、原始 JSON 形态、缺少可选标识、重复提交不同 ID、存储级重复清除 |
-| `internal/store/sqlite/jobs_test.go` | 领取顺序、到期时间、尝试计数、终态不重复领取、结果/错误持久化、running 重排、来源取消 |
+| `internal/store/sqlite/jobs_test.go` | 领取顺序、到期时间、尝试计数、终态不重复领取、结果/错误持久化、running 重排、耗尽预算失败、来源取消 |
 | `internal/store/sqlite/memories_test.go` | 快照/完整版本/证据往返、列表默认 50 条、过滤、稳定排序、墓碑读取 |
 | `internal/memory/service_test.go` | 内部创建/更正/补证、版本递增与证据不继承、归档/删除/恢复、永久清除与共享证据、删除/清除回滚、清除后证据不复活 |
 | `internal/source/service_test.go` | 来源查询、原文与历史证据片段清除、queued/running 任务取消、终态错误摘要清理、重复清除稳定性、清除回滚 |
 | `internal/source/locate_test.go` | 可选消息 ID 定位、中文 rune 偏移、顶层字符串、缺失/非法输入 |
+| `internal/ingest/service_test.go` | 文本/对话/结构化/缺失内容接收、来源/任务同事务、回滚、重复提交、任务查询 |
+| `internal/ingest/processor_test.go` | 候选默认值、相关上下文、新增/更新/补证/跳过、旧 observed_at、归档/清除目标、事务回滚、模型阻塞不占写事务 |
+| `internal/ingest/worker_test.go` | 单 Worker 顺序、三次尝试、1/5 秒退避配置、不可重试错误、启动恢复、终态保护、等待取消 |
+| `internal/model/parse_test.go` | 零/部分候选、默认字段、围栏、整体不可解析和证据类型容错 |
+| `internal/model/remote_test.go` | Chat Completions 请求/响应映射、凭据头、超时、连接失败、HTTP 错误分类和畸形响应 |
+| `internal/runtime/services_test.go` | 生产组装注入同一规范化构造器并完成创建→检索；模型/ingest/Worker 组装和拒绝多 Worker |
 | `internal/testutil` | 临时数据库并行隔离、权限检查、故障注入点、假模型成功/失败/延迟/畸形/阻塞控制 |
 | `tests/integration/p2_transactions_test.go` | 真实 SQLite 跨表提交与分步失败回滚、FTS 一致性和任务结果字段 |
 | `tests/integration/p3_lifecycle_test.go` | 跨模块创建→更正→归档→删除→恢复→清除原文→永久清除，含任务取消与外键检查 |
 | `tests/integration/p4_search_test.go` | 中文一/二字/长词、中英混合、标点、大小写、规范化等价、all/any、过滤、摘要/证据/解释、生命周期、重建与相关 active 上下文 |
+| `tests/integration/p5_pipeline_test.go` | 统一提交→模型→合并→检索、清除/结果提交两种竞态、接收/running/事务中断/成功后的重启、模型不可用与恢复、部分/零候选 |
 | `tests/integration/readiness_test.go` | 真实数据库驱动 readyz、关闭后 503、模型地址不可达不影响就绪 |
 | `tests/integration/sqlite_baseline_test.go` | SQLite 版本、WAL、外键、FTS5、CGO=0 兼容 |
 | `tests/integration/unicode_baseline_test.go` | x/text NFC 基线与中文保持 |
 
-后续阶段按任务增加 Worker、HTTP 契约和进程恢复测试；未实现能力不提前创建占位测试。
+P6 继续增加 HTTP 契约、完整进程启动和单实例测试；未实现能力不提前创建占位测试。
 
 ## 5. CI
 
@@ -76,6 +82,7 @@ CI 不保存凭据或用户数据库，也不配置生产部署。
 
 P2 已覆盖真实 SQLite 事务回滚、跨表原子性、索引触发器和测试用事务故障注入；P3 已覆盖记忆
 写入/删除/清除回滚、历史证据清除和来源任务取消；P4 已覆盖中文检索、FTS 注入防护、生命周期
-索引一致性、快照重建回滚和后台相关 active 上下文。模型超时/失败、在途取消竞态、进程崩溃
-恢复等按 P5–P6 任务继续验证。十万条容量与性能实测属于暂缓的 P7；其规格见
+索引一致性、快照重建回滚和后台相关 active 上下文；P5 已覆盖模型超时/失败、在途取消竞态、
+事务中断、真实 SQLite 关闭/重开恢复和模型不可用降级。完整 HTTP 进程启动与路由联调仍按 P6
+任务继续验证。十万条容量与性能实测属于暂缓的 P7；其规格见
 `docs/performance.md`，当前未执行，不能宣称性能验收通过。

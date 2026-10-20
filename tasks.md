@@ -2,7 +2,7 @@
 
 ## 执行说明
 
-本清单依据《系统 AI 记忆服务架构设计.md》（v1）及 `tech-stack.md`、`project-structure.md`、`plan.md`。共保留 67 个任务，当前执行 P1–P6 的 57 项；P7（T7.1–T7.10）共 10 项暂缓。P1（T1.1–T1.9）、P2（T2.1–T2.9）、P3（T3.1–T3.10）与 P4（T4.1–T4.8）已于 2026-10-20 完成验收并记录；P5–P6 尚未开始，不能把规划文档、已完成阶段基础视为后续业务功能完成。
+本清单依据《系统 AI 记忆服务架构设计.md》（v1）及 `tech-stack.md`、`project-structure.md`、`plan.md`。共保留 67 个任务，当前执行 P1–P6 的 57 项；P7（T7.1–T7.10）共 10 项暂缓。P1（T1.1–T1.9）、P2（T2.1–T2.9）、P3（T3.1–T3.10）、P4（T4.1–T4.8）与 P5（T5.1–T5.12）已于 2026-10-20 完成验收并记录；P6 尚未开始，不能把规划文档、已完成阶段基础视为后续业务功能完成。
 
 每个任务可以单独交给 Code Agent。执行时读取本任务、上述四份依据、适用的仓库指令和已完成依赖；只实现本任务范围，不提前引入后续功能。明确依赖是最低前置条件，阶段入口还要求上一阶段验收通过。当前在 T6.9 验收后结束，不自动进入 P7；用户明确恢复或指定执行后再开展暂缓任务。每项交付包含代码/文档、适当测试、运行命令和结果。测试不依赖真实模型或生产数据；CI 常规测试使用临时真实 SQLite 与可控假模型。P1–P6 原有的功能、事务、重试和恢复测试仍须完成。
 
@@ -217,7 +217,7 @@
 - **依赖**：T3.10。
 - **描述**：实现 NFC、英文大小写归一、英文数字按词、连续汉字逐字 token、标点边界；提供搜索文档构造器并接入 T3.1 的写入能力，替换测试注入用于生产的装配。
 - **验收标准**：文档与查询共享相同规则；规范化等价文本结果一致；一字/两字/长中文及中英文混合测试通过；所有创建/内容更正/恢复路径均写入同一规则的标题和正文文档；保留原正文用于摘要。
-- **执行记录**：新增 `internal/retrieval/normalize.go`、`normalize_test.go`，新增 `internal/runtime/services.go`、`services_test.go`。`Normalize` 使用 NFC + Unicode 小写；`Groups`/`Tokens` 按空白和标点分组，英文数字按词、连续汉字逐字 token；`DocumentBuilder` 保留原始标题/正文并写入规范化词项。`runtime.NewMemoryService` 在生产装配中注入该构造器，创建、内容更正、补证、归档、恢复、删除和永久清除沿用同一 `syncSearchDocument`。验证：`go test -count=1 ./internal/retrieval ./internal/runtime ./tests/integration` 通过 `TestGroupsChineseEnglishNumbersAndPunctuation`、`TestDocumentBuilderKeepsOriginalTextAndNormalizedTerms`、`TestProductionServicesUseSharedNormalization`、`TestP4NormalizationEquivalentInputs`；`make check` 通过。限制：P5/P6 的 ingest/HTTP 组装尚未开始；首版不做同义词或语义扩展。
+- **执行记录**：新增 `internal/retrieval/normalize.go`、`normalize_test.go`，新增 `internal/runtime/services.go`、`services_test.go`。`Normalize` 使用 NFC + Unicode 小写；`Groups`/`Tokens` 按空白和标点分组，英文数字按词、连续汉字逐字 token；`DocumentBuilder` 保留原始标题/正文并写入规范化词项。`runtime.NewMemoryService` 在生产装配中注入该构造器，创建、内容更正、补证、归档、恢复、删除和永久清除沿用同一 `syncSearchDocument`。验证：`go test -count=1 ./internal/retrieval ./internal/runtime ./tests/integration` 通过 `TestGroupsChineseEnglishNumbersAndPunctuation`、`TestDocumentBuilderKeepsOriginalTextAndNormalizedTerms`、`TestProductionServicesUseSharedNormalization`、`TestP4NormalizationEquivalentInputs`；`make check` 通过。限制：该记录完成时 P5/P6 尚未开始；P5 后续已完成 ingest 组装，HTTP 仍属 P6；首版不做同义词或语义扩展。
 
 ### [x] T4.2 实现普通关键词到 FTS 的安全编译
 
@@ -266,81 +266,93 @@
 - **依赖**：T4.7。
 - **描述**：向 ingest 暴露基于当前输入关键词的相关 active 记忆查询，用于候选提取/合并上下文；按 T1.3 固定选择与上下文组装方式，不修改公共搜索协议。
 - **验收标准**：上下文只含当前来源及相关 active 记忆，不载入无关来源/全库；archived/deleted 不作为自动合并目标；无匹配可返回空上下文；不强制截断或拒绝用户提交内容。
-- **执行记录**：在 `internal/retrieval/service.go` 增加 `RelatedActive`/`RelatedService`，复用同一规范化与 BM25 排序，`match=any`、只查 `active`，去重后最多取前 32 个查询组和 10 条记忆；`runtime.NewSearchService` 生产装配。`docs/contracts/model-provider.md` 已固定选择与截断规则。验证：`go test -count=1 ./tests/integration ./internal/runtime` 通过 `TestP4RelatedActiveContext`（排除 archived/deleted/无关记忆、limit 生效、无匹配返回非 nil 空切片）和 `TestProductionServicesUseSharedNormalization`；`make check` 通过。限制：P5 Worker 尚未调用该能力，公共搜索 DTO 未改变；输入过长只截断派生查询组，不拒绝原始提交。
+- **执行记录**：在 `internal/retrieval/service.go` 增加 `RelatedActive`/`RelatedService`，复用同一规范化与 BM25 排序，`match=any`、只查 `active`，去重后最多取前 32 个查询组和 10 条记忆；`runtime.NewSearchService` 生产装配。`docs/contracts/model-provider.md` 已固定选择与截断规则。验证：`go test -count=1 ./tests/integration ./internal/runtime` 通过 `TestP4RelatedActiveContext`（排除 archived/deleted/无关记忆、limit 生效、无匹配返回非 nil 空切片）和 `TestProductionServicesUseSharedNormalization`；`make check` 通过。限制：该记录完成时 P5 Worker 尚未调用；P5 后续已完成接入，公共搜索 DTO 未改变；输入过长只截断派生查询组，不拒绝原始提交。
 
 ## P5：模型与持久化处理链
 
-### [ ] T5.1 实现统一接收和任务查询服务
+### [x] T5.1 实现统一接收和任务查询服务
 
 - **依赖**：T4.8。
 - **描述**：实现 ingest 服务接收合法 JSON 内容，调用来源/任务原子保存并返回 source_id、job_id、queued；实现任务状态、错误摘要与生成 memory_ids 查询。
 - **验收标准**：文本/对话/结构化内容相同路径；缺少来源标识可接收；返回前已持久化且不等待模型；重复提交创建普通新任务；无直接结构化写入捷径。
+- **执行记录**：新增 `internal/ingest/service.go`、`internal/ingest/service_test.go`，并在 `internal/ingest/ports.go` 增加只读 `JobReader`。`Submit` 校验 JSON 后在同一 `ingest.Tx` 插入来源和 `queued` 任务，缺少内容保存为 `null`；`GetJob` 从读池返回状态、尝试次数、脱敏错误和 `memory_ids`。验证：`go test -count=1 ./internal/ingest` 通过文本/对话/数组/缺失内容、同事务回滚、重复提交不同 ID、缺失任务统一错误；`make check` 通过。限制：HTTP 202 路由和 DTO 属于 P6；服务内 JSON 校验只对应解码错误，不增加业务字段校验。
 
-### [ ] T5.2 实现首个远端模型协议适配器
+### [x] T5.2 实现首个远端模型协议适配器
 
 - **依赖**：T5.1、T1.3。
 - **描述**：按固定协议实现 ExtractionProvider，传递模型标识、当前输入及相关记忆上下文；使用模型服务凭据和可取消 context，单次调用默认超时 60 秒。
 - **验收标准**：假模型核验请求和响应映射；超时、连接失败、服务错误可返回任务处理错误；不读取本地 API Token 作为模型凭据；不发送无关来源/全库；日志不输出凭据或完整请求/响应。
+- **执行记录**：新增 `internal/model/protocol.go`、`internal/model/remote.go`、`internal/model/remote_test.go`。实现 OpenAI-compatible Chat Completions：固定 system prompt、`model`、`temperature=0`、JSON object 响应格式、当前来源原样 `content` 和调用方选择的相关 active 记忆；`api_key` 只映射到 `Authorization`，超时默认 60 秒，响应 4xx（429 除外）不可重试，429/5xx/连接失败/超时/畸形响应可重试，错误不保留响应正文。验证：`go test -count=1 ./internal/model` 通过请求路径/头/字段映射、零候选、400/401/403/404/429/5xx 分类、畸形响应、超时和连接失败；未使用真实凭据或外网。限制：只验证本地假模型契约，真实模型连通性未执行；Provider 不自行重试。
 
-### [ ] T5.3 实现模型结果容错解析
+### [x] T5.3 实现模型结果容错解析
 
 - **依赖**：T5.2。
 - **描述**：解析候选与处理建议；缺失辅助字段使用契约默认值，可用结果继续处理；对空候选、部分不可用、整体不可解析分别处理，不引入业务校验层。
 - **验收标准**：零候选为成功空列表；部分候选可用时不会整批无理由失败；整体不可解析可记录脱敏原因；默认字段确定且可测试；不存储完整模型响应作为错误文本。
+- **执行记录**：新增 `internal/model/parse.go`、`internal/model/parse_test.go`。支持单层 Markdown JSON 围栏；缺失/`null` 候选返回成功空列表；未知 action/kind 分别回退 `add`/`fact`，缺失标题取正文前 40 个 Unicode 字符，缺失或不可解析 `observed_at` 回退来源接收时间；非对象候选、空正文和字段类型错误的证据项被跳过，整体不可解析返回 `ErrUnparseable` 且错误不含响应原文。验证：`go test -count=1 ./internal/model` 覆盖零候选、部分候选、默认值、围栏、自然语言、数组顶层、尾随文本和 40 字符中文标题。限制：解析是容错而非业务校验；未引入同义词、纠错或第二次模型整理。
 
-### [ ] T5.4 实现模型处理编排与相关上下文
+### [x] T5.4 实现模型处理编排与相关上下文
 
 - **依赖**：T5.3、T4.8。
 - **描述**：编排来源加载、关键词相关记忆选择、模型调用和候选整理；固定 observed_at 缺失时的接收时间回退规则，全部网络和长计算在写事务外完成。
 - **验收标准**：假模型检查只收到当前输入与相关上下文；blocked 模型不持有数据库写事务；调用失败不改已有记忆；任意 content 形态不依赖独立提取模式或调用方证据。
+- **执行记录**：新增 `internal/ingest/processor.go`、`internal/ingest/processor_test.go`。处理流程先读来源、以字符串/对象/数组/标量中的文本构造派生查询，调用 `retrieval.RelatedActive`，再在事务外调用 Provider 和整理候选；候选 `observed_at` 缺失时使用来源 `created_at`。验证：`go test -count=1 ./internal/ingest` 通过 blocked 模型期间独立提交可完成、请求只含当前来源和相关 active 记忆、无关/归档记忆不进入上下文、不同 `content` 形态可处理。限制：相关查询沿用 P4 的连续汉字短语规则，长连续中文句可能比空格分隔关键词命中更少；本任务不改变该检索契约。
 
-### [ ] T5.5 实现新增与同事实更新决策
+### [x] T5.5 实现新增与同事实更新决策
 
 - **依赖**：T5.4。
 - **描述**：实现同一事实明确更新关系时更新原记录、独立时间事件分别新增、无法确认关联时新增的决策；结合 observed_at 和接收时间处理新旧关系，记录操作原因。
 - **验收标准**：同事实更正保留 ID 并产生新版本；相似但独立事件不错误覆盖；时间较旧内容不无理由覆盖明确新事实；不确定关联按新增处理；不创建调用方逻辑唯一键或版本前置条件。
+- **执行记录**：在 `internal/ingest/merge.go` 实现候选决策，并更新 `docs/contracts/model-provider.md`。`update` 仅在目标仍为 active 且候选 `observed_at` 不早于当前值时更新原 ID；更旧内容作为独立记忆新增；目标不存在时新增；目标无效/不在相关上下文时降级新增；版本由 `memory.Revise` 从持久化快照递增，不接受调用方版本。操作原因写入新版本。验证：`go test -count=1 ./internal/ingest` 通过同 ID 更正生成 v2、旧 observed_at 不覆盖新事实、独立事件新增、原因持久化。限制：关联判断仍以模型建议加关键词上下文为输入，不做语义相似度推断。
 
-### [ ] T5.6 实现补证、跳过与 active 合并边界
+### [x] T5.6 实现补证、跳过与 active 合并边界
 
 - **依赖**：T5.5。
 - **描述**：重复内容尽量合并到现有 active 记忆并补证；已具备相同完整证据时可跳过。固定在候选计算后目标被归档、删除或永久清除时的处理，提交时按实际当前状态应用 active 合并规则，不增加冲突重算协议。
 - **验收标准**：重复提交不强制形成重复记忆；新来源补证产生版本；完全无变更可跳过；归档/删除不被后台自动恢复或更新为 active；目标已不存在按契约新增或跳过且不返回版本冲突错误；更正不继承旧结论支持证据。
+- **执行记录**：在 `internal/ingest/merge.go` 固定合并规则：内容相同且同类别的 `add` 复用现有 active 记忆；新来源证据产生 `add_evidence` 版本，已有完整证据则跳过；`update` 目标在提交时非 active 则跳过，已不存在则按新增；`merge_evidence` 目标非 active/不存在则跳过；同内容 `update` 转为补证，内容更正只使用本次候选证据。验证：`go test -count=1 ./internal/ingest` 通过重复 add 不增记忆、补证版本、相同证据跳过、候选计算后归档跳过、目标永久清除后 update 新增且 merge 跳过、更正文不继承旧证据。限制：重复识别使用 NFC/小写后的正文和 kind，不做语义或跨 kind 合并；不引入冲突重算或预期版本。
 
-### [ ] T5.7 实现处理结果与任务成功的原子提交
+### [x] T5.7 实现处理结果与任务成功的原子提交
 
 - **依赖**：T5.6。
 - **描述**：一个短事务内检查任务取消状态，读取当前持久化状态，执行候选的快照/版本/证据/索引变化，并写入 succeeded 与 memory_ids；复用 memory 统一变更单元，禁止内层提交。
 - **验收标准**：多候选任务要么变更与成功状态全部提交，要么全部回滚；记忆写入后、任务成功前故障不会留下已落库记忆；cancelled 不提交任何候选；零候选同样原子成功；事务内不调用模型。
+- **执行记录**：在 `internal/ingest/processor.go` 的结果阶段使用一个 `ingest.Tx`：先读当前 job/source，cancelled 或已终态直接不写；source 已清除则不落候选；随后复用 `memory.Writer` 写快照/版本/证据/索引，最后更新 job 为 `succeeded`、`memory_ids` 和结束时间。验证：`go test -count=1 ./internal/ingest` 通过提交后回滚无半份记忆、cancelled 无候选、零候选仍成功提交；`tests/integration` 的清除竞态验证清除先提交时记忆/版本/证据/索引均为 0。限制：不提供跨进程事务；进程在 SQLite 提交前崩溃由下一任务恢复验证覆盖。
 
-### [ ] T5.8 实现单 Worker 调度
+### [x] T5.8 实现单 Worker 调度
 
 - **依赖**：T5.7。
 - **描述**：实现一个顺序 Worker，按持久化顺序及可执行时间取 queued 并处理，空队列等待可取消；配置和 runtime 不允许首版无意启动多个 Worker。
 - **验收标准**：阻塞第一个任务时第二个不并行调用模型；HTTP/读取不被阻塞；停止能退出等待；已成功、失败终态、取消任务不重复领取；无内存队列替代持久化事实来源。
+- **执行记录**：新增 `internal/ingest/worker.go`，并在 `internal/runtime/services.go` 增加生产组装入口。`Worker.Run` 顺序执行 `ProcessOne`，`ClaimNextJob` 按 `created_at ASC, id ASC` 和到期时间取任务；空队列/退避等待可取消；`runtime.NewIngestWorker` 拒绝 workers 不为 1 或最大次数不为 3。验证：`go test -count=1 ./internal/ingest` 通过阻塞首任务时仅一次模型调用、第二任务保持 queued、作业查询不被阻塞、空队列停止；`go test -count=1 ./internal/runtime` 通过生产组装和拒绝多 Worker。限制：首版只有一个进程内 Worker，不引入租约、心跳或分布式协调；HTTP 路由仍由 P6 接入。
 
-### [ ] T5.9 实现三次总尝试与失败退避
+### [x] T5.9 实现三次总尝试与失败退避
 
 - **依赖**：T5.8。
 - **描述**：使用持久化尝试计数，暂时错误后按初始化间隔回 queued，到第三次仍失败标记 failed；实现脱敏错误摘要与下次执行时间，重试等待可被关闭取消。
 - **验收标准**：首次也计入三次；失败/超时/整体不可解析按协议处理且不会无限重试；到上限无第四次调用；重启不重置预算；现有查询/管理继续可用；日志不包含输入原文或服务密钥。
+- **执行记录**：在 `internal/ingest/worker.go` 实现领取即 `attempts+1`、暂时失败回 `queued` 并设置 1 秒/5 秒退避、第三次失败或不可重试 4xx 直接 `failed`；错误摘要只保留 Provider 类别/HTTP 状态或截断的安全文本。验证：`go test -count=1 ./internal/ingest` 通过 500 三次后最多三次调用、一次失败后恢复、401 不重试、三次畸形响应失败、重试等待可取消、日志不含输入原文/原始响应；`make check` 通过。限制：退避由轮询到期任务实现，不引入精确计时器队列；关闭发生在模型调用中时会保留已消耗的尝试次数。
 
-### [ ] T5.10 实现启动恢复与已成功任务保护
+### [x] T5.10 实现启动恢复与已成功任务保护
 
 - **依赖**：T5.9。
 - **描述**：Worker 启动前把遗留 running 重排 queued，保留尝试计数；已经耗尽预算的任务不再调模型并落为 failed；成功或取消任务不恢复执行。
 - **验收标准**：关闭后重开同一真实数据库可继续 queued/running；计数不归零；succeeded 不生成第二批版本；最大次数边界明确；不引入租约、心跳或分布式协调。
+- **执行记录**：在 `internal/store/sqlite/jobs.go` 增加 `FailExhaustedJobs`，`Worker.Recover` 在同一短事务中先 `RequeueRunningJobs`（保留 attempts/started_at）再把 attempts 已达上限的 queued 任务置为 failed；`Run` 启动时自动执行恢复。验证：`go test -count=1 ./internal/store/sqlite` 通过 running 重排、耗尽预算失败和终态保护；`go test -count=1 ./internal/ingest` 通过运行中重试计数保留、成功/取消不恢复；`tests/integration` 通过同一真实数据库关闭重开继续处理且成功任务不重跑。限制：使用 SQLite 单写事务和进程内单 Worker，不提供多实例恢复或租约。
 
-### [ ] T5.11 验证清除原文与在途模型结果竞态
+### [x] T5.11 验证清除原文与在途模型结果竞态
 
 - **依赖**：T5.10、T3.10。
 - **描述**：用阻塞假模型控制“已开始请求 → 清除来源 → 模型返回”和“成功提交 → 清除来源”两个顺序，检查取消状态与结果提交事务的协作。
 - **验收标准**：清除先提交时模型结果不写任何记忆/证据/索引，任务保持 cancelled；结果先提交时正文保留但原文/历史片段清除；之后查询不重新出现片段；明确已发出的远端请求不等于可以撤回，不把本地取消宣传成远端擦除。
+- **执行记录**：新增 `tests/integration/p5_pipeline_test.go` 的两个竞态用例。清除先提交：阻塞假模型收到请求后调用 `source.Service.Redact`，释放模型，结果事务读取到 cancelled 后不写记忆/版本/证据/索引，任务保持 cancelled；结果先提交：成功后清除来源，记忆正文保留、当前/历史证据 quote/location 清空且标记 redacted，搜索不再出现片段。验证：`go test -count=1 ./tests/integration` 通过，包含独立只读连接计数与模型仅收到一次请求的断言。限制：本地取消只保证不提交结果，不承诺撤回已发出的远端请求或擦除远端副本。
 
-### [ ] T5.12 完成崩溃恢复与模型不可用集成验证
+### [x] T5.12 完成崩溃恢复与模型不可用集成验证
 
 - **依赖**：T5.11。
 - **描述**：进程级覆盖接收后、running 后、模型返回后、结果事务中断及结果提交后崩溃；测试模型持续不可用、失败后恢复、无候选和部分可解析输入。
 - **验收标准**：重启后无半份记忆、无多余版本、无丢失 queued 来源；成功任务不重跑；在途尝试计数保留；模型不可用期间可提交/查询/管理；所有结果和状态可通过服务接口检查。
+- **执行记录**：`tests/integration/p5_pipeline_test.go` 在同一真实数据库路径上覆盖接收后重启、领取 running 后重启、模型返回后结果事务中断再重启、成功提交后重启四个顺序；另覆盖模型 503 三次耗尽、已有记忆仍可读取/检索、模型恢复后新任务成功，以及部分候选成功、无效候选跳过、零候选成功。验证：`go test -count=1 ./tests/integration` 通过；`CGO_ENABLED=1 go test -race -count=1 ./...` 通过；`make check` 通过。限制：以关闭/重开真实 SQLite 和事务中断模拟进程崩溃，未执行真实操作系统 kill -9、断电或 P7 容量/备份恢复演练；模型不可用测试使用本地假服务。
 
 ## P6：HTTP 完整接口与调用端联调
 

@@ -52,6 +52,12 @@ func (e *ProviderError) Unwrap() error {
 	return e.Err
 }
 
+// JobReader is the read capability for task-status queries. It is separate
+// from the write transaction so GetJob never needs a write lock.
+type JobReader interface {
+	GetJob(ctx context.Context, id string) (Job, error)
+}
+
 // JobTx is the writable job-state capability. A claim increases Attempts and
 // moves queued to running; terminal states are never claimed again.
 type JobTx interface {
@@ -60,6 +66,7 @@ type JobTx interface {
 	UpdateJob(ctx context.Context, job Job) error
 	ClaimNextJob(ctx context.Context, now time.Time) (Job, bool, error)
 	RequeueRunningJobs(ctx context.Context, now time.Time) (int64, error)
+	FailExhaustedJobs(ctx context.Context, maxAttempts int, reason string, now time.Time) (int64, error)
 }
 
 // Tx is the complete transaction scope for ingestion: memory snapshot,

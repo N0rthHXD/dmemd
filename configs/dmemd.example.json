@@ -1,0 +1,26 @@
+{
+  "listen": "127.0.0.1:18432",
+  "data_dir": "",
+  "database": {
+    "path": "",
+    "busy_timeout": "5s",
+    "max_read_connections": 4
+  },
+  "model": {
+    "name": "example-model",
+    "base_url": "https://model.example.invalid/v1",
+    "api_key": "",
+    "timeout": "60s"
+  },
+  "worker": {
+    "workers": 1,
+    "max_attempts": 3,
+    "retry_delays": [
+      "1s",
+      "5s"
+    ]
+  },
+  "log": {
+    "level": "info"
+  }
+}

@@ -1,0 +1,30 @@
+# Build artifacts
+/bin/
+/dist/
+/dmemd
+/coverage.out
+/coverage.html
+
+# Local databases and SQLite sidecar files
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Real local configuration and credentials
+/config.json
+/config.local.json
+/configs/*.json
+!/configs/dmemd.example.json
+*.credentials.json
+*.key
+*.pem
+.env
+
+# Local backups and performance data
+*.bak
+*.backup
+/backups/
+/bench-results/

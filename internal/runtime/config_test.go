@@ -1,0 +1,211 @@
+package runtime
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestDefaultConfigMeetsArchitectureDefaults(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	cfg := DefaultConfig()
+
+	if cfg.Listen != "127.0.0.1:18432" {
+		t.Fatalf("Listen = %q", cfg.Listen)
+	}
+	if got := cfg.Model.Timeout.Std(); got != 60*time.Second {
+		t.Fatalf("Model.Timeout = %v", got)
+	}
+	if cfg.Worker.Workers != 1 || cfg.Worker.MaxAttempts != 3 {
+		t.Fatalf("worker defaults = %+v", cfg.Worker)
+	}
+	if len(cfg.Worker.RetryDelays) != 2 ||
+		cfg.Worker.RetryDelays[0].Std() != time.Second ||
+		cfg.Worker.RetryDelays[1].Std() != 5*time.Second {
+		t.Fatalf("retry delays = %v", cfg.Worker.RetryDelays)
+	}
+	if cfg.Database.BusyTimeout.Std() != 5*time.Second || cfg.Database.MaxReadConnections != 4 {
+		t.Fatalf("database defaults = %+v", cfg.Database)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("default config invalid: %v", err)
+	}
+}
+
+func TestLoadConfigPartialFileUsesDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	writeConfigFile(t, path, `{
+		"listen": "127.0.0.1:0",
+		"data_dir": "`+filepath.Join(dir, "data")+`",
+		"model": {"name": "test-model"},
+		"log": {"level": "debug"}
+	}`)
+
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if loaded.Path != path {
+		t.Fatalf("Path = %q", loaded.Path)
+	}
+	if loaded.Config.Model.Timeout.Std() != 60*time.Second {
+		t.Fatalf("model timeout default not applied: %v", loaded.Config.Model.Timeout)
+	}
+	if loaded.Config.Database.Path != filepath.Join(dir, "data", "dmemd.db") {
+		t.Fatalf("database path = %q", loaded.Config.Database.Path)
+	}
+	if loaded.Config.Worker.MaxAttempts != 3 {
+		t.Fatalf("max attempts = %d", loaded.Config.Worker.MaxAttempts)
+	}
+}
+
+func TestLoadConfigRejectsPublicPermissionsAndMissingExplicitFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "权限") {
+		t.Fatalf("LoadConfig with 0644 error = %v, want permission error", err)
+	}
+
+	if _, err := LoadConfig(filepath.Join(dir, "missing.json")); err == nil {
+		t.Fatal("LoadConfig with missing explicit path succeeded")
+	}
+}
+
+func TestLoadConfigRejectsUnknownKeysAndTrailingJSON(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"unknown":  `{"unknown_field": true}`,
+		"trailing": `{} {}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(dir, name+".json")
+			writeConfigFile(t, path, body)
+			if _, err := LoadConfig(path); err == nil {
+				t.Fatal("LoadConfig succeeded, want error")
+			}
+		})
+	}
+}
+
+func TestConfigValidateRejectsArchitectureViolations(t *testing.T) {
+	base := DefaultConfig()
+	base.DataDir = t.TempDir()
+	base.Database.Path = filepath.Join(base.DataDir, "dmemd.db")
+
+	cases := map[string]func(*Config){
+		"non-loopback listen": func(cfg *Config) { cfg.Listen = "0.0.0.0:18432" },
+		"multiple workers":    func(cfg *Config) { cfg.Worker.Workers = 2 },
+		"wrong max attempts":  func(cfg *Config) { cfg.Worker.MaxAttempts = 4 },
+		"zero model timeout":  func(cfg *Config) { cfg.Model.Timeout = 0 },
+		"bad model URL":       func(cfg *Config) { cfg.Model.BaseURL = "not-a-url" },
+		"bad log level":       func(cfg *Config) { cfg.Log.Level = "verbose" },
+		"no data directory":   func(cfg *Config) { cfg.DataDir = ""; cfg.Database.Path = "x" },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			cfg := base
+			cfg.Worker.RetryDelays = append([]Duration(nil), base.Worker.RetryDelays...)
+			mutate(&cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("Validate succeeded, want error")
+			}
+		})
+	}
+
+	base.Listen = "localhost:18432"
+	if err := base.Validate(); err != nil {
+		t.Fatalf("localhost loopback rejected: %v", err)
+	}
+}
+
+func TestEnsurePrivateDirAndFileModes(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "private")
+	if err := EnsurePrivateDir(dir); err != nil {
+		t.Fatalf("EnsurePrivateDir: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("dir mode = %04o, want 0700", got)
+	}
+
+	path := filepath.Join(dir, "state.db")
+	file, err := OpenPrivateFile(path, os.O_RDWR)
+	if err != nil {
+		t.Fatalf("OpenPrivateFile: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("file mode = %04o, want 0600", got)
+	}
+	if err := CheckPrivateFile(path); err != nil {
+		t.Fatalf("CheckPrivateFile: %v", err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckPrivateFile(path); err == nil {
+		t.Fatal("CheckPrivateFile accepted 0644")
+	}
+}
+
+func TestPrepareCreatesPrivateDirectories(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.DataDir = filepath.Join(dir, "data")
+	cfg.Database.Path = filepath.Join(cfg.DataDir, "db", "dmemd.db")
+	cfg.Listen = "127.0.0.1:0"
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
+	if err := Prepare(cfg); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	for _, path := range []string{cfg.DataDir, filepath.Dir(cfg.Database.Path), filepath.Join(dir, "config", "dmemd")} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if info.Mode().Perm() != 0o700 {
+			t.Fatalf("%s mode = %04o", path, info.Mode().Perm())
+		}
+	}
+}
+
+func TestDurationJSON(t *testing.T) {
+	var value Duration
+	if err := value.UnmarshalJSON([]byte(`"1m30s"`)); err != nil {
+		t.Fatal(err)
+	}
+	if value.Std() != 90*time.Second {
+		t.Fatalf("duration = %v", value.Std())
+	}
+	if err := value.UnmarshalJSON([]byte(`60`)); err == nil {
+		t.Fatal("numeric duration accepted")
+	}
+}
+
+func writeConfigFile(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -1,0 +1,1091 @@
+openapi: 3.0.3
+info:
+  title: dmemd local memory service
+  version: 1.0.0
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  description: |
+    Local HTTP/1.1 JSON contract for dmemd. This document is descriptive only;
+    it does not generate authentication or business validation. There is no
+    authentication: Authorization headers are optional and ignored. Lists are
+    returned in one response and have no pagination metadata.
+servers:
+  - url: http://127.0.0.1:18432
+security: []
+tags:
+  - name: ingest
+    description: Unified content submission and processing jobs
+  - name: memories
+    description: Current memories, lifecycle, versions, evidence and search
+  - name: sources
+    description: Original submission lookup and redaction
+  - name: health
+    description: Process liveness and database readiness
+
+paths:
+  /v1/memories:
+    post:
+      tags: [ingest]
+      summary: Submit arbitrary JSON content for background extraction
+      description: |
+        Accepts strings, objects, arrays or null as content. Saves the source and
+        a queued job in one transaction, then returns 202 without waiting for a
+        model. app_id and external_id are optional informational source fields.
+      operationId: submitMemoryContent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitRequest'
+            examples:
+              text:
+                summary: Simple text
+                value:
+                  content: 以后请默认使用中文回答。
+              conversation:
+                summary: Conversation object
+                value:
+                  app_id: desktop-assistant
+                  external_id: conversation-42-batch-7
+                  content:
+                    messages:
+                      - role: user
+                        content: 以后请默认使用中文回答。
+                        occurred_at: '2026-10-20T02:00:00Z'
+              structured:
+                summary: Existing structured content
+                value:
+                  content:
+                    preferences:
+                      answer_language: zh-CN
+              array:
+                summary: Array content
+                value:
+                  content:
+                    - role: user
+                      content: 以后请默认使用中文回答。
+                    - role: assistant
+                      content: 好的。
+      responses:
+        '202':
+          description: Source and queued job persisted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubmitResponse'
+              example:
+                source_id: 22222222-2222-4222-8222-222222222222
+                job_id: 33333333-3333-4333-8333-333333333333
+                status: queued
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    get:
+      tags: [memories]
+      summary: List current memories
+      description: |
+        Default state set is active+archived; deleted tombstones are returned
+        only when states explicitly contains deleted. Default limit is 50.
+        Order is updated_at DESC, id ASC. There is no pagination.
+      operationId: listMemories
+      parameters:
+        - name: kinds
+          in: query
+          description: Comma-separated fact,preference,event,procedure
+          schema:
+            type: string
+          example: fact,preference
+        - name: states
+          in: query
+          description: Comma-separated active,archived,deleted
+          schema:
+            type: string
+          example: active,archived
+        - name: created_by_app
+          in: query
+          description: Filter by the app_id captured when the memory was created
+          schema:
+            type: string
+          example: desktop-assistant
+        - name: updated_after
+          in: query
+          description: Inclusive RFC 3339 lower bound; invalid values are ignored
+          schema:
+            type: string
+            format: date-time
+        - name: updated_before
+          in: query
+          description: Inclusive RFC 3339 upper bound; invalid values are ignored
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          description: Positive result limit; missing or invalid values use 50
+          schema:
+            type: integer
+          example: 50
+      responses:
+        '200':
+          description: One filtered result set
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryList'
+              example:
+                items:
+                  - id: 11111111-1111-4111-8111-111111111111
+                    kind: preference
+                    title: 回答语言
+                    content: 用户希望默认使用中文回答。
+                    state: active
+                    version: 3
+                    observed_at: '2026-10-20T02:00:00Z'
+                    created_at: '2026-10-20T02:00:01Z'
+                    updated_at: '2026-10-20T03:00:00Z'
+                    created_by_app: desktop-assistant
+                    origin_source_id: 22222222-2222-4222-8222-222222222222
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v1/memories/search:
+    post:
+      tags: [memories]
+      summary: Keyword Top-K search
+      description: |
+        User text is treated as ordinary keywords, never as FTS syntax. Default
+        match is all, top_k is 20 and states is [active]. Deleted memories are
+        never returned. Explanation appears only when explain=true.
+      operationId: searchMemories
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchRequest'
+            example:
+              query: 回答 语言
+              match: all
+              filters:
+                kinds: [preference]
+                states: [active]
+              top_k: 20
+              explain: true
+      responses:
+        '200':
+          description: One Top-K result set
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResponse'
+              example:
+                items:
+                  - memory:
+                      id: 11111111-1111-4111-8111-111111111111
+                      kind: preference
+                      title: 回答语言
+                      content: 用户希望默认使用中文回答。
+                      state: active
+                      version: 3
+                      observed_at: '2026-10-20T02:00:00Z'
+                      created_at: '2026-10-20T02:00:01Z'
+                      updated_at: '2026-10-20T03:00:00Z'
+                      created_by_app: desktop-assistant
+                      origin_source_id: 22222222-2222-4222-8222-222222222222
+                    score: 0.0000042
+                    snippet: 用户希望默认使用中文回答。
+                    matched_terms: [回答, 语言]
+                    evidence_refs:
+                      - id: 44444444-4444-4444-8444-444444444444
+                        source_id: 22222222-2222-4222-8222-222222222222
+                    explanation:
+                      ranking: bm25
+                      field_weights: [4, 1]
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v1/memories/{id}:
+    parameters:
+      - $ref: '#/components/parameters/MemoryID'
+    get:
+      tags: [memories]
+      summary: Get the current memory snapshot
+      description: Deleted memories remain readable as tombstones by ID.
+      operationId: getMemory
+      responses:
+        '200':
+          description: Current snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Memory'
+              example:
+                id: 11111111-1111-4111-8111-111111111111
+                kind: preference
+                title: 回答语言
+                content: 用户希望默认使用中文回答。
+                state: active
+                version: 3
+                observed_at: '2026-10-20T02:00:00Z'
+                created_at: '2026-10-20T02:00:01Z'
+                updated_at: '2026-10-20T03:00:00Z'
+                created_by_app: desktop-assistant
+                origin_source_id: 22222222-2222-4222-8222-222222222222
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    patch:
+      tags: [memories]
+      summary: Change lifecycle state only
+      description: |
+        Accepts only active or archived. Unknown, missing or unchanged state is
+        a no-op returning the current memory. Content fields are ignored; content
+        corrections must be submitted through POST /v1/memories.
+      operationId: updateMemoryState
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StatePatch'
+            example:
+              state: archived
+      responses:
+        '200':
+          description: Updated current memory
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Memory'
+              example:
+                id: 11111111-1111-4111-8111-111111111111
+                kind: preference
+                title: 回答语言
+                content: 用户希望默认使用中文回答。
+                state: archived
+                version: 4
+                observed_at: '2026-10-20T02:00:00Z'
+                created_at: '2026-10-20T02:00:01Z'
+                updated_at: '2026-10-20T04:00:00Z'
+                created_by_app: desktop-assistant
+                origin_source_id: 22222222-2222-4222-8222-222222222222
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    delete:
+      tags: [memories]
+      summary: Logically delete or permanently purge a memory
+      description: |
+        Default is a logical delete with a deleted tombstone and new revision.
+        purge=true permanently removes the current record, history and dedicated
+        evidence; shared sources remain.
+      operationId: deleteMemory
+      parameters:
+        - name: purge
+          in: query
+          description: true (or 1) permanently purges; any other value is a logical delete
+          schema:
+            type: boolean
+          example: false
+      responses:
+        '200':
+          description: Logical delete or purge result
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/DeleteResponse'
+                  - $ref: '#/components/schemas/PurgeResponse'
+              examples:
+                logical:
+                  value:
+                    id: 11111111-1111-4111-8111-111111111111
+                    state: deleted
+                purge:
+                  value:
+                    id: 11111111-1111-4111-8111-111111111111
+                    purged: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v1/memories/{id}/versions:
+    parameters:
+      - $ref: '#/components/parameters/MemoryID'
+    get:
+      tags: [memories]
+      summary: List complete revision history
+      description: Newest version first; default limit 50; no pagination.
+      operationId: listMemoryVersions
+      parameters:
+        - name: limit
+          in: query
+          description: Positive result limit; missing or invalid values use 50
+          schema:
+            type: integer
+          example: 50
+      responses:
+        '200':
+          description: Version list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevisionList'
+              example:
+                items:
+                  - memory_id: 11111111-1111-4111-8111-111111111111
+                    version: 3
+                    operation: update
+                    reason: 用户更正回答语言
+                    snapshot:
+                      id: 11111111-1111-4111-8111-111111111111
+                      kind: preference
+                      title: 回答语言
+                      content: 用户希望默认使用中文回答。
+                      state: active
+                      version: 3
+                      observed_at: '2026-10-20T02:00:00Z'
+                      created_at: '2026-10-20T02:00:01Z'
+                      updated_at: '2026-10-20T03:00:00Z'
+                      created_by_app: desktop-assistant
+                      origin_source_id: 22222222-2222-4222-8222-222222222222
+                    evidence:
+                      - id: 44444444-4444-4444-8444-444444444444
+                        source_id: 22222222-2222-4222-8222-222222222222
+                        message_id: msg-1
+                        quote: 以后请默认使用中文回答。
+                        location:
+                          field: messages.0.content
+                          start: 0
+                          end: 13
+                        model_name: example-model
+                        redacted: false
+                        created_at: '2026-10-20T02:00:01Z'
+                    created_at: '2026-10-20T03:00:00Z'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v1/memories/{id}/versions/{version}:
+    parameters:
+      - $ref: '#/components/parameters/MemoryID'
+      - $ref: '#/components/parameters/Version'
+    get:
+      tags: [memories]
+      summary: Get one complete historical version
+      operationId: getMemoryVersion
+      responses:
+        '200':
+          description: Version snapshot and complete evidence set
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Revision'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v1/memories/{id}/restorations:
+    parameters:
+      - $ref: '#/components/parameters/MemoryID'
+    post:
+      tags: [memories]
+      summary: Restore a historical version as a new current version
+      description: |
+        Never overwrites history. Restored state is active. Missing or unknown
+        version returns 404; no expected-version or conflict token is required.
+      operationId: restoreMemory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RestoreRequest'
+            example:
+              version: 2
+      responses:
+        '200':
+          description: Restored current memory
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Memory'
+              example:
+                id: 11111111-1111-4111-8111-111111111111
+                kind: preference
+                title: 回答语言
+                content: 用户希望默认使用中文回答。
+                state: active
+                version: 4
+                observed_at: '2026-10-20T02:00:00Z'
+                created_at: '2026-10-20T02:00:01Z'
+                updated_at: '2026-10-20T05:00:00Z'
+                created_by_app: desktop-assistant
+                origin_source_id: 22222222-2222-4222-8222-222222222222
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v1/memories/{id}/evidence:
+    parameters:
+      - $ref: '#/components/parameters/MemoryID'
+    get:
+      tags: [memories]
+      summary: Get the current or a historical version evidence set
+      description: |
+        version absent, 0 or invalid means current. A positive nonexistent
+        version returns 404. Redacted evidence keeps its ID and source_id but
+        never returns quote or location copies.
+      operationId: getMemoryEvidence
+      parameters:
+        - name: version
+          in: query
+          description: Target version; absent/0/invalid means current version
+          schema:
+            type: integer
+          example: 2
+      responses:
+        '200':
+          description: Complete evidence set
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvidenceList'
+              example:
+                items:
+                  - id: 44444444-4444-4444-8444-444444444444
+                    source_id: 22222222-2222-4222-8222-222222222222
+                    message_id: msg-1
+                    quote: 以后请默认使用中文回答。
+                    location:
+                      field: messages.0.content
+                      start: 0
+                      end: 13
+                    model_name: example-model
+                    redacted: false
+                    created_at: '2026-10-20T02:00:01Z'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v1/sources/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [sources]
+      summary: Get a submission and its original content
+      description: Redacted sources retain the ID and status but omit content.
+      operationId: getSource
+      responses:
+        '200':
+          description: Source record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Source'
+              examples:
+                original:
+                  value:
+                    id: 22222222-2222-4222-8222-222222222222
+                    app_id: desktop-assistant
+                    external_id: conversation-42-batch-7
+                    content:
+                      messages:
+                        - role: user
+                          content: 以后请默认使用中文回答。
+                    redacted: false
+                    created_at: '2026-10-20T02:00:01Z'
+                redacted:
+                  value:
+                    id: 22222222-2222-4222-8222-222222222222
+                    redacted: true
+                    redacted_at: '2026-10-20T06:00:00Z'
+                    created_at: '2026-10-20T02:00:01Z'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    delete:
+      tags: [sources]
+      summary: Redact original content and cancel unfinished jobs
+      description: |
+        Clears original content and every evidence quote/location copy in one
+        transaction, keeps the source ID and redacted status, cancels queued or
+        running jobs, and leaves already formed memory text intact.
+      operationId: redactSource
+      responses:
+        '200':
+          description: Redaction result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RedactResponse'
+              example:
+                id: 22222222-2222-4222-8222-222222222222
+                redacted: true
+                cancelled_jobs: 1
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v1/ingest-jobs/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [ingest]
+      summary: Get processing status and result summary
+      operationId: getIngestJob
+      responses:
+        '200':
+          description: Job state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+              example:
+                id: 33333333-3333-4333-8333-333333333333
+                source_id: 22222222-2222-4222-8222-222222222222
+                status: succeeded
+                attempts: 1
+                memory_ids: [11111111-1111-4111-8111-111111111111]
+                created_at: '2026-10-20T02:00:01Z'
+                updated_at: '2026-10-20T02:00:03Z'
+                started_at: '2026-10-20T02:00:02Z'
+                finished_at: '2026-10-20T02:00:03Z'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /healthz:
+    get:
+      tags: [health]
+      summary: Process liveness
+      operationId: healthz
+      responses:
+        '200':
+          description: Process alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              example:
+                status: ok
+
+  /readyz:
+    get:
+      tags: [health]
+      summary: Database readiness
+      description: A model outage does not affect readiness.
+      operationId: readyz
+      responses:
+        '200':
+          description: Database ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              example:
+                status: ready
+        '503':
+          description: Database not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              example:
+                status: unavailable
+
+components:
+  parameters:
+    MemoryID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Version:
+      name: version
+      in: path
+      required: true
+      schema:
+        type: integer
+      example: 2
+
+  responses:
+    BadRequest:
+      description: Request body is not valid JSON
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: 请求体不是有效的 JSON。
+    NotFound:
+      description: Requested resource or version does not exist
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: 资源不存在。
+    InternalError:
+      description: Internal execution failure
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: 内部执行失败。
+    Unavailable:
+      description: Service or database is temporarily unavailable
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: 服务暂不可用。
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          example: 请求体不是有效的 JSON。
+
+    SubmitRequest:
+      type: object
+      description: |
+        All fields are optional. content may be any JSON value, including a
+        string, object, array, number, boolean or null.
+      properties:
+        app_id:
+          type: string
+          description: Optional informational source name; no identity or uniqueness
+          example: desktop-assistant
+        external_id:
+          type: string
+          description: Optional external reference; no uniqueness constraint
+          example: conversation-42-batch-7
+        content:
+          description: Arbitrary JSON content, including null
+      additionalProperties: true
+
+    SubmitResponse:
+      type: object
+      required: [source_id, job_id, status]
+      properties:
+        source_id:
+          type: string
+          format: uuid
+        job_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed, cancelled]
+
+    Memory:
+      type: object
+      required: [id, kind, title, content, state, version, observed_at, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          enum: [fact, preference, event, procedure]
+        title:
+          type: string
+        content:
+          type: string
+        state:
+          type: string
+          enum: [active, archived, deleted]
+        version:
+          type: integer
+          minimum: 1
+        observed_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        created_by_app:
+          type: string
+          description: app_id captured at creation; preserved by updates and restores
+        origin_source_id:
+          type: string
+          format: uuid
+
+    MemoryList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Memory'
+
+    StatePatch:
+      type: object
+      description: Only active and archived are accepted; other fields are ignored.
+      properties:
+        state:
+          type: string
+          enum: [active, archived]
+
+    DeleteResponse:
+      type: object
+      required: [id, state]
+      properties:
+        id:
+          type: string
+          format: uuid
+        state:
+          type: string
+          enum: [deleted]
+
+    PurgeResponse:
+      type: object
+      required: [id, purged]
+      properties:
+        id:
+          type: string
+          format: uuid
+        purged:
+          type: boolean
+          enum: [true]
+
+    Revision:
+      type: object
+      required: [memory_id, version, operation, snapshot, evidence, created_at]
+      properties:
+        memory_id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+          minimum: 1
+        operation:
+          type: string
+          enum: [create, update, add_evidence, archive, activate, delete, restore]
+        reason:
+          type: string
+        snapshot:
+          $ref: '#/components/schemas/Memory'
+        evidence:
+          type: array
+          items:
+            $ref: '#/components/schemas/Evidence'
+        created_at:
+          type: string
+          format: date-time
+
+    RevisionList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Revision'
+
+    RestoreRequest:
+      type: object
+      properties:
+        version:
+          type: integer
+          minimum: 1
+          description: Historical version to copy; missing or unknown returns 404
+
+    Evidence:
+      type: object
+      required: [id, source_id, redacted, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        source_id:
+          type: string
+          format: uuid
+        message_id:
+          type: string
+        quote:
+          type: string
+          description: Absent after source redaction
+        location:
+          $ref: '#/components/schemas/Location'
+        model_name:
+          type: string
+        redacted:
+          type: boolean
+        redacted_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    Location:
+      type: object
+      properties:
+        field:
+          type: string
+          example: messages.0.content
+        start:
+          type: integer
+          minimum: 0
+        end:
+          type: integer
+          minimum: 0
+
+    EvidenceList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Evidence'
+
+    SearchRequest:
+      type: object
+      properties:
+        query:
+          type: string
+          description: Ordinary keywords; empty returns an empty items array
+        match:
+          type: string
+          enum: [all, any]
+          description: Unknown values behave as all
+        filters:
+          $ref: '#/components/schemas/SearchFilters'
+        top_k:
+          type: integer
+          description: Default 20 for missing or non-positive values; no business upper bound
+        explain:
+          type: boolean
+          default: false
+
+    SearchFilters:
+      type: object
+      properties:
+        kinds:
+          type: array
+          description: Recognized values are fact, preference, event, procedure
+          items:
+            type: string
+        states:
+          type: array
+          description: Default is [active]; archived is opt-in; deleted is never returned
+          items:
+            type: string
+        created_by_app:
+          type: string
+        updated_after:
+          type: string
+          format: date-time
+        updated_before:
+          type: string
+          format: date-time
+
+    SearchResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchItem'
+
+    SearchItem:
+      type: object
+      required: [memory, score, snippet, matched_terms, evidence_refs]
+      properties:
+        memory:
+          $ref: '#/components/schemas/Memory'
+        score:
+          type: number
+          description: -bm25; larger is more relevant only within this result set
+        snippet:
+          type: string
+          description: Readable original content, never tokenized index text or HTML
+        matched_terms:
+          type: array
+          items:
+            type: string
+        evidence_refs:
+          type: array
+          items:
+            $ref: '#/components/schemas/EvidenceRef'
+        explanation:
+          $ref: '#/components/schemas/Explanation'
+
+    EvidenceRef:
+      type: object
+      required: [id, source_id]
+      properties:
+        id:
+          type: string
+          format: uuid
+        source_id:
+          type: string
+          format: uuid
+
+    Explanation:
+      type: object
+      required: [ranking, field_weights]
+      properties:
+        ranking:
+          type: string
+          enum: [bm25]
+        field_weights:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items:
+            type: integer
+          example: [4, 1]
+
+    Source:
+      type: object
+      required: [id, redacted, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        app_id:
+          type: string
+        external_id:
+          type: string
+        content:
+          description: Original JSON; omitted after redaction
+        redacted:
+          type: boolean
+        redacted_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    RedactResponse:
+      type: object
+      required: [id, redacted, cancelled_jobs]
+      properties:
+        id:
+          type: string
+          format: uuid
+        redacted:
+          type: boolean
+          enum: [true]
+        cancelled_jobs:
+          type: integer
+          minimum: 0
+
+    Job:
+      type: object
+      required: [id, source_id, status, attempts, memory_ids, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        source_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed, cancelled]
+        attempts:
+          type: integer
+          minimum: 0
+        next_attempt_at:
+          type: string
+          format: date-time
+        error:
+          type: string
+          description: Sanitized failure summary; never a raw model response
+        memory_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string

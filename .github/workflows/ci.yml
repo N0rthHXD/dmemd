@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Go checks and build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up exact Go toolchain
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: .go-version
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Download locked modules
+        run: go mod download
+
+      - name: Run unified checks
+        run: make check

@@ -34,7 +34,7 @@ Authorization: Bearer sk-***
   "messages": [
     {
       "role": "system",
-      "content": "Extract durable memories from the current source. Return only a JSON object with a candidates array. Use action add, update, merge_evidence, or skip. Never invent a target_memory_id. Prefer Chinese memory text when the source is Chinese."
+      "content": "Extract durable memories from the current source. Return only a JSON object with a candidates array. Each candidate must contain content (the memory text). Optional fields are kind (fact, preference, event, or procedure), title (short), and observed_at (RFC3339). If the source corrects a memory in related_memories, set action to \"update\" and target_memory_id to that memory id; otherwise omit action. Never invent a target_memory_id. Return an empty candidates array when nothing durable should be stored. Prefer Chinese memory text when the source is Chinese."
     },
     {
       "role": "user",
@@ -92,7 +92,7 @@ HTTP 状态 `200`：
       "index": 0,
       "message": {
         "role": "assistant",
-        "content": "{\"candidates\":[{\"action\":\"add\",\"kind\":\"preference\",\"title\":\"回答语言\",\"content\":\"用户希望默认使用中文回答。\",\"observed_at\":\"2026-10-20T02:00:00Z\",\"reason\":\"用户明确表达了长期偏好\",\"evidence\":[{\"message_id\":\"msg-1\",\"quote\":\"以后请默认使用中文回答。\",\"field\":\"messages.0.content\",\"start\":0,\"end\":13}]}]}"
+        "content": "{\"candidates\":[{\"content\":\"用户希望默认使用中文回答。\",\"kind\":\"preference\",\"title\":\"回答语言\",\"observed_at\":\"2026-10-20T02:00:00Z\"}]}"
       },
       "finish_reason": "stop"
     }
@@ -106,26 +106,18 @@ HTTP 状态 `200`：
 {
   "candidates": [
     {
-      "action": "add",
-      "target_memory_id": "",
+      "content": "用户希望默认使用中文回答。",
       "kind": "preference",
       "title": "回答语言",
-      "content": "用户希望默认使用中文回答。",
-      "observed_at": "2026-10-20T02:00:00Z",
-      "reason": "用户明确表达了长期偏好",
-      "evidence": [
-        {
-          "message_id": "msg-1",
-          "quote": "以后请默认使用中文回答。",
-          "field": "messages.0.content",
-          "start": 0,
-          "end": 13
-        }
-      ]
+      "observed_at": "2026-10-20T02:00:00Z"
     }
   ]
 }
 ```
+
+默认提示词只要求 `content`，并允许省略有默认值的字段。除非需要更正
+`related_memories` 中的记忆，否则不需要输出 `action`；`reason` 和 `evidence` 不由默认
+提示词请求，但解析器仍接受模型主动返回的这些字段。
 
 ### 3.1 候选字段
 

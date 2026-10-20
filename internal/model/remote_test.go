@@ -65,7 +65,9 @@ func TestProviderMapsRequestAndResponse(t *testing.T) {
 	if len(body.Messages) != 2 || body.Messages[0].Role != "system" || body.Messages[1].Role != "user" {
 		t.Fatalf("messages = %+v", body.Messages)
 	}
-	if !strings.Contains(body.Messages[0].Content, "Never invent a target_memory_id") {
+	if !strings.Contains(body.Messages[0].Content, "content (the memory text)") ||
+		!strings.Contains(body.Messages[0].Content, "target_memory_id") ||
+		!strings.Contains(body.Messages[0].Content, "empty candidates array") {
 		t.Fatalf("system prompt = %q", body.Messages[0].Content)
 	}
 	var payload extractionPayload

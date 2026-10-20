@@ -12,7 +12,10 @@ import (
 )
 
 const systemPrompt = "Extract durable memories from the current source. Return only a JSON object with a candidates array. " +
-	"Use action add, update, merge_evidence, or skip. Never invent a target_memory_id. " +
+	"Each candidate must contain content (the memory text). " +
+	"Optional fields are kind (fact, preference, event, or procedure), title (short), and observed_at (RFC3339). " +
+	"If the source corrects a memory in related_memories, set action to \"update\" and target_memory_id to that memory id; otherwise omit action. " +
+	"Never invent a target_memory_id. Return an empty candidates array when nothing durable should be stored. " +
 	"Prefer Chinese memory text when the source is Chinese."
 
 type chatMessage struct {

@@ -1,7 +1,7 @@
 // Package memory owns the current memory snapshot, immutable revision history,
 // complete evidence sets, lifecycle state and the unified write unit.
 //
-// The package does not expose a direct public write API. New content and
+// The package does not expose a direct HTTP write API. New content and
 // corrections enter through ingest; only state changes, restoration and purge
 // are exposed as management operations.
 package memory

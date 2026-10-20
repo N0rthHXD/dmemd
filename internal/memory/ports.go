@@ -24,11 +24,14 @@ type MemoryService interface {
 	Restore(ctx context.Context, input RestoreInput) (Memory, error)
 }
 
-// Reader is the read capability used by the memory service for snapshots and
-// management lists. Search never uses this interface.
+// Reader is the read capability used by the memory service for snapshots,
+// management lists and immutable history. Search never uses this interface.
 type Reader interface {
 	GetMemory(ctx context.Context, id string) (Memory, error)
 	ListMemories(ctx context.Context, options ListOptions) ([]Memory, error)
+	GetRevision(ctx context.Context, memoryID string, version int) (Revision, error)
+	ListRevisions(ctx context.Context, memoryID string, limit int) ([]Revision, error)
+	ListRevisionEvidence(ctx context.Context, memoryID string, version int) ([]source.Evidence, error)
 }
 
 // Tx is the memory-scoped writable transaction. It also carries evidence and
@@ -49,6 +52,11 @@ type Tx interface {
 
 	UpsertSearchDocument(ctx context.Context, document SearchDocument) error
 	DeleteSearchDocument(ctx context.Context, memoryID string) error
+
+	// PurgeMemory removes the current snapshot, all revisions, revision/evidence
+	// links, dedicated evidence and the search document. Shared evidence and
+	// sources are preserved.
+	PurgeMemory(ctx context.Context, id string) error
 }
 
 // Store runs a short memory transaction. The callback must not perform network
@@ -65,5 +73,5 @@ type Writer interface {
 	Revise(ctx context.Context, tx Tx, input ReviseInput) (Memory, error)
 	ChangeState(ctx context.Context, tx Tx, input StateChangeInput) (Memory, error)
 	RestoreVersion(ctx context.Context, tx Tx, input RestoreInput) (Memory, error)
-	Purge(ctx context.Context, tx Tx, id string) error
+	PurgeInTx(ctx context.Context, tx Tx, id string) error
 }

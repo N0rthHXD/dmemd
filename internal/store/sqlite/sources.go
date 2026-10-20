@@ -214,8 +214,27 @@ func scanEvidenceRows(rows *sql.Rows) ([]source.Evidence, error) {
 	return items, nil
 }
 
+// ScrubJobErrorsBySource replaces non-empty terminal job error summaries for a
+// redacted source. Status, attempts and result IDs are preserved; only text
+// that could retain original content is replaced.
+func (t *Tx) ScrubJobErrorsBySource(ctx context.Context, sourceID, reason string, at time.Time) (int64, error) {
+	result, err := t.tx.ExecContext(ctx, `UPDATE ingest_jobs SET error = ?, updated_at = ?
+		WHERE source_id = ? AND error <> '' AND error <> ? AND status IN (?, ?, ?)`,
+		reason, formatTime(at), sourceID, reason,
+		string(ingest.JobSucceeded), string(ingest.JobFailed), string(ingest.JobCancelled),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("清理来源 %s 的任务错误摘要: %w", sourceID, err)
+	}
+	scrubbed, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("清理来源 %s 的任务错误摘要: %w", sourceID, err)
+	}
+	return scrubbed, nil
+}
+
 // CancelJobsBySource moves queued/running jobs for a source to cancelled while
-// preserving attempts. Terminal jobs are untouched.
+// preserving attempts. Terminal fields other than a scrubbed error are untouched.
 func (t *Tx) CancelJobsBySource(ctx context.Context, sourceID, reason string, at time.Time) (int64, error) {
 	result, err := t.tx.ExecContext(ctx, `UPDATE ingest_jobs SET
 		status = ?, error = ?, next_attempt_at = NULL, updated_at = ?, finished_at = ?

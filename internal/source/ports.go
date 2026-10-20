@@ -16,6 +16,11 @@ type SourceService interface {
 	Redact(ctx context.Context, id string) (RedactResult, error)
 }
 
+// Reader is the read capability used for source lookup.
+type Reader interface {
+	GetSource(ctx context.Context, id string) (Source, error)
+}
+
 // SourceTx is the source-scoped subset of a writable transaction.
 type SourceTx interface {
 	InsertSource(ctx context.Context, source Source) error
@@ -31,10 +36,11 @@ type EvidenceTx interface {
 	RedactEvidenceBySource(ctx context.Context, sourceID string, at time.Time) error
 }
 
-// JobCancellationTx lets source redaction cancel queued/running jobs in the
-// same transaction that removes the original content.
+// JobCancellationTx lets source redaction cancel queued/running jobs and scrub
+// terminal job error summaries in the same transaction that removes content.
 type JobCancellationTx interface {
 	CancelJobsBySource(ctx context.Context, sourceID, reason string, at time.Time) (int64, error)
+	ScrubJobErrorsBySource(ctx context.Context, sourceID, reason string, at time.Time) (int64, error)
 }
 
 // Tx is the capability set available inside one source transaction. The

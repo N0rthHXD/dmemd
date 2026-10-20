@@ -136,8 +136,22 @@ func (t *Tx) InsertRevision(ctx context.Context, revision memory.Revision) error
 	return nil
 }
 
+// GetRevision reads one complete historical version from the read pool.
+func (s *Store) GetRevision(ctx context.Context, memoryID string, version int) (memory.Revision, error) {
+	return getRevision(ctx, s.reader, memoryID, version)
+}
+
 func (t *Tx) GetRevision(ctx context.Context, memoryID string, version int) (memory.Revision, error) {
-	row := t.tx.QueryRowContext(ctx, `SELECT `+revisionColumns+` FROM memory_revisions
+	return getRevision(ctx, t.tx, memoryID, version)
+}
+
+type revisionQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func getRevision(ctx context.Context, q revisionQueryer, memoryID string, version int) (memory.Revision, error) {
+	row := q.QueryRowContext(ctx, `SELECT `+revisionColumns+` FROM memory_revisions
 		WHERE memory_id = ? AND version = ?`, memoryID, version)
 	revision, err := scanRevision(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -146,18 +160,27 @@ func (t *Tx) GetRevision(ctx context.Context, memoryID string, version int) (mem
 	if err != nil {
 		return memory.Revision{}, fmt.Errorf("读取记忆版本 %s@%d: %w", memoryID, version, err)
 	}
-	revision.Evidence, err = t.ListRevisionEvidence(ctx, memoryID, version)
+	revision.Evidence, err = listRevisionEvidence(ctx, q, memoryID, version)
 	if err != nil {
 		return memory.Revision{}, err
 	}
 	return revision, nil
 }
 
+// ListRevisions reads newest-first history from the read pool.
+func (s *Store) ListRevisions(ctx context.Context, memoryID string, limit int) ([]memory.Revision, error) {
+	return listRevisions(ctx, s.reader, memoryID, limit)
+}
+
 func (t *Tx) ListRevisions(ctx context.Context, memoryID string, limit int) ([]memory.Revision, error) {
+	return listRevisions(ctx, t.tx, memoryID, limit)
+}
+
+func listRevisions(ctx context.Context, q revisionQueryer, memoryID string, limit int) ([]memory.Revision, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := t.tx.QueryContext(ctx, `SELECT `+revisionColumns+` FROM memory_revisions
+	rows, err := q.QueryContext(ctx, `SELECT `+revisionColumns+` FROM memory_revisions
 		WHERE memory_id = ? ORDER BY version DESC LIMIT ?`, memoryID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("读取记忆版本列表 %s: %w", memoryID, err)
@@ -170,7 +193,7 @@ func (t *Tx) ListRevisions(ctx context.Context, memoryID string, limit int) ([]m
 		if err != nil {
 			return nil, fmt.Errorf("读取记忆版本列表 %s: %w", memoryID, err)
 		}
-		revision.Evidence, err = t.ListRevisionEvidence(ctx, memoryID, revision.Version)
+		revision.Evidence, err = listRevisionEvidence(ctx, q, memoryID, revision.Version)
 		if err != nil {
 			return nil, err
 		}
@@ -232,9 +255,17 @@ func (t *Tx) LinkRevisionEvidence(ctx context.Context, memoryID string, version 
 }
 
 // ListRevisionEvidence returns one version's complete evidence set ordered by
-// creation time and ID.
+// creation time and ID. It is also available through Reader for read-pool use.
+func (s *Store) ListRevisionEvidence(ctx context.Context, memoryID string, version int) ([]source.Evidence, error) {
+	return listRevisionEvidence(ctx, s.reader, memoryID, version)
+}
+
 func (t *Tx) ListRevisionEvidence(ctx context.Context, memoryID string, version int) ([]source.Evidence, error) {
-	rows, err := t.tx.QueryContext(ctx, `SELECT `+evidenceColumns+`
+	return listRevisionEvidence(ctx, t.tx, memoryID, version)
+}
+
+func listRevisionEvidence(ctx context.Context, q revisionQueryer, memoryID string, version int) ([]source.Evidence, error) {
+	rows, err := q.QueryContext(ctx, `SELECT `+evidenceColumns+`
 		FROM revision_evidence re JOIN evidence e ON e.id = re.evidence_id
 		WHERE re.memory_id = ? AND re.version = ?
 		ORDER BY e.created_at ASC, e.id ASC`, memoryID, version)
@@ -271,6 +302,45 @@ func (t *Tx) UpsertSearchDocument(ctx context.Context, document memory.SearchDoc
 func (t *Tx) DeleteSearchDocument(ctx context.Context, memoryID string) error {
 	if _, err := t.tx.ExecContext(ctx, `DELETE FROM memory_search_docs WHERE memory_id = ?`, memoryID); err != nil {
 		return fmt.Errorf("删除搜索文档 %s: %w", memoryID, err)
+	}
+	return nil
+}
+
+// PurgeMemory permanently removes one memory and its dedicated data. Sources
+// are never deleted. Evidence still linked to another memory's revision is
+// shared and therefore retained. The search document is deleted explicitly so
+// the FTS delete trigger runs inside the same transaction.
+func (t *Tx) PurgeMemory(ctx context.Context, id string) error {
+	var exists int
+	err := t.tx.QueryRowContext(ctx, `SELECT 1 FROM memories WHERE id = ?`, id).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: %s", memory.ErrNotFound, id)
+	}
+	if err != nil {
+		return fmt.Errorf("检查待清除记忆 %s: %w", id, err)
+	}
+
+	if _, err := t.tx.ExecContext(ctx, `DELETE FROM memory_search_docs WHERE memory_id = ?`, id); err != nil {
+		return fmt.Errorf("清除记忆 %s 的搜索文档: %w", id, err)
+	}
+	if _, err := t.tx.ExecContext(ctx, `DELETE FROM evidence
+		WHERE id IN (SELECT evidence_id FROM revision_evidence WHERE memory_id = ?)
+		AND NOT EXISTS (
+			SELECT 1 FROM revision_evidence other
+			WHERE other.evidence_id = evidence.id AND other.memory_id <> ?
+		)`, id, id); err != nil {
+		return fmt.Errorf("清除记忆 %s 的专属证据: %w", id, err)
+	}
+	result, err := t.tx.ExecContext(ctx, `DELETE FROM memories WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("清除记忆 %s: %w", id, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("清除记忆 %s: %w", id, err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("%w: %s", memory.ErrNotFound, id)
 	}
 	return nil
 }

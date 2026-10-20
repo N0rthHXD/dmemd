@@ -554,7 +554,8 @@ paths:
       description: |
         Clears original content and every evidence quote/location copy in one
         transaction, keeps the source ID and redacted status, cancels queued or
-        running jobs, and leaves already formed memory text intact.
+        running jobs, scrubs terminal job error summaries that could retain
+        original text, and leaves already formed memory text intact.
       operationId: redactSource
       responses:
         '200':

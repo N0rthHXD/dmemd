@@ -2,7 +2,7 @@
 
 ## 执行说明
 
-本清单依据《系统 AI 记忆服务架构设计.md》（v1）及 `tech-stack.md`、`project-structure.md`、`plan.md`。共保留 67 个任务，当前执行 P1–P6 的 57 项；P7（T7.1–T7.10）共 10 项暂缓。P1（T1.1–T1.9）与 P2（T2.1–T2.9）已于 2026-10-20 完成验收并记录；P3–P6 尚未开始，不能把规划文档、P1 骨架或 P2 存储基础视为后续业务功能完成。
+本清单依据《系统 AI 记忆服务架构设计.md》（v1）及 `tech-stack.md`、`project-structure.md`、`plan.md`。共保留 67 个任务，当前执行 P1–P6 的 57 项；P7（T7.1–T7.10）共 10 项暂缓。P1（T1.1–T1.9）、P2（T2.1–T2.9）与 P3（T3.1–T3.10）已于 2026-10-20 完成验收并记录；P4–P6 尚未开始，不能把规划文档、已完成阶段基础视为后续业务功能完成。
 
 每个任务可以单独交给 Code Agent。执行时读取本任务、上述四份依据、适用的仓库指令和已完成依赖；只实现本任务范围，不提前引入后续功能。明确依赖是最低前置条件，阶段入口还要求上一阶段验收通过。当前在 T6.9 验收后结束，不自动进入 P7；用户明确恢复或指定执行后再开展暂缓任务。每项交付包含代码/文档、适当测试、运行命令和结果。测试不依赖真实模型或生产数据；CI 常规测试使用临时真实 SQLite 与可控假模型。P1–P6 原有的功能、事务、重试和恢复测试仍须完成。
 
@@ -140,65 +140,75 @@
 
 ## P3：记忆、版本与来源生命周期
 
-### [ ] T3.1 实现内部记忆创建与统一写入单元
+### [x] T3.1 实现内部记忆创建与统一写入单元
 
 - **依赖**：T2.9。
 - **描述**：在 memory 服务实现内部创建与统一变更单元，生成 UUID、active 状态、version=1、UTC 时间；在调用方事务中写快照、版本、完整证据和派生索引。使用 T1.7 的搜索文档能力注入，生产构造器在 P4 接入。
 - **验收标准**：创建后完整快照/版本/证据/索引原子可读；事务可由 Worker 外层持有且不嵌套；失败全部回滚；仅提供内部能力，不新增公共直接写入 API。
+- **执行记录**：新增 `internal/memory/service.go`、`internal/memory/evidence.go`，扩展 `internal/memory/ports.go`，在 `internal/store/sqlite/memories.go` 增加读池版本/证据读取。`Create` 只接收调用方已开启的 `memory.Tx`，生成 UUID/active/version=1/UTC 时间，在同一事务写入快照、完整版本、证据关联和搜索文档；缺少证据 ID/时间时补齐，已存在证据只复用。验证：`go test -count=1 ./internal/memory` 通过 `TestCreateWritesSnapshotRevisionEvidenceAndIndex`（快照/版本/证据/搜索文档可读）与 `TestCreateRollsBackEveryTableOnCallerFailure`（回调失败后五张表均为 0）。限制：生产 NFC/分词搜索文档构造器仍由 T4.1 接入，P3 测试注入 `testutil.DocumentBuilder`；未新增 HTTP 或公共直接写入端点。
 
-### [ ] T3.2 实现内容更正与完整版本记录
+### [x] T3.2 实现内容更正与完整版本记录
 
 - **依赖**：T3.1。
 - **描述**：实现内部内容更新，保留 ID、创建时间及创建应用归属，递增版本，记录 observed_at、操作类型与原因，并同步当前快照和搜索文档。
 - **验收标准**：每次有效内容变更产生完整新版本；旧版本不被覆盖；版本从当前持久化值生成，不要求调用方预期版本；证据更正不自动继承支持旧结论的证据。
+- **执行记录**：在 `internal/memory/service.go` 实现 `Revise`：从持久化当前快照读取版本并加一，保留 ID、`created_at`、`created_by_app`、`origin_source_id`，带入 kind/title/content/observed_at，写完整新版本并同步搜索文档。内容更正只使用本次显式证据，不自动复制旧版本证据。验证：`go test -count=1 ./internal/memory` 通过 `TestReviseKeepsHistoryAndDoesNotInheritOldEvidence`（v1 证据保留、v2 无旧结论证据、创建元数据不变）。限制：调用方仍须在 ingest 层完成候选合并决策；P3 不提供预期版本条件或冲突协议。
 
-### [ ] T3.3 实现证据定位与纯证据变更版本
+### [x] T3.3 实现证据定位与纯证据变更版本
 
 - **依赖**：T3.2。
 - **描述**：根据来源和可选消息标识定位原文片段，记录找到的位置；无法定位时保留来源关联。实现补充证据生成新版本，并区分完整新证据集合、重复关联和旧结论证据。
 - **验收标准**：定位失败不拒绝整批；消息标识/片段/模型名均可选；只增加证据也生成版本；每版本可独立读出完整集合；完全重复、未改变集合的处理不制造无意义版本；不要求调用方提供证据。
+- **执行记录**：新增 `internal/source/locate.go`（`LocateQuote`、`NewEvidence`），在 `internal/memory/evidence.go` 实现证据补齐、去重、复用与集合比较，在 `Revise` 中区分完整更正集合与 `add_evidence` 合并。定位按可选消息 ID 搜索解码后的 JSON，返回点分字段路径与 rune 偏移；无法定位仍保留来源关联。验证：`go test -count=1 ./internal/source ./internal/memory` 通过 `TestLocateQuoteFindsMessageAndTopLevelText`、`TestLocateQuoteHandlesRootStringAndInvalidJSON`、`TestAddEvidenceCreatesVersionAndIgnoresDuplicates`（补证生成 v2、重复补证不增版本、同集合更新不增版本）。限制：定位为尽力而为，不解析外部消息 ID 协议；P5 负责从来源构造候选证据。
 
-### [ ] T3.4 实现记忆列表与当前快照查询
+### [x] T3.4 实现记忆列表与当前快照查询
 
 - **依赖**：T3.3。
 - **描述**：提供 memory 服务当前快照和管理列表，按契约支持类型、状态、创建来源应用等过滤以及可选 limit，区分读取墓碑与全文搜索规则。
 - **验收标准**：不存在 ID 返回不存在错误；已删除快照可按契约作为墓碑读取；列表默认最近更新 50 条；无下一页信息；不将 app_id 当作隔离或授权条件。
+- **执行记录**：在 `internal/memory/service.go` 实现 `Get`/`List`：`Get` 直接返回当前快照（含 deleted 墓碑）；`List` 空状态默认 `active,archived`，其余过滤和默认 50 条、`updated_at DESC, id ASC` 由 `internal/store/sqlite/memories.go` 执行，无分页字段。验证：`go test -count=1 ./internal/memory ./internal/store/sqlite` 通过 `TestLifecycleArchiveDeleteRestoreAndEvidenceQueries`（墓碑读取、默认列表排除 deleted）、`TestListMemoriesDefaultsFiltersAndOrdering`（50 条、过滤、稳定排序）。限制：列表是管理读取能力，不代表 P4 关键词检索；`app_id` 仅过滤字段，不做授权隔离。
 
-### [ ] T3.5 实现历史版本与版本证据查询
+### [x] T3.5 实现历史版本与版本证据查询
 
 - **依赖**：T3.4。
 - **描述**：提供版本列表、指定版本、当前/指定版本证据查询；按契约处理 limit 与证据版本参数。
 - **验收标准**：可按版本追溯原始来源；历史内容/证据与当时快照一致；不存在记忆或版本返回不存在错误；证据引用不依赖调用方额外字段；查询不修改历史。
+- **执行记录**：扩展 `internal/memory/ports.go` 的 `Reader`，在 `internal/store/sqlite/memories.go` 增加读池 `GetRevision`/`ListRevisions`/`ListRevisionEvidence`，并复用同一查询逻辑供事务内使用；`internal/memory/service.go` 实现 `ListVersions`、`GetVersion`、`GetEvidence`，版本为 0/负数时取当前版本，显式版本不存在返回 `memory.ErrNotFound`。验证：`go test -count=1 ./internal/memory ./internal/store/sqlite` 通过 `TestLifecycleArchiveDeleteRestoreAndEvidenceQueries`（当前/历史证据、缺失版本）、`TestMemoryRevisionAndEvidenceRoundTrip`（完整快照与证据集合、历史顺序）。限制：版本列表默认/显式 limit 无业务上限；P3 未提供 HTTP 参数解析。
 
-### [ ] T3.6 实现归档与状态恢复
+### [x] T3.6 实现归档与状态恢复
 
 - **依赖**：T3.5。
 - **描述**：实现状态修改，归档和重新激活都使用统一变更单元记录版本；同步派生搜索文档状态，不实现自动到期任务。
 - **验收标准**：状态变化产生新版本；归档条目仍可供显式检索，默认查询不返回；重新 active 后可以默认检索；无状态变化按契约处理且不无端增加版本。
+- **执行记录**：在 `internal/memory/lifecycle.go` 实现 `UpdateState`/`ChangeState`：未知或与当前相同的状态不产生版本；归档与重新激活复制当前完整证据集合并生成 `archive`/`activate` 版本，归档同步保留搜索文档并更新状态。验证：`go test -count=1 ./internal/memory` 通过 `TestLifecycleArchiveDeleteRestoreAndEvidenceQueries`（归档/激活版本与证据、同状态不增版本、默认管理列表行为）。限制：不运行自动到期任务；默认关键词检索排除归档由 P4 实现。
 
-### [ ] T3.7 实现逻辑删除与墓碑
+### [x] T3.7 实现逻辑删除与墓碑
 
 - **依赖**：T3.6。
 - **描述**：将删除实现为 state=deleted 的新版本，保留当前墓碑、历史和证据，事务内移除派生搜索条目。
 - **验收标准**：历史仍可读取；索引中没有 deleted 条目；任何全文检索不返回删除记录；失败时状态、版本和索引全部回滚。
+- **执行记录**：在 `internal/memory/lifecycle.go` 实现 `Delete`/`deleteInTx`：以 `state=deleted` 生成新版本，保留墓碑、历史和证据，并在同一事务删除派生搜索文档；重复删除不增版本。验证：`go test -count=1 ./internal/memory` 通过 `TestLifecycleArchiveDeleteRestoreAndEvidenceQueries`（墓碑可读、索引移除、历史保留）与 `TestDeleteRollsBackStateRevisionAndIndexTogether`（索引删除失败后状态、版本和索引全部回滚）。限制：任何全文检索必须排除 deleted 的规则由 P4 查询实现；P3 只保证索引中不再有条目。
 
-### [ ] T3.8 实现从历史版本恢复
+### [x] T3.8 实现从历史版本恢复
 
 - **依赖**：T3.7。
 - **描述**：读取指定旧版本并复制内容为当前新版本，按契约恢复到 active，维护完整证据与索引；已清除原文不从历史恢复。
 - **验收标准**：新版本号高于恢复前当前版本；被恢复的历史版本保留；归档/删除记忆可重新进入默认检索；不存在版本返回不存在错误；已 redacted 来源及证据片段不会重新出现原文。
+- **执行记录**：在 `internal/memory/lifecycle.go` 实现 `Restore`/`RestoreVersion`：读取指定历史版本，复制内容、`observed_at`、创建应用和证据集合为新的 `active` 版本，版本号高于恢复前当前值，旧版本不被改写；已清除证据只保留 `redacted` 关联。验证：`go test -count=1 ./internal/memory ./tests/integration/...` 通过 `TestLifecycleArchiveDeleteRestoreAndEvidenceQueries`（删除后恢复、版本号递增、证据复制）与 `TestSourceRedactionKeepsBodyAndPreventsEvidenceRestoration`（清除后恢复不重现片段）。限制：恢复不绕过来源清除；已发出的远端模型请求不在本任务撤回。
 
-### [ ] T3.9 实现永久清除记忆
+### [x] T3.9 实现永久清除记忆
 
 - **依赖**：T3.8。
 - **描述**：事务内删除指定记忆的当前、历史、版本关联、专属证据和索引；共享证据仅在无其他引用时清除，来源记录按架构保留。
 - **验收标准**：清除后记忆及各版本不存在、搜索无结果；共享来源和其他记忆/证据关联完整；外键检查通过；中途失败全部回滚，不误删原始来源。
+- **执行记录**：在 `internal/store/sqlite/memories.go` 实现 `PurgeMemory`，在 `internal/memory/lifecycle.go` 实现 `Purge`/`PurgeInTx`：同一事务删除搜索文档、仅被该记忆引用的证据、当前快照及级联历史/版本证据关联；共享证据和来源记录保留。验证：`go test -count=1 ./internal/memory ./tests/integration/...` 通过 `TestPurgeRemovesDedicatedDataAndKeepsSharedEvidence`（专属证据删除、共享证据/来源保留、外键干净、清除回滚）与集成 `TestP3LifecycleVersionEvidenceRedactionAndPurge`。限制：永久清除是数据库行删除，不承诺文件块取证级擦除；备份副本不在 P3 处理。
 
-### [ ] T3.10 实现来源查询、原文清除与任务取消
+### [x] T3.10 实现来源查询、原文清除与任务取消
 
 - **依赖**：T3.9、T2.6。
 - **描述**：实现来源查询和清除服务；同一事务清空来源原文、全部关联证据片段及定位中的原文副本，保留标识和 redacted；把 queued/running 相关任务设为 cancelled，清理会暴露原文的任务错误字段。记忆正文继续保留。
 - **验收标准**：当前/历史证据查询不再泄露片段；来源仍返回 ID 和 redacted；queued/running 不再可正常执行；succeeded 不重跑；事务失败不出现“原文清了但任务未取消”；清除重复调用的行为按契约稳定，不宣称文件块取证级擦除。
+- **执行记录**：新增 `internal/source/service.go`，在 `internal/source/ports.go` 定义读能力与任务错误清理，在 `internal/store/sqlite/sources.go` 实现 `ScrubJobErrorsBySource`。`Redact` 同一事务清空来源原文、全部历史证据片段/定位并保留 `redacted`，取消 queued/running 任务并把终态非空错误摘要替换为固定脱敏说明；重复清除稳定。验证：`go test -count=1 ./internal/source ./tests/integration/...` 通过 `TestRedactClearsSourceEvidenceAndCancelsOnlyPendingJobs`（只取消未完成任务、终态错误清理、重复清除不改时间）、`TestRedactRollsBackWhenAnyStepFails`（原文、证据和任务状态全部回滚）、`TestP3LifecycleVersionEvidenceRedactionAndPurge`。限制：清除不撤回已发送的远端请求，也不宣称存储介质擦除。
 
 ## P4：中文关键词检索
 

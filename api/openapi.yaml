@@ -914,7 +914,10 @@ components:
       properties:
         query:
           type: string
-          description: Ordinary keywords; empty returns an empty items array
+          description: >-
+            Ordinary keywords; empty or punctuation-only input returns an empty
+            items array. Whitespace and punctuation separate groups; continuous
+            Chinese characters are matched as an adjacent phrase.
         match:
           type: string
           enum: [all, any]
@@ -970,9 +973,12 @@ components:
           description: -bm25; larger is more relevant only within this result set
         snippet:
           type: string
-          description: Readable original content, never tokenized index text or HTML
+          description: >-
+            Readable original content, never tokenized index text or HTML;
+            long content is truncated around the first match with an ellipsis.
         matched_terms:
           type: array
+          description: Query groups actually found in the title or content.
           items:
             type: string
         evidence_refs:

@@ -9,7 +9,26 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/memory"
 )
 
-// Match controls how whitespace-separated query groups are combined.
+const (
+	// DefaultTopK is the contracted result count when top_k is missing or
+	// non-positive.
+	DefaultTopK = 20
+	// DefaultRelatedLimit is the fixed maximum number of related active
+	// memories supplied to background extraction.
+	DefaultRelatedLimit = 10
+	// MaxRelatedQueryGroups bounds the keyword groups derived from one source
+	// when building extraction context. The full user submission is still
+	// accepted; only this derived query is bounded.
+	MaxRelatedQueryGroups = 32
+	// DefaultSnippetRunes bounds a readable snippet taken from original content.
+	DefaultSnippetRunes = 160
+	// FieldWeightTitle and FieldWeightContent are the FTS5 BM25 column weights.
+	FieldWeightTitle   = 4
+	FieldWeightContent = 1
+)
+
+// Match controls how whitespace/punctuation separated query groups are
+// combined.
 type Match string
 
 const (
@@ -35,6 +54,31 @@ type Request struct {
 	Filters Filters
 	TopK    int
 	Explain bool
+}
+
+// Group is one contiguous query unit. Text is the normalized, readable form
+// used for matched_terms; Tokens is the FTS token sequence (continuous Han
+// characters become one token per character).
+type Group struct {
+	Text   string
+	Tokens []string
+}
+
+// Query is the normalized plan passed to the storage search capability.
+// Expression is compiled only from quoted, escaped tokens and is always bound
+// as a parameter; raw user text is never used as FTS syntax.
+type Query struct {
+	Match      Match
+	Groups     []Group
+	Expression string
+	Filters    Filters
+	TopK       int
+}
+
+// Hit is a storage-level match before snippet and evidence assembly.
+type Hit struct {
+	MemoryID string
+	BM25     float64
 }
 
 // EvidenceRef is a lightweight current-version evidence reference. Quote text
@@ -65,26 +109,25 @@ type Result struct {
 	Items []Item `json:"items"`
 }
 
+// RebuildResult reports a successful, committed index rebuild.
+type RebuildResult struct {
+	Indexed  int           `json:"indexed"`
+	Duration time.Duration `json:"duration"`
+}
+
 // SearchService is the public keyword search capability.
 type SearchService interface {
 	Search(ctx context.Context, request Request) (Result, error)
 }
 
-// Query is the normalized plan passed to the storage search capability.
-type Query struct {
-	Match   Match
-	Terms   []string
-	Filters Filters
-	TopK    int
+// RelatedService exposes keyword-based context selection to ingest without
+// changing the public search request/response contract.
+type RelatedService interface {
+	RelatedActive(ctx context.Context, text string, limit int) ([]memory.Memory, error)
 }
 
-// Hit is a storage-level match before snippet and evidence assembly.
-type Hit struct {
-	MemoryID string
-	BM25     float64
-}
-
-// Searcher is the read capability implemented by store/sqlite.
-type Searcher interface {
-	Search(ctx context.Context, query Query) ([]Hit, error)
+// IndexMaintainer rebuilds derived search documents and FTS from current
+// business snapshots.
+type IndexMaintainer interface {
+	RebuildIndex(ctx context.Context) (RebuildResult, error)
 }

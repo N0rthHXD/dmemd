@@ -31,7 +31,7 @@ README 中的开发入口与这些命令保持一致。
 - `internal/testutil` 提供独立临时数据库、只读检查连接、确定性搜索文档构造器、事务故障注入点
   和可控假模型；存储契约见 `docs/contracts/storage.md`。
 
-## 4. 当前测试覆盖（P1–P3）
+## 4. 当前测试覆盖（P1–P4）
 
 | 测试 | 覆盖内容 |
 | --- | --- |
@@ -43,7 +43,10 @@ README 中的开发入口与这些命令保持一致。
 | `internal/store/sqlite/store_test.go` | 单写连接、读池逐连接 PRAGMA、读连接只读、文件/伴随文件权限、迁移前不就绪、重开数据库 |
 | `internal/store/sqlite/tx_test.go` | 提交、回调错误、SQL 失败、取消、嵌套事务拒绝、panic 回滚 |
 | `internal/store/sqlite/migrate_test.go` | 顺序迁移、重复启动、失败回滚与重试、未知版本、版本唯一键、来源标识非唯一 |
-| `internal/store/sqlite/search_test.go` | 外部内容 FTS5 插入/更新/删除触发器、归档保留、索引重建 |
+| `internal/store/sqlite/search_test.go` | 外部内容 FTS5 插入/更新/删除触发器、归档保留、FTS 重建 |
+| `internal/store/sqlite/search_query_test.go` | 中文短语、过滤、BM25 权重、时间/ID 平局排序、Top-K、快照重建与失败回滚 |
+| `internal/retrieval/*_test.go` | NFC/大小写/中英文分词、安全 FTS 编译、命中组、可读摘要和文档构造器 |
+| `internal/runtime/services_test.go` | 生产组装注入同一规范化构造器并完成创建→检索 |
 | `internal/store/sqlite/sources_test.go` | 来源/任务原子插入与回滚、原始 JSON 形态、缺少可选标识、重复提交不同 ID、存储级重复清除 |
 | `internal/store/sqlite/jobs_test.go` | 领取顺序、到期时间、尝试计数、终态不重复领取、结果/错误持久化、running 重排、来源取消 |
 | `internal/store/sqlite/memories_test.go` | 快照/完整版本/证据往返、列表默认 50 条、过滤、稳定排序、墓碑读取 |
@@ -53,11 +56,12 @@ README 中的开发入口与这些命令保持一致。
 | `internal/testutil` | 临时数据库并行隔离、权限检查、故障注入点、假模型成功/失败/延迟/畸形/阻塞控制 |
 | `tests/integration/p2_transactions_test.go` | 真实 SQLite 跨表提交与分步失败回滚、FTS 一致性和任务结果字段 |
 | `tests/integration/p3_lifecycle_test.go` | 跨模块创建→更正→归档→删除→恢复→清除原文→永久清除，含任务取消与外键检查 |
+| `tests/integration/p4_search_test.go` | 中文一/二字/长词、中英混合、标点、大小写、规范化等价、all/any、过滤、摘要/证据/解释、生命周期、重建与相关 active 上下文 |
 | `tests/integration/readiness_test.go` | 真实数据库驱动 readyz、关闭后 503、模型地址不可达不影响就绪 |
 | `tests/integration/sqlite_baseline_test.go` | SQLite 版本、WAL、外键、FTS5、CGO=0 兼容 |
 | `tests/integration/unicode_baseline_test.go` | x/text NFC 基线与中文保持 |
 
-后续阶段按任务增加检索、Worker、HTTP 契约和进程恢复测试；未实现能力不提前创建占位测试。
+后续阶段按任务增加 Worker、HTTP 契约和进程恢复测试；未实现能力不提前创建占位测试。
 
 ## 5. CI
 
@@ -71,6 +75,7 @@ CI 不保存凭据或用户数据库，也不配置生产部署。
 ## 6. 故障与性能测试边界
 
 P2 已覆盖真实 SQLite 事务回滚、跨表原子性、索引触发器和测试用事务故障注入；P3 已覆盖记忆
-写入/删除/清除回滚、历史证据清除和来源任务取消。模型超时/失败、在途取消竞态、进程崩溃恢复
-等按 P5–P6 任务继续验证。十万条容量与性能实测属于暂缓的 P7；其规格见
+写入/删除/清除回滚、历史证据清除和来源任务取消；P4 已覆盖中文检索、FTS 注入防护、生命周期
+索引一致性、快照重建回滚和后台相关 active 上下文。模型超时/失败、在途取消竞态、进程崩溃
+恢复等按 P5–P6 任务继续验证。十万条容量与性能实测属于暂缓的 P7；其规格见
 `docs/performance.md`，当前未执行，不能宣称性能验收通过。

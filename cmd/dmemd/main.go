@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	appruntime "github.com/N0rthHXD/dmemd/internal/runtime"
+	"github.com/N0rthHXD/dmemd/internal/store/sqlite"
 )
 
 var version = "dev"
@@ -69,17 +70,37 @@ func run(args []string, stdout, stderr io.Writer) error {
 		"listen", loaded.Config.Listen,
 	)
 
-	// P1 has no database yet. Keep readiness false instead of reporting a
-	// database that does not exist; P2 replaces this probe with the real one.
-	ready := appruntime.ReadinessFunc(func(context.Context) error {
-		return errors.New("database is not available until P2")
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	store, err := sqlite.Open(ctx, sqlite.Config{
+		Path:               loaded.Config.Database.Path,
+		BusyTimeout:        loaded.Config.Database.BusyTimeout.Std(),
+		MaxReadConnections: loaded.Config.Database.MaxReadConnections,
 	})
-	app, err := appruntime.New(loaded.Config, logger, ready)
 	if err != nil {
+		return fmt.Errorf("初始化数据库: %w", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		_ = store.Close()
+		return fmt.Errorf("应用数据库迁移: %w", err)
+	}
+	if err := store.CheckPermissions(); err != nil {
+		_ = store.Close()
+		return fmt.Errorf("检查数据库权限: %w", err)
+	}
+	logger.Info("database ready", "path", store.Path())
+
+	app, err := appruntime.New(loaded.Config, logger, store)
+	if err != nil {
+		_ = store.Close()
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	return app.Run(ctx)
+	runErr := app.Run(ctx)
+	closeErr := store.Close()
+	if runErr != nil || closeErr != nil {
+		return errors.Join(runErr, closeErr)
+	}
+	return nil
 }

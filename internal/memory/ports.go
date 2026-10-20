@@ -24,6 +24,13 @@ type MemoryService interface {
 	Restore(ctx context.Context, input RestoreInput) (Memory, error)
 }
 
+// Reader is the read capability used by the memory service for snapshots and
+// management lists. Search never uses this interface.
+type Reader interface {
+	GetMemory(ctx context.Context, id string) (Memory, error)
+	ListMemories(ctx context.Context, options ListOptions) ([]Memory, error)
+}
+
 // Tx is the memory-scoped writable transaction. It also carries evidence and
 // derived-index capabilities so one write unit can commit snapshot, revision,
 // complete evidence set and search document together.

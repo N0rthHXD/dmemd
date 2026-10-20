@@ -1,0 +1,42 @@
+-- Derived search index. memory_search_docs keeps original text for snippets and
+-- normalized terms for FTS5. The external-content FTS table is synchronized by
+-- triggers and can be rebuilt from memory_search_docs at any time.
+
+CREATE TABLE memory_search_docs (
+    row_id        INTEGER PRIMARY KEY,
+    memory_id     TEXT NOT NULL UNIQUE,
+    state         TEXT NOT NULL,
+    title         TEXT NOT NULL,
+    content       TEXT NOT NULL,
+    title_terms   TEXT NOT NULL,
+    content_terms TEXT NOT NULL,
+    updated_at    TEXT NOT NULL,
+    FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_memory_search_docs_state ON memory_search_docs(state);
+
+CREATE VIRTUAL TABLE memory_fts USING fts5(
+    title_terms,
+    content_terms,
+    content = 'memory_search_docs',
+    content_rowid = 'row_id',
+    tokenize = 'unicode61'
+);
+
+CREATE TRIGGER memory_search_docs_ai AFTER INSERT ON memory_search_docs BEGIN
+    INSERT INTO memory_fts(rowid, title_terms, content_terms)
+    VALUES (new.row_id, new.title_terms, new.content_terms);
+END;
+
+CREATE TRIGGER memory_search_docs_ad AFTER DELETE ON memory_search_docs BEGIN
+    INSERT INTO memory_fts(memory_fts, rowid, title_terms, content_terms)
+    VALUES ('delete', old.row_id, old.title_terms, old.content_terms);
+END;
+
+CREATE TRIGGER memory_search_docs_au AFTER UPDATE ON memory_search_docs BEGIN
+    INSERT INTO memory_fts(memory_fts, rowid, title_terms, content_terms)
+    VALUES ('delete', old.row_id, old.title_terms, old.content_terms);
+    INSERT INTO memory_fts(rowid, title_terms, content_terms)
+    VALUES (new.row_id, new.title_terms, new.content_terms);
+END;

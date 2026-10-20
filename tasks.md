@@ -2,7 +2,7 @@
 
 ## 执行说明
 
-本清单依据《系统 AI 记忆服务架构设计.md》（v1）及 `tech-stack.md`、`project-structure.md`、`plan.md`。共保留 67 个任务，当前执行 P1–P6 的 57 项；P7（T7.1–T7.10）共 10 项暂缓。P1（T1.1–T1.9）已于 2026-10-20 完成验收并记录；P2–P6 尚未开始，不能把规划文档或 P1 骨架视为后续业务功能完成。
+本清单依据《系统 AI 记忆服务架构设计.md》（v1）及 `tech-stack.md`、`project-structure.md`、`plan.md`。共保留 67 个任务，当前执行 P1–P6 的 57 项；P7（T7.1–T7.10）共 10 项暂缓。P1（T1.1–T1.9）与 P2（T2.1–T2.9）已于 2026-10-20 完成验收并记录；P3–P6 尚未开始，不能把规划文档、P1 骨架或 P2 存储基础视为后续业务功能完成。
 
 每个任务可以单独交给 Code Agent。执行时读取本任务、上述四份依据、适用的仓库指令和已完成依赖；只实现本任务范围，不提前引入后续功能。明确依赖是最低前置条件，阶段入口还要求上一阶段验收通过。当前在 T6.9 验收后结束，不自动进入 P7；用户明确恢复或指定执行后再开展暂缓任务。每项交付包含代码/文档、适当测试、运行命令和结果。测试不依赖真实模型或生产数据；CI 常规测试使用临时真实 SQLite 与可控假模型。P1–P6 原有的功能、事务、重试和恢复测试仍须完成。
 
@@ -75,59 +75,68 @@
 
 ## P2：SQLite 与一致性基础
 
-### [ ] T2.1 实现 SQLite 连接与全部连接初始化
+### [x] T2.1 实现 SQLite 连接与全部连接初始化
 
 - **依赖**：T1.9。
 - **描述**：实现单写连接、小型读池和关闭，统一设置 WAL、外键、FULL 同步及有界等待。把真实数据库探活接入 runtime 就绪能力；确保新建/替换连接同样初始化。
 - **验收标准**：真实文件库运行；逐连接读回并验证配置；读池连接更新不丢 PRAGMA；写连接上限为一；数据库不可用时 readyz 为 503，未配置/不可达模型不使其失败；权限检查覆盖伴随文件。
+- **执行记录**：新增 `internal/store/sqlite/store.go`、`internal/store/sqlite/codec.go`、`internal/store/sqlite/store_test.go`、`tests/integration/readiness_test.go`，更新 `cmd/dmemd/main.go`、`internal/runtime/app.go`、`docs/contracts/storage.md`。实现单写连接（`MaxOpenConns=1`）、默认 4 连接只读读池、DSN 逐连接设置 `journal_mode=WAL`/`foreign_keys=1`/`synchronous=FULL`/`busy_timeout`，读连接额外 `query_only=1`；数据库与目录分别以 0600/0700 创建，启动检查并收窄 WAL/SHM/journal 权限；迁移完成后 `Store.Ready` 探活写、读连接并接入 `/readyz`。验证：`go test -v -count=1 ./internal/store/sqlite` 通过 `TestOpenConfiguresWriterAndEveryReadConnection`（含 4 条读连接逐条 PRAGMA、替换连接和读连接拒写）、`TestDatabaseAndSidecarPermissions`、`TestReadyRequiresMigrationAndWorkingPools`、`TestReopenUsesExistingMigrationsAndData`、`TestOpenAcceptsURISpecialCharactersInPath`；`go test -v -count=1 ./tests/integration` 通过 `TestRealDatabaseDrivesReadinessOnly`（真实库 readyz=200、关闭后 503、模型地址不可达不影响）。二进制冒烟：临时配置启动 `./bin/dmemd`，`/healthz` 返回 `{"status":"ok"}`、`/readyz` 返回 `{"status":"ready"}`，SIGTERM 后日志出现 `http server stopped`，数据目录 0700、数据库 0600；`make check` 通过；CGO 竞争检测通过。限制：尚未实现备份（P7/T7.6）；当前只验证 `linux/amd64`；业务路由和 Worker 尚未接入。
 
-### [ ] T2.2 实现短事务能力与回滚测试设施
+### [x] T2.2 实现短事务能力与回滚测试设施
 
 - **依赖**：T2.1、T1.7。
 - **描述**：实现 `Store.WithTx`，提供事务作用域的组合读写能力、context 取消与执行错误传播；增加测试用可控中断点，不把故障开关暴露为生产 API。
 - **验收标准**：成功提交、回调报错、SQL 失败与取消均有测试；失败后跨表没有部分结果；业务不自行嵌套/提交事务；事务作用域不执行网络请求或长计算。
+- **执行记录**：新增 `internal/store/sqlite/tx.go`、`internal/store/sqlite/tx_test.go`，并在 `docs/contracts/storage.md` 固定事务契约。`Store.WithTx` 在单写连接上开启事务，`Tx` 不暴露 `Commit`/`Rollback`；`MemoryStore`、`SourceStore`、`IngestStore` 适配器把同一事务转换为各业务能力接口。验证：`go test -v -count=1 ./internal/store/sqlite` 通过 `TestWithTxCommitsAndRollsBack` 的 commit、callback error、SQL failure、cancel before commit、pre-cancelled context、nested transaction、panic rollback 子用例，以及 `TestWithTxPropagatesDeadline`；`CGO_ENABLED=1 go test -race -count=1 ./internal/store/sqlite ./internal/testutil ./tests/integration` 通过。限制：事务回调是调用约定，代码无法强制拒绝网络调用或长计算；P5 将通过阻塞假模型验证模型调用不持有写事务。嵌套检测只覆盖通过回调 context 再进入 `WithTx` 的路径，不提供跨 goroutine 的事务对象。
 
-### [ ] T2.3 创建业务表与顺序迁移机制
+### [x] T2.3 创建业务表与顺序迁移机制
 
 - **依赖**：T2.2。
 - **描述**：内嵌迁移 SQL，建立 memories、memory_revisions、sources、evidence、revision_evidence、ingest_jobs、schema_migrations。包含创建应用归属、完整版本快照、redacted 状态、证据可选定位、任务尝试次数/时间/结果等契约字段，设计必要外键及索引。
 - **验收标准**：空库启动和重复启动迁移可重复；迁移失败不标记成功且服务不就绪；`(memory_id, version)` 唯一；app_id/external_id 不承担身份或唯一性；不引入过期、租约、幂等键、预期版本字段和业务约束校验流程。
+- **执行记录**：新增 `internal/store/sqlite/migrate.go`、`internal/store/sqlite/migrations/0001_core.sql`、`internal/store/sqlite/migrate_test.go`，更新 `docs/contracts/storage.md`。实现内嵌顺序迁移、`schema_migrations` 记录、逐文件事务、重复启动跳过、未知/改名版本拒绝；建立 sources、memories、memory_revisions、evidence、revision_evidence、ingest_jobs 及外键/索引，版本快照保存完整字段，任务保存尝试次数、时间、脱敏错误和 `memory_ids`，未增加租约/幂等键/预期版本字段。验证：`go test -v -count=1 ./internal/store/sqlite` 通过 `TestMigrationsCreateCoreAndSearchSchema`、`TestMigrationFailureRollsBackAndCanBeRetried`（失败迁移的表和触发器均回滚，修复后可重试）、`TestMigrationDetectsUnknownOrRenamedVersion`（失败后 Ready 不就绪）、`TestRevisionVersionIsUnique`、`TestSourceIdentifiersAreNotUnique`；`make check` 通过。限制：迁移只创建结构、不导入数据；已应用文件不得修改，只能追加新版本；备份与恢复属于 P7。
 
-### [ ] T2.4 创建搜索文档、FTS5 表与触发器
+### [x] T2.4 创建搜索文档、FTS5 表与触发器
 
 - **依赖**：T2.3。
 - **描述**：建立 `memory_search_docs` 与外部内容 FTS5 表及同步触发器；固定记忆 ID、rowid、原始字段与规范化索引字段的映射。此任务使用明确的已规范化测试文档，生产文本构造在 T4.1 接入。
 - **验收标准**：搜索文档插入/修改/删除后 FTS 同步；归档可保留索引、逻辑删除可移除；首次索引构建可运行；迁移失败回滚无半成品触发器；不依赖外部搜索服务。
+- **执行记录**：新增 `internal/store/sqlite/migrations/0002_search.sql`、`internal/store/sqlite/search.go`、`internal/store/sqlite/search_test.go`；在 `internal/store/sqlite/memories.go` 实现 `UpsertSearchDocument`/`DeleteSearchDocument`。`memory_search_docs` 以 `row_id` 对应 FTS rowid、`memory_id` 唯一，保留原始标题/正文和规范化词项；`memory_fts` 为外部内容 FTS5（`unicode61`），插入/更新/删除触发器同步；`RebuildSearchIndex` 从派生文档重建索引。验证：`go test -v -count=1 ./internal/store/sqlite` 通过 `TestSearchDocumentTriggersStayInSync`（插入、更新词项、归档保留、删除移除）和 `TestRebuildSearchIndexRestoresDerivedIndex`（delete-all 后重建恢复）；`TestMigrationFailureRollsBackAndCanBeRetried` 验证失败迁移不留下表或触发器；`make check` 通过。限制：P2 使用测试构造器生成已规范化文档，生产 NFC/中文分词构造器在 T4.1；关键词查询、摘要和排序在 P4；当前重建只重建 FTS，不重新生成派生文档。
 
-### [ ] T2.5 实现来源与任务原子保存方法
+### [x] T2.5 实现来源与任务原子保存方法
 
 - **依赖**：T2.4。
 - **描述**：实现来源与 queued job 在同一事务插入，原样保存合法 JSON 内容及可选来源信息；提供来源/任务按 ID 读取方法。
 - **验收标准**：两次相同提交可产生不同来源/任务；缺少 app_id/external_id 可保存；对象/数组不被强制改成字符串；任一步失败不留下孤立来源或任务；读取缺失 ID 返回统一不存在错误。
+- **执行记录**：新增 `internal/store/sqlite/sources.go`、`internal/store/sqlite/jobs.go`、`internal/store/sqlite/sources_test.go`。来源内容以 BLOB 原样保存，`app_id`/`external_id` 无唯一约束；`InsertSource` 与 `InsertJob` 可在同一 `ingest.Tx` 组合；`GetSource`/`GetJob` 在事务内和存储只读入口均可按 ID 读取，缺失返回 `source.ErrNotFound`/`ingest.ErrNotFound`。验证：`go test -v -count=1 ./internal/store/sqlite` 通过 `TestSourceAndJobInsertAtomically`、`TestSourceAndJobRollbackTogether`（after_source/after_job 均无孤立行）、`TestSourceStoresRawJSONShapesAndOptionalIdentifiers`（字符串/对象/数组/null/数字/布尔逐字节保留，缺少可选标识可保存）、`TestRepeatedSubmissionsCreateDistinctSourcesAndJobs`、`TestMissingSourceAndJobUseUnifiedNotFoundErrors`；`make check` 通过。限制：统一提交服务和 HTTP 路由分别在 P5/P6；本任务只提供存储方法，不执行模型或任务状态推进。
 
-### [ ] T2.6 实现任务状态与尝试次数持久化
+### [x] T2.6 实现任务状态与尝试次数持久化
 
 - **依赖**：T2.5。
 - **描述**：实现按确定顺序读取 queued、切换 running 并增加尝试计数、回 queued、failed/cancelled、读取错误/结果的 SQL 能力；持久化下次执行时间，供后续 Worker 使用。
 - **验收标准**：状态转换和尝试计数真实落库；succeeded/cancelled/failed 不被普通取任务重复领取；不增加租约或分布式锁；running 恢复所需字段足够，结果不存原始模型响应副本。
+- **执行记录**：在 `internal/store/sqlite/jobs.go` 实现 `InsertJob`、`GetJob`、`UpdateJob`、`ClaimNextJob`、`RequeueRunningJobs`，在 `sources.go` 实现 `CancelJobsBySource`；新增 `internal/store/sqlite/jobs_test.go`。`ClaimNextJob` 只领取到期的 queued，按 `created_at ASC, id ASC` 顺序，领取时尝试次数加一并设置 started_at；终态不再领取；`RequeueRunningJobs` 保留尝试次数和 started_at；`memory_ids` 以 JSON 数组持久化，错误字段只存摘要，表中没有原始模型响应列。验证：`go test -v -count=1 ./internal/store/sqlite` 通过 `TestClaimNextJobOrdersDueJobsAndCountsAttempts`、`TestTerminalJobsAreNeverClaimedAgain`、`TestUpdateJobPersistsTerminalResultAndError`、`TestUpdateJobPersistsFailedErrorSummary`、`TestRequeueRunningJobsPreservesAttempts`、`TestCancelJobsBySourceOnlyCancelsPendingWork`；`tests/integration` 的 `TestCrossTableJobResultContainsOnlyMemoryIDs` 验证结果结构与无响应副本字段；`make check` 通过。限制：重试退避、三次总尝试上限、单 Worker 和 running 启动重排的编排属于 P5；本层不使用租约或分布式锁。
 
-### [ ] T2.7 实现快照、版本与证据存取方法
+### [x] T2.7 实现快照、版本与证据存取方法
 
 - **依赖**：T2.6。
 - **描述**：实现当前快照、完整版本、来源证据、版本证据关联的 SQL 方法及列表查询，全部可在同一事务中组合。列表过滤、排序和 limit 按 T1.3 契约实现。
 - **验收标准**：版本与完整证据集合可往返读出；创建应用过滤有确定存储来源；记忆默认最近 50 条且稳定排序；无游标/页码；方法只负责存取、不决定业务合并策略。
+- **执行记录**：在 `internal/store/sqlite/memories.go` 实现 `InsertMemory`/`UpdateMemory`/`GetMemory`、`InsertRevision`/`GetRevision`/`ListRevisions`、`LinkRevisionEvidence`/`ListRevisionEvidence`、`UpsertSearchDocument`/`DeleteSearchDocument`；新增只读 `ListMemories` 与 `memory.Reader` 能力，全部可在 `memory.Tx` 内组合。新增 `internal/store/sqlite/memories_test.go`。列表固定 `updated_at DESC, id ASC`，零 limit 使用 50，支持 kind/state/created_by_app/updated_after/updated_before 过滤且无分页。验证：`go test -v -count=1 ./internal/store/sqlite` 通过 `TestMemoryRevisionAndEvidenceRoundTrip`（两版完整快照与各自证据集合、定位/消息/模型字段、历史顺序、缺失版本错误）和 `TestListMemoriesDefaultsFiltersAndOrdering`（默认 50 条、id 平局、过滤、墓碑读取）；`make check` 通过。限制：存储层零状态表示不过滤，HTTP 默认 `active,archived` 由 P3 服务按契约设置；版本递增、证据语义和合并策略属于 P3/P5，存储方法不决定这些规则。
 
-### [ ] T2.8 建立可复用真实数据库与假模型测试环境
+### [x] T2.8 建立可复用真实数据库与假模型测试环境
 
 - **依赖**：T2.7。
 - **描述**：提供每测试独立的临时文件数据库、完整迁移和权限检查辅助；提供可控成功/失败/延迟/阻塞/畸形响应的假模型 HTTP 服务。
 - **验收标准**：测试可以并行且不共享数据；可精确控制模型开始和完成以验证竞态；不依赖外网或真实凭据；失败后资源可关闭，故障中断点可定位到事务步骤。
+- **执行记录**：新增 `internal/testutil/sqlite.go`、`internal/testutil/model.go`、`internal/testutil/testutil_test.go`，更新 `docs/testing.md`。`NewStore`/`NewStoreAt` 创建独立临时真实文件数据库、完整迁移并检查权限；`OpenInspector` 提供独立只读核对连接；`DocumentBuilder` 提供确定性测试搜索文档；`FaultInjector` 通过命名 checkpoint 精确定位故障步骤；`FakeModel` 为本地 `httptest` Chat Completions 服务，可脚本化成功、HTTP 失败、原始/畸形响应、延迟和阻塞，`WaitStarted`/`Release` 控制请求开始与完成，请求体原样捕获。验证：`go test -v -count=1 ./internal/testutil` 通过 `TestNewStoreCreatesIsolatedMigratedDatabases`、`TestNewStoresCanRunInParallel`（4 个并行独立库）、`TestFaultInjectorMarksPreciseStep`、`TestDocumentBuilderKeepsOriginalTextAndLowercasesTerms`、`TestFakeModelScriptsResponsesAndCapturesRequests`、`TestFakeModelDelayAndMalformedContent`、`TestFakeModelBlocksUntilReleased`；`CGO_ENABLED=1 go test -race -count=1 ./internal/store/sqlite ./internal/testutil ./tests/integration` 通过。限制：假模型只模拟已冻结的 Chat Completions 外层协议，真实模型适配器在 P5；测试设施仅被测试导入，不进入生产依赖图；假模型不访问外网或保存真实凭据。
 
-### [ ] T2.9 验证跨表事务与索引同步基础
+### [x] T2.9 验证跨表事务与索引同步基础
 
 - **依赖**：T2.8。
 - **描述**：用真实 SQLite 和测试搜索文档构造器，覆盖快照/版本/证据/索引组合提交与分步故障回滚，并覆盖来源/任务接收回滚。
 - **验收标准**：在写快照后、写证据后、写搜索文档后触发失败均无部分业务结果；成功时所有表一致；测试证明实际事务边界，不能只检查 mock 调用顺序；P2 必要命令全部通过。
+- **执行记录**：新增 `tests/integration/p2_transactions_test.go`，使用 `testutil.NewStore`/`OpenInspector`/`FaultInjector`/`DocumentBuilder` 和真实文件 SQLite。覆盖来源+任务、记忆快照、版本、证据、版本证据关联、搜索文档和任务成功状态在同一 `ingest.Tx` 的组合提交；在 source_job、memory、revision、evidence、link、search_doc、job_result 七个检查点分别注入失败，均通过独立只读连接确认 sources、ingest_jobs、memories、memory_revisions、evidence、revision_evidence、memory_search_docs 全为 0，FTS 无匹配；提交场景确认各表各 1 行、FTS 命中 1、任务状态 succeeded 且 memory_ids 正确，并验证任务表没有原始模型响应列。验证：`go test -v -count=1 ./tests/integration` 通过 `TestCrossTableTransactionAndIndexBoundary`（commit + 7 个 rollback 子用例）与 `TestCrossTableJobResultContainsOnlyMemoryIDs`；`go test -count=1 ./...`、`make check`、`CGO_ENABLED=1 go test -race -count=1 ./internal/store/sqlite ./internal/testutil ./tests/integration` 均通过。限制：验证的是存储事务边界，不包含模型调用、Worker 调度、进程崩溃恢复或备份；这些分别留在 P5/P7。
 
 ## P3：记忆、版本与来源生命周期
 

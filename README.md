@@ -6,8 +6,10 @@
 ## 当前状态
 
 P1 已建立 Go Module、精确依赖基线、API/模型契约、测试与 CI 入口、配置、
-结构化日志、运行骨架及 `/healthz`、`/readyz`。业务 API、真实数据库接入和
-后台 Worker 从 P2 起实现；在 P2 完成前，实际进程的 `/readyz` 会返回 `503`。
+结构化日志和运行骨架。P2 已接入真实 SQLite：单写连接/小型读池、顺序迁移、
+业务表、外部内容 FTS5 触发器、短事务与来源/任务存取，`/readyz` 使用真实数据库
+探活。业务 API、记忆写入服务、检索和后台 Worker 从 P3 起实现；当前还没有业务
+HTTP 路由。
 
 ## 环境
 
@@ -51,7 +53,8 @@ curl -i http://127.0.0.1:18432/readyz
 ```
 
 `--version` 输出构建版本后退出；`--check-config` 只加载并校验配置后退出。
-P1 不提供任何业务占位接口。
+启动时会打开并迁移 SQLite；数据库不可用时启动失败，运行中数据库失效时 `/readyz`
+返回 `503`。当前不提供业务占位接口。
 
 ## 文档
 
@@ -60,5 +63,6 @@ P1 不提供任何业务占位接口。
 - `api/openapi.yaml`：HTTP 契约（仅文档，不生成校验层）
 - `docs/contracts/api-decisions.md`：架构未展开的接口语义
 - `docs/contracts/model-provider.md`：首个远端模型协议
+- `docs/contracts/storage.md`：SQLite 连接、迁移、表与事务契约
 - `docs/performance.md`：P7 容量测试规格（尚未执行）
 - `docs/testing.md`：测试命令与隔离方式

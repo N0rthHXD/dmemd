@@ -32,7 +32,7 @@ func (f ReadinessFunc) Ready(ctx context.Context) error {
 }
 
 // App is the process runtime skeleton: configuration, HTTP lifecycle and
-// health endpoints. P2 adds the real database readiness probe.
+// health endpoints. The database store supplies the real readiness probe.
 type App struct {
 	cfg    Config
 	logger *slog.Logger
@@ -40,8 +40,8 @@ type App struct {
 	server *http.Server
 }
 
-// New validates configuration and assembles the P1 HTTP surface. No business
-// routes are registered.
+// New validates configuration and assembles the HTTP surface. Business routes
+// are added in later stages; P2 wires the real database readiness probe.
 func New(cfg Config, logger *slog.Logger, ready Readiness) (*App, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err

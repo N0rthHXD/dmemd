@@ -117,8 +117,6 @@ func (DocumentBuilder) BuildDocument(item memory.Memory) (memory.SearchDocument,
 	return memory.SearchDocument{
 		MemoryID:     item.ID,
 		State:        item.State,
-		Title:        item.Title,
-		Content:      item.Content,
 		TitleTerms:   strings.ToLower(item.Title),
 		ContentTerms: strings.ToLower(item.Content),
 		UpdatedAt:    item.UpdatedAt,

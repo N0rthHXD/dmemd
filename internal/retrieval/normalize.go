@@ -70,7 +70,7 @@ func Tokens(text string) []string {
 }
 
 // IndexText renders normalized tokens for the FTS columns. The original title
-// and content remain in memory_search_docs for snippets.
+// and content remain in the memory snapshot.
 func IndexText(text string) string {
 	return strings.Join(Tokens(text), " ")
 }
@@ -130,8 +130,7 @@ func containsSequence(haystack, needle []string) bool {
 }
 
 // DocumentBuilder is the production memory.DocumentBuilder. It uses the same
-// Normalize/Groups rules as query compilation and keeps original text for
-// snippets.
+// Normalize/Groups rules as query compilation.
 type DocumentBuilder struct{}
 
 // NewDocumentBuilder returns the production builder for runtime assembly.
@@ -142,8 +141,6 @@ func (DocumentBuilder) BuildDocument(item memory.Memory) (memory.SearchDocument,
 	return memory.SearchDocument{
 		MemoryID:     item.ID,
 		State:        item.State,
-		Title:        item.Title,
-		Content:      item.Content,
 		TitleTerms:   IndexText(item.Title),
 		ContentTerms: IndexText(item.Content),
 		UpdatedAt:    item.UpdatedAt,

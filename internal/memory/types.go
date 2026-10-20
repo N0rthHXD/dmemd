@@ -85,13 +85,11 @@ type ListOptions struct {
 }
 
 // SearchDocument is the derived, normalized representation written alongside a
-// memory snapshot. Title and Content keep the original text for snippets;
-// TitleTerms and ContentTerms are the normalized text indexed by FTS5.
+// memory snapshot. TitleTerms and ContentTerms are the normalized text indexed
+// by FTS5; original title and content stay in the memory snapshot.
 type SearchDocument struct {
 	MemoryID     string
 	State        State
-	Title        string
-	Content      string
 	TitleTerms   string
 	ContentTerms string
 	UpdatedAt    time.Time

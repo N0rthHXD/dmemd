@@ -28,8 +28,6 @@ func TestSearchDocumentTriggersStayInSync(t *testing.T) {
 	document := memory.SearchDocument{
 		MemoryID:     item.ID,
 		State:        item.State,
-		Title:        item.Title,
-		Content:      item.Content,
 		TitleTerms:   "alpha title",
 		ContentTerms: "body about alpha",
 		UpdatedAt:    item.UpdatedAt,
@@ -44,7 +42,6 @@ func TestSearchDocumentTriggersStayInSync(t *testing.T) {
 	}
 	assertFTSMatches(t, store, "alpha", 1)
 
-	document.Title = "Beta title"
 	document.TitleTerms = "beta title"
 	document.ContentTerms = "body about beta"
 	document.UpdatedAt = testTime(time.Minute)
@@ -106,8 +103,6 @@ func TestRebuildSearchIndexRestoresDerivedIndex(t *testing.T) {
 	document := memory.SearchDocument{
 		MemoryID:     item.ID,
 		State:        item.State,
-		Title:        item.Title,
-		Content:      item.Content,
 		TitleTerms:   "rebuild probe",
 		ContentTerms: "rebuild content",
 		UpdatedAt:    item.UpdatedAt,

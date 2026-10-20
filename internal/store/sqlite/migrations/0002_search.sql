@@ -1,13 +1,11 @@
--- Derived search index. memory_search_docs keeps original text for snippets and
--- normalized terms for FTS5. The external-content FTS table is synchronized by
--- triggers and can be rebuilt from memory_search_docs at any time.
+-- Derived search index. memory_search_docs keeps only normalized terms; original
+-- title and content stay in memories. The external-content FTS table is
+-- synchronized by triggers and can be rebuilt from memory_search_docs at any time.
 
 CREATE TABLE memory_search_docs (
     row_id        INTEGER PRIMARY KEY,
     memory_id     TEXT NOT NULL UNIQUE,
     state         TEXT NOT NULL,
-    title         TEXT NOT NULL,
-    content       TEXT NOT NULL,
     title_terms   TEXT NOT NULL,
     content_terms TEXT NOT NULL,
     updated_at    TEXT NOT NULL,

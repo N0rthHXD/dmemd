@@ -65,7 +65,7 @@ func TestFaultInjectorMarksPreciseStep(t *testing.T) {
 	}
 }
 
-func TestDocumentBuilderKeepsOriginalTextAndLowercasesTerms(t *testing.T) {
+func TestDocumentBuilderLowercasesTerms(t *testing.T) {
 	item := memory.Memory{ID: "m1", Title: "Memory Title", Content: "Memory Content", State: memory.StateActive, UpdatedAt: time.Unix(0, 0).UTC()}
 	document, err := (DocumentBuilder{}).BuildDocument(item)
 	if err != nil {
@@ -73,9 +73,6 @@ func TestDocumentBuilderKeepsOriginalTextAndLowercasesTerms(t *testing.T) {
 	}
 	if document.TitleTerms != "memory title" || document.ContentTerms != "memory content" {
 		t.Fatalf("terms = %q / %q", document.TitleTerms, document.ContentTerms)
-	}
-	if document.Title != "Memory Title" || document.Content != "Memory Content" {
-		t.Fatalf("original text changed: %+v", document)
 	}
 }
 

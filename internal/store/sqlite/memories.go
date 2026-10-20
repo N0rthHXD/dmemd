@@ -280,16 +280,14 @@ func listRevisionEvidence(ctx context.Context, q revisionQueryer, memoryID strin
 // external-content FTS index in the same statement.
 func (t *Tx) UpsertSearchDocument(ctx context.Context, document memory.SearchDocument) error {
 	_, err := t.tx.ExecContext(ctx, `INSERT INTO memory_search_docs
-		(memory_id, state, title, content, title_terms, content_terms, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		(memory_id, state, title_terms, content_terms, updated_at)
+		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(memory_id) DO UPDATE SET
 			state = excluded.state,
-			title = excluded.title,
-			content = excluded.content,
 			title_terms = excluded.title_terms,
 			content_terms = excluded.content_terms,
 			updated_at = excluded.updated_at`,
-		document.MemoryID, string(document.State), document.Title, document.Content,
+		document.MemoryID, string(document.State),
 		document.TitleTerms, document.ContentTerms, formatTime(document.UpdatedAt),
 	)
 	if err != nil {

@@ -112,7 +112,7 @@ func TestMatchedGroupsUsesAdjacentSequences(t *testing.T) {
 	}
 }
 
-func TestDocumentBuilderKeepsOriginalTextAndNormalizedTerms(t *testing.T) {
+func TestDocumentBuilderProducesNormalizedTerms(t *testing.T) {
 	item := memory.Memory{
 		ID:        "memory-1",
 		State:     memory.StateActive,
@@ -126,9 +126,6 @@ func TestDocumentBuilderKeepsOriginalTextAndNormalizedTerms(t *testing.T) {
 	}
 	if document.MemoryID != item.ID || document.State != item.State {
 		t.Fatalf("document identity = %+v", document)
-	}
-	if document.Title != item.Title || document.Content != item.Content {
-		t.Fatalf("original text changed: %+v", document)
 	}
 	if document.TitleTerms != "answer language" {
 		t.Fatalf("title terms = %q", document.TitleTerms)

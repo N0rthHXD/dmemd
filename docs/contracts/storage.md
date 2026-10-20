@@ -42,7 +42,7 @@ P4（T4.1–T4.8）关键词检索落定的契约，补充《系统 AI 记忆服
 | `evidence` | 来源引用、可选消息 ID、原文片段、可选定位、模型名和 redacted 状态；来源行保留 |
 | `revision_evidence` | 版本完整证据集合；主键 `(memory_id, version, evidence_id)`，关联版本和证据 |
 | `ingest_jobs` | 状态、尝试次数、下次执行时间、脱敏错误和 `memory_ids` 结果摘要；不保存原始模型响应 |
-| `memory_search_docs` | 派生文档：`row_id` 对应 FTS rowid，`memory_id` 唯一，保留原文和规范化词项 |
+| `memory_search_docs` | 派生文档：`row_id` 对应 FTS rowid，`memory_id` 唯一；只保留规范化词项，原文以 `memories` 为准 |
 | `memory_fts` | 外部内容 FTS5 表，内容表为 `memory_search_docs`，`unicode61` tokenizer |
 | `schema_migrations` | 顺序迁移版本记录 |
 
@@ -115,8 +115,9 @@ P4（T4.1–T4.8）关键词检索落定的契约，补充《系统 AI 记忆服
 ## 8. 搜索文档、关键词查询与索引重建（P4）
 
 - 生产写入路径使用 `retrieval.DocumentBuilder`，与查询共享同一套规则：先 NFC，再 Unicode
-  小写；英文/其他文字和数字按词，连续汉字逐字成为 token，空白和标点作为边界。文档保留原始
-  标题/正文用于摘要，只把规范化 token 写入 `title_terms`/`content_terms`。
+  小写；英文/其他文字和数字按词，连续汉字逐字成为 token，空白和标点作为边界。派生文档只写
+  规范化 token（`title_terms`/`content_terms`）；原始标题/正文只保存在 `memories`，摘要从
+  当前快照读取。
 - `runtime.NewMemoryService` 把生产构造器注入记忆写入；创建、内容更正、纯证据变更、归档、
   删除、恢复和永久清除都沿用该构造器。测试仍可注入 `testutil.DocumentBuilder` 验证事务边界。
 - 查询由 `retrieval.Compile` 生成：每个连续组编译为带引号的相邻短语，`all` 用 `AND`、`any`

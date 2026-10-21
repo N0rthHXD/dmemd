@@ -8,6 +8,7 @@ import (
 	"github.com/go-ego/gse"
 	"golang.org/x/text/unicode/norm"
 
+	"github.com/N0rthHXD/dmemd/internal/embedding"
 	"github.com/N0rthHXD/dmemd/internal/memory"
 )
 
@@ -165,5 +166,6 @@ func (DocumentBuilder) BuildDocument(item memory.Memory) (memory.SearchDocument,
 		MemoryID:     item.ID,
 		TitleTerms:   IndexText(item.Title),
 		ContentTerms: IndexText(item.Content),
+		ContentHash:  embedding.DocumentHash(item),
 	}, nil
 }

@@ -43,6 +43,30 @@ type Store struct {
 	ready    atomic.Bool
 	close    sync.Once
 	closeErr error
+
+	embeddingMu        sync.RWMutex
+	embeddingEnabled   bool
+	embeddingProfileID string
+}
+
+// ConfigureEmbedding installs the single Embedding profile used by the memory
+// write path. It must be called before serving writes. Disabling the feature
+// keeps content hashes and stale-vector cleanup active but creates no tasks.
+func (s *Store) ConfigureEmbedding(enabled bool, profileID string) {
+	s.embeddingMu.Lock()
+	defer s.embeddingMu.Unlock()
+	s.embeddingEnabled = enabled
+	if enabled {
+		s.embeddingProfileID = profileID
+	} else {
+		s.embeddingProfileID = ""
+	}
+}
+
+func (s *Store) embeddingConfig() (bool, string) {
+	s.embeddingMu.RLock()
+	defer s.embeddingMu.RUnlock()
+	return s.embeddingEnabled, s.embeddingProfileID
 }
 
 // Open validates the path, creates a private database file when needed, opens

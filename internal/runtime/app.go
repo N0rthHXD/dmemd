@@ -8,8 +8,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
+	"github.com/N0rthHXD/dmemd/internal/embedding"
 	"github.com/N0rthHXD/dmemd/internal/ingest"
 	httptransport "github.com/N0rthHXD/dmemd/internal/transport/http"
 )
@@ -57,15 +59,24 @@ func WithWorker(worker *ingest.Worker) Option {
 	}
 }
 
+// WithEmbeddingWorker installs the independent single embedding worker. It runs
+// alongside the ingest worker and shares the same shutdown signal.
+func WithEmbeddingWorker(worker *embedding.Worker) Option {
+	return func(app *App) {
+		app.embeddingWorker = worker
+	}
+}
+
 // App is the process runtime: configuration, HTTP lifecycle, health endpoints,
-// business routes and the optional background worker.
+// business routes and the optional background workers.
 type App struct {
-	cfg      Config
-	logger   *slog.Logger
-	ready    Readiness
-	services Services
-	worker   *ingest.Worker
-	server   *http.Server
+	cfg             Config
+	logger          *slog.Logger
+	ready           Readiness
+	services        Services
+	worker          *ingest.Worker
+	embeddingWorker *embedding.Worker
+	server          *http.Server
 }
 
 // New validates configuration and assembles the HTTP surface. Business routes
@@ -130,10 +141,16 @@ func (a *App) Serve(ctx context.Context, listener net.Listener) error {
 
 	var workerCtx context.Context
 	var cancelWorker context.CancelFunc
-	var workerDone chan error
-	workerFinished := true
-	if a.worker != nil {
+	var workerWG sync.WaitGroup
+	workerErrors := make(chan error, 2)
+	activeWorkers := 0
+
+	if a.worker != nil || a.embeddingWorker != nil {
 		workerCtx, cancelWorker = context.WithCancel(ctx)
+		defer cancelWorker()
+	}
+
+	if a.worker != nil {
 		if err := a.worker.Recover(workerCtx); err != nil {
 			cancelWorker()
 			if ctx.Err() != nil {
@@ -141,15 +158,33 @@ func (a *App) Serve(ctx context.Context, listener net.Listener) error {
 			}
 			return fmt.Errorf("恢复后台任务: %w", err)
 		}
-		workerDone = make(chan error, 1)
-		workerFinished = false
+	}
+	if a.embeddingWorker != nil {
+		if err := a.embeddingWorker.Recover(workerCtx); err != nil {
+			cancelWorker()
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("恢复向量任务: %w", err)
+		}
+	}
+	if a.worker != nil {
+		activeWorkers++
+		workerWG.Add(1)
 		go func() {
-			workerDone <- a.worker.Run(workerCtx)
+			defer workerWG.Done()
+			workerErrors <- a.worker.Run(workerCtx)
 		}()
 		a.logger.Info("ingest worker starting")
 	}
-	if cancelWorker != nil {
-		defer cancelWorker()
+	if a.embeddingWorker != nil {
+		activeWorkers++
+		workerWG.Add(1)
+		go func() {
+			defer workerWG.Done()
+			workerErrors <- a.embeddingWorker.Run(workerCtx)
+		}()
+		a.logger.Info("embedding worker starting")
 	}
 
 	a.logger.Info("http server starting", "listen", listener.Addr().String())
@@ -168,8 +203,7 @@ func (a *App) Serve(ctx context.Context, listener net.Listener) error {
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			runErr = fmt.Errorf("HTTP 服务: %w", err)
 		}
-	case err := <-workerDone:
-		workerFinished = true
+	case err := <-workerErrors:
 		if err == nil {
 			err = errors.New("后台任务意外退出")
 		}
@@ -195,12 +229,14 @@ func (a *App) Serve(ctx context.Context, listener net.Listener) error {
 		runErr = fmt.Errorf("关闭 HTTP 服务: %w", shutdownErr)
 	}
 
-	if !workerFinished {
+	if activeWorkers > 0 {
+		workersDone := make(chan struct{})
+		go func() {
+			workerWG.Wait()
+			close(workersDone)
+		}()
 		select {
-		case err := <-workerDone:
-			if err != nil && runErr == nil {
-				runErr = fmt.Errorf("后台任务: %w", err)
-			}
+		case <-workersDone:
 		case <-time.After(shutdownTimeout):
 			if runErr == nil {
 				runErr = errors.New("后台任务未在关闭期限内退出")

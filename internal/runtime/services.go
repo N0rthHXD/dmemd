@@ -3,11 +3,13 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
 	"time"
 
+	"github.com/N0rthHXD/dmemd/internal/embedding"
 	"github.com/N0rthHXD/dmemd/internal/ingest"
 	"github.com/N0rthHXD/dmemd/internal/memory"
 	"github.com/N0rthHXD/dmemd/internal/model"
@@ -27,6 +29,49 @@ func NewMemoryService(store *sqlite.Store) *memory.Service {
 // production normalization rules used by NewMemoryService.
 func NewSearchService(store *sqlite.Store, logger *slog.Logger) *retrieval.Service {
 	return retrieval.NewService(store, retrieval.NewDocumentBuilder(), retrieval.WithLogger(logger))
+}
+
+// NewSemanticSearchService wires keyword and hybrid search. A nil encoder keeps
+// the service keyword-only.
+func NewSemanticSearchService(store *sqlite.Store, encoder retrieval.QueryEncoder, logger *slog.Logger) *retrieval.Service {
+	return retrieval.NewService(
+		store,
+		retrieval.NewDocumentBuilder(),
+		retrieval.WithLogger(logger),
+		retrieval.WithSemantic(encoder),
+	)
+}
+
+// NewEmbeddingEncoder assembles the separate Embedding provider and validates
+// its credential-free profile. It performs no network request.
+func NewEmbeddingEncoder(cfg EmbeddingConfig) (*embedding.Encoder, error) {
+	if !cfg.Enabled {
+		return nil, nil
+	}
+	provider, err := model.NewEmbeddingProvider(model.EmbeddingConfig{
+		Name:       cfg.Model,
+		BaseURL:    cfg.BaseURL,
+		APIKey:     cfg.APIKey,
+		Timeout:    cfg.Timeout.Std(),
+		Dimensions: cfg.Dimensions,
+	})
+	if err != nil {
+		return nil, err
+	}
+	encoder, err := embedding.NewEncoder(provider, cfg.toEmbedding())
+	if err != nil {
+		return nil, err
+	}
+	return encoder, nil
+}
+
+// NewEmbeddingWorker constructs the single background embedding worker.
+func NewEmbeddingWorker(store *sqlite.Store, encoder *embedding.Encoder, logger *slog.Logger) *embedding.Worker {
+	return embedding.NewWorker(
+		store,
+		encoder,
+		embedding.WithEmbeddingLogger(logger),
+	)
 }
 
 // NewIngestService wires unified submission and task queries over the durable
@@ -89,12 +134,13 @@ func NewIngestWorker(store *sqlite.Store, processor *ingest.Processor, cfg Worke
 	), nil
 }
 
-// Stack is the complete P6 process assembly. It contains the HTTP application,
-// the single background worker and the business services exposed by local HTTP.
+// Stack is the complete process assembly. It contains the HTTP application, the
+// background workers and the business services exposed by local HTTP.
 type Stack struct {
-	App      *App
-	Worker   *ingest.Worker
-	Services Services
+	App             *App
+	Worker          *ingest.Worker
+	EmbeddingWorker *embedding.Worker
+	Services        Services
 }
 
 // NewStack assembles configuration, business services, the remote extraction
@@ -109,8 +155,22 @@ func NewStack(cfg Config, logger *slog.Logger, store *sqlite.Store) (*Stack, err
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
+	encoder, err := NewEmbeddingEncoder(cfg.Embedding)
+	if err != nil {
+		return nil, err
+	}
+	if encoder != nil {
+		store.ConfigureEmbedding(true, encoder.ProfileID())
+	} else {
+		store.ConfigureEmbedding(false, "")
+	}
+
 	memories := NewMemoryService(store)
-	search := NewSearchService(store, logger)
+	search := NewSemanticSearchService(store, encoder, logger)
 	ingestService := NewIngestService(store)
 	sourceService := NewSourceService(store)
 
@@ -132,17 +192,37 @@ func NewStack(cfg Config, logger *slog.Logger, store *sqlite.Store) (*Stack, err
 		return nil, err
 	}
 
+	var embeddingWorker *embedding.Worker
+	if encoder != nil {
+		// A migrated database or a changed document contract requires one full
+		// local rebuild before vector generation. Otherwise the worker's
+		// startup scan only enqueues missing or profile-mismatched vectors.
+		needsRebuild, err := needsIndexRebuild(context.Background(), store)
+		if err != nil {
+			return nil, err
+		}
+		if needsRebuild {
+			if _, err := search.RebuildIndex(context.Background()); err != nil {
+				return nil, fmt.Errorf("启用语义检索时重建索引: %w", err)
+			}
+			if err := store.SetIndexVersion(context.Background(), embedding.IndexVersion); err != nil {
+				return nil, err
+			}
+		}
+		embeddingWorker = NewEmbeddingWorker(store, encoder, logger)
+	}
+
 	services := Services{
 		Ingest:   ingestService,
 		Memories: memories,
 		Sources:  sourceService,
 		Search:   search,
 	}
-	app, err := New(cfg, logger, store, WithServices(services), WithWorker(worker))
+	app, err := New(cfg, logger, store, WithServices(services), WithWorker(worker), WithEmbeddingWorker(embeddingWorker))
 	if err != nil {
 		return nil, err
 	}
-	return &Stack{App: app, Worker: worker, Services: services}, nil
+	return &Stack{App: app, Worker: worker, EmbeddingWorker: embeddingWorker, Services: services}, nil
 }
 
 type unavailableProvider struct{}
@@ -153,4 +233,15 @@ func (unavailableProvider) Extract(context.Context, ingest.ExtractionRequest) (i
 		Retryable: true,
 		Err:       errors.New("模型服务未配置"),
 	}
+}
+
+func needsIndexRebuild(ctx context.Context, store *sqlite.Store) (bool, error) {
+	version, err := store.IndexVersion(ctx)
+	if err != nil {
+		return false, err
+	}
+	if version != embedding.IndexVersion {
+		return true, nil
+	}
+	return store.HasUnhashedSearchDocuments(ctx)
 }

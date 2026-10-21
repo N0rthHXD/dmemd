@@ -18,9 +18,23 @@ func (h *handler) searchMemories(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 
+	mode := retrieval.Mode(rawString(object, "mode"))
+	switch mode {
+	case "":
+		mode = retrieval.ModeKeyword
+	case retrieval.ModeKeyword, retrieval.ModeHybrid:
+	default:
+		h.writeBadRequest(w)
+		return
+	}
 	topK, _ := rawInt(object, "top_k")
+	if topK > retrieval.MaxTopK {
+		h.writeBadRequest(w)
+		return
+	}
 	searchRequest := retrieval.Request{
 		Query:   rawString(object, "query"),
+		Mode:    mode,
 		Match:   retrieval.Match(rawString(object, "match")),
 		TopK:    topK,
 		Explain: rawBool(object, "explain"),

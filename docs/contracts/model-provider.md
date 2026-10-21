@@ -270,3 +270,23 @@ P5 的 `ingest.Processor` 在模型调用前读取当前来源并选择相关 ac
   启动恢复把 running 重排 queued 并保留尝试次数，已耗尽预算的 queued 直接 failed；成功和
   取消任务不重跑。错误摘要只保留类别、HTTP 状态或截断的安全文本。
 - 已发出的远端请求不能撤回。来源清除只保证本地取消后不提交结果，不宣称远端副本被擦除。
+
+## 8. Embedding 协议
+
+Embedding 使用与提取适配器分开的配置和 HTTP 适配器（`embedding.*`），采用
+OpenAI-compatible Embeddings：`POST <base_url>/embeddings`，请求体包含 `model`、
+`input` 字符串数组和 `encoding_format: "float"`。配置只包含 enabled、端点、凭据、
+模型、维数、调用超时和相似度阈值。
+
+- `api_key` 独立于提取模型，只从本机配置文件读取；为空时省略 `Authorization`。
+- 成功响应必须包含与输入数量一致的 `data`，每项按 `index` 排序且不重复；维数必须与
+  `embedding.dimensions` 一致，分量必须有限且范数非零。调用方在 L2 归一化后以
+  little-endian float32 保存。
+- 输入不静默截断；长度由模型端点拒绝。查询失败时保留关键词检索，文档任务记录脱敏
+  错误码。
+- `429` 可重试并尊重有上限的 `Retry-After`；连接失败、超时、`408`/`425` 和 `5xx`
+  可重试；`401`/`403`、`400`、维数、数量和协议错误不可重试。错误只保存稳定代码。
+- 在线查询不自动重试，使用固定 500 ms 子预算；后台索引最多三次，指数退避从 1 秒起、
+  上限 60 秒并加抖动。
+- 适配器不记录或持久化查询、正文、向量、完整响应或凭据。测试使用本地假 Embeddings
+  服务，不访问外网。

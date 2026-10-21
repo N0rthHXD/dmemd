@@ -29,8 +29,43 @@ func TestDefaultConfigMeetsArchitectureDefaults(t *testing.T) {
 	if cfg.Database.BusyTimeout.Std() != 5*time.Second || cfg.Database.MaxReadConnections != 4 {
 		t.Fatalf("database defaults = %+v", cfg.Database)
 	}
+	if cfg.Embedding.Enabled {
+		t.Fatal("embedding is enabled by default")
+	}
+	if cfg.Embedding.Timeout.Std() != 30*time.Second {
+		t.Fatalf("embedding timeout default = %v", cfg.Embedding.Timeout)
+	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("default config invalid: %v", err)
+	}
+}
+
+func TestEmbeddingConfigValidation(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Database.Path = filepath.Join(cfg.DataDir, "dmemd.db")
+	cfg.Embedding.Enabled = true
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("enabled embedding without endpoint/model/dimensions was accepted")
+	}
+	cfg.Embedding.BaseURL = "http://127.0.0.1:9999"
+	cfg.Embedding.Model = "embedding-test"
+	cfg.Embedding.Dimensions = 3
+	cfg.Embedding.MinSimilarity = 0.25
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid embedding config rejected: %v", err)
+	}
+
+	for name, mutate := range map[string]func(*Config){
+		"bad endpoint":    func(value *Config) { value.Embedding.BaseURL = "not-a-url" },
+		"zero dimensions": func(value *Config) { value.Embedding.Dimensions = 0 },
+		"bad similarity":  func(value *Config) { value.Embedding.MinSimilarity = 1.5 },
+	} {
+		mutated := cfg
+		mutate(&mutated)
+		if err := mutated.Validate(); err == nil {
+			t.Fatalf("%s accepted", name)
+		}
 	}
 }
 

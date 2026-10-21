@@ -12,6 +12,15 @@
     "api_key": "",
     "timeout": "60s"
   },
+  "embedding": {
+    "enabled": false,
+    "base_url": "https://embedding.example.invalid/v1",
+    "api_key": "",
+    "model": "example-embedding-model",
+    "dimensions": 1024,
+    "timeout": "30s",
+    "min_similarity": 0.35
+  },
   "worker": {
     "workers": 1,
     "max_attempts": 3,

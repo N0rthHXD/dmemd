@@ -150,8 +150,8 @@ func TestReopenUsesExistingMigrationsAndData(t *testing.T) {
 	if err := reopened.writer.QueryRow(`SELECT count(*) FROM schema_migrations`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 2 {
-		t.Fatalf("schema_migrations count = %d, want 2", count)
+	if count != 3 {
+		t.Fatalf("schema_migrations count = %d, want 3", count)
 	}
 }
 

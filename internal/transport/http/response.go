@@ -9,6 +9,7 @@ import (
 
 	"github.com/N0rthHXD/dmemd/internal/ingest"
 	"github.com/N0rthHXD/dmemd/internal/memory"
+	"github.com/N0rthHXD/dmemd/internal/retrieval"
 	"github.com/N0rthHXD/dmemd/internal/source"
 )
 
@@ -52,6 +53,8 @@ func (h *handler) writeUnavailable(w http.ResponseWriter) {
 // ingest job and returned by the job query endpoint.
 func (h *handler) writeServiceError(w http.ResponseWriter, request *http.Request, err error) {
 	switch {
+	case errors.Is(err, retrieval.ErrInvalidRequest):
+		h.writeBadRequest(w)
 	case errors.Is(err, memory.ErrNotFound),
 		errors.Is(err, source.ErrNotFound),
 		errors.Is(err, ingest.ErrNotFound):

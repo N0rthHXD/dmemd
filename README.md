@@ -1,8 +1,9 @@
 # dmemd
 
 `dmemd` 是面向同一操作系统用户的本地 AI 记忆服务。首版采用 Go 单进程、SQLite
-与 HTTP/1.1 JSON API。P1–P6 已于 2026-10-20 完成验收；P7 的质量、容量、备份和
-发布准备暂缓，不阻塞当前本地服务使用。
+与 HTTP/1.1 JSON API。P1–P6 已于 2026-10-20 完成验收；语义与关键词混合检索已按
+`docs/hybrid-retrieval-design.md` 实现。P7 的质量、容量、备份和发布准备暂缓，不阻塞
+当前本地服务使用。
 
 ## 当前状态
 
@@ -11,6 +12,12 @@ P1–P5 已建立精确依赖基线、API/模型契约、配置与日志、真�
 统一异步接收、自动合并、单 Worker、三次尝试与崩溃恢复。P6 已提供架构规定的全部
 本地 HTTP API、完整进程组装、用户数据目录单实例锁、优雅关闭、调用端示例和 HTTP
 契约回归测试。当前没有认证、分页、幂等键、条件请求或独立前端。
+
+检索支持 `keyword` 与 `hybrid` 两种模式，默认仍为关键词检索。混合模式并行执行
+FTS5/BM25 与 Embedding 余弦召回，按 RRF 融合；语义模型不可用或超时时自动降级为
+关键词结果，并通过 `warnings` 返回稳定代码。没有可用向量时仍按 hybrid 执行，只返回
+关键词候选。Embedding 默认关闭，启用后由独立后台 Worker 生成并校验向量，关键词索引
+仍在记忆写入事务中同步维护。
 
 ## 环境
 
@@ -53,6 +60,12 @@ HTTP 端口冲突；进程崩溃后锁由操作系统释放，可直接重新启
 
 模型地址不可用时服务仍可启动，已有记忆的查询、检索和管理保持可用；新提交仍返回
 `202`，提取任务按三次总尝试重试，失败原因通过任务查询返回。
+
+`embedding.enabled=true` 时需配置端点、模型版本、维数和超时；`min_similarity` 应按
+模型用相关/不相关样例校准。配置只包含这些必要项，不提供输入前缀、重试或查询预算的
+细粒度开关。启用后启动时会重建派生搜索文档，为缺失或配置不匹配的向量建立持久化任务，
+并由独立 Worker 在后台生成。Embedding 故障不影响 `/readyz`，
+`hybrid` 检索会降级并返回 `warnings`。配置示例见 `configs/dmemd.example.json`。
 
 ## HTTP API 调用示例
 
@@ -113,6 +126,11 @@ curl -sS -X POST http://127.0.0.1:18432/v1/memories/search \
   -H 'Content-Type: application/json' \
   -d '{"query":"回答 语言","filters":{"kinds":["preference"]},"explain":true}'
 
+# 混合检索；语义不可用时自动降级为关键词并返回 warnings
+curl -sS -X POST http://127.0.0.1:18432/v1/memories/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"吃饭有什么忌口","mode":"hybrid","top_k":10}'
+
 curl -sS http://127.0.0.1:18432/v1/memories/11111111-1111-4111-8111-111111111111
 ```
 
@@ -171,6 +189,7 @@ curl -sS http://127.0.0.1:18432/readyz
 - `系统 AI 记忆服务架构设计.md`：架构依据
 - `tech-stack.md`、`project-structure.md`、`plan.md`、`tasks.md`：技术与实施规划
 - `api/openapi.yaml`：HTTP 契约（仅文档，不生成校验层）
+- `docs/hybrid-retrieval-design.md`：关键词与语义混合检索实现方案
 - `docs/contracts/api-decisions.md`：架构未展开的接口语义
 - `docs/contracts/model-provider.md`：首个远端模型协议
 - `docs/contracts/storage.md`：SQLite 连接、迁移、表与事务契约

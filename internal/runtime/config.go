@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/N0rthHXD/dmemd/internal/embedding"
 )
 
 const (
@@ -82,6 +84,19 @@ type ModelConfig struct {
 	Timeout Duration `json:"timeout"`
 }
 
+// EmbeddingConfig is the separate document/query Embedding provider. It is
+// disabled by default and may carry its own credential, which is never exposed
+// by HTTP, logs or the profile fingerprint.
+type EmbeddingConfig struct {
+	Enabled       bool     `json:"enabled"`
+	BaseURL       string   `json:"base_url"`
+	APIKey        string   `json:"api_key"`
+	Model         string   `json:"model"`
+	Dimensions    int      `json:"dimensions"`
+	Timeout       Duration `json:"timeout"`
+	MinSimilarity float64  `json:"min_similarity"`
+}
+
 // WorkerConfig fixes the single-worker and three-attempt runtime policy.
 type WorkerConfig struct {
 	Workers     int        `json:"workers"`
@@ -96,12 +111,13 @@ type LogConfig struct {
 
 // Config is the complete local configuration file shape.
 type Config struct {
-	Listen   string         `json:"listen"`
-	DataDir  string         `json:"data_dir"`
-	Database DatabaseConfig `json:"database"`
-	Model    ModelConfig    `json:"model"`
-	Worker   WorkerConfig   `json:"worker"`
-	Log      LogConfig      `json:"log"`
+	Listen    string          `json:"listen"`
+	DataDir   string          `json:"data_dir"`
+	Database  DatabaseConfig  `json:"database"`
+	Model     ModelConfig     `json:"model"`
+	Embedding EmbeddingConfig `json:"embedding"`
+	Worker    WorkerConfig    `json:"worker"`
+	Log       LogConfig       `json:"log"`
 }
 
 // LoadedConfig records the effective config and the file it came from. Path is
@@ -146,6 +162,9 @@ func DefaultConfig() Config {
 		},
 		Model: ModelConfig{
 			Timeout: Duration(DefaultModelTimeout),
+		},
+		Embedding: EmbeddingConfig{
+			Timeout: Duration(embedding.DefaultTimeout),
 		},
 		Worker: WorkerConfig{
 			Workers:     DefaultWorkerCount,
@@ -246,6 +265,9 @@ func (cfg *Config) applyDefaults() {
 	if time.Duration(cfg.Model.Timeout) == 0 {
 		cfg.Model.Timeout = defaults.Model.Timeout
 	}
+	if time.Duration(cfg.Embedding.Timeout) == 0 {
+		cfg.Embedding.Timeout = defaults.Embedding.Timeout
+	}
 	if cfg.Worker.Workers == 0 {
 		cfg.Worker.Workers = defaults.Worker.Workers
 	}
@@ -315,10 +337,27 @@ func (cfg Config) Validate() error {
 			return fmt.Errorf("model.base_url %q 必须是 http(s) 绝对地址", cfg.Model.BaseURL)
 		}
 	}
+	if err := cfg.Embedding.toEmbedding().Validate(); err != nil {
+		return err
+	}
 	if _, err := ParseLogLevel(cfg.Log.Level); err != nil {
 		return err
 	}
 	return nil
+}
+
+// toEmbedding maps the runtime shape to the embedding package's validated
+// configuration. Credentials stay in this local struct.
+func (c EmbeddingConfig) toEmbedding() embedding.Config {
+	return embedding.Config{
+		Enabled:       c.Enabled,
+		BaseURL:       c.BaseURL,
+		APIKey:        c.APIKey,
+		Model:         c.Model,
+		Dimensions:    c.Dimensions,
+		Timeout:       c.Timeout.Std(),
+		MinSimilarity: c.MinSimilarity,
+	}
 }
 
 // Prepare creates the private data/config directories and enforces 0700 on
@@ -395,10 +434,15 @@ func OpenPrivateFile(path string, flag int) (*os.File, error) {
 
 // String implements fmt.Stringer for diagnostics without exposing the API key.
 func (cfg Config) String() string {
+	embeddingState := "disabled"
+	if cfg.Embedding.Enabled {
+		embeddingState = "enabled"
+	}
 	return strings.Join([]string{
 		"listen=" + cfg.Listen,
 		"data_dir=" + cfg.DataDir,
 		"database=" + cfg.Database.Path,
 		"model=" + cfg.Model.Name,
+		"embedding=" + embeddingState,
 	}, " ")
 }

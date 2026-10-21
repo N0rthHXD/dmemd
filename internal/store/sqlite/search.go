@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -12,7 +13,6 @@ import (
 
 var (
 	_ retrieval.Searcher    = (*Store)(nil)
-	_ retrieval.Reader      = (*Store)(nil)
 	_ retrieval.IndexWriter = (*Store)(nil)
 )
 
@@ -93,8 +93,10 @@ func (s *Store) Search(ctx context.Context, query retrieval.Query) ([]retrieval.
 
 // RebuildSearchDocuments regenerates every derived document from current memory
 // snapshots and rebuilds FTS in one write transaction. Archived memories stay
-// indexed; deleted memories are excluded. A builder or SQL failure rolls back
-// the whole rebuild, so callers never observe partial success.
+// indexed; deleted memories are excluded. Rows are updated by memory ID and stale
+// documents are deleted individually, so valid vectors are not cascaded away by
+// a blanket DELETE. A builder or SQL failure rolls back the whole rebuild, so
+// callers never observe partial success.
 func (s *Store) RebuildSearchDocuments(ctx context.Context, builder memory.DocumentBuilder) (int, error) {
 	if builder == nil {
 		return 0, errors.New("重建搜索索引: 搜索文档构造器未配置")
@@ -104,9 +106,6 @@ func (s *Store) RebuildSearchDocuments(ctx context.Context, builder memory.Docum
 		items, err := listMemoriesForIndex(ctx, tx)
 		if err != nil {
 			return err
-		}
-		if _, err := tx.tx.ExecContext(ctx, `DELETE FROM memory_search_docs`); err != nil {
-			return fmt.Errorf("清空派生搜索文档: %w", err)
 		}
 		for _, item := range items {
 			document, err := builder.BuildDocument(item)
@@ -123,6 +122,12 @@ func (s *Store) RebuildSearchDocuments(ctx context.Context, builder memory.Docum
 				return err
 			}
 			indexed++
+		}
+		if _, err := tx.tx.ExecContext(ctx, `DELETE FROM memory_search_docs
+			WHERE memory_id NOT IN (
+				SELECT id FROM memories WHERE state <> ?
+			)`, string(memory.StateDeleted)); err != nil {
+			return fmt.Errorf("清理无效搜索文档: %w", err)
 		}
 		if _, err := tx.tx.ExecContext(ctx, `INSERT INTO memory_fts(memory_fts) VALUES('rebuild')`); err != nil {
 			return fmt.Errorf("重建全文索引: %w", err)
@@ -184,4 +189,53 @@ func (s *Store) RebuildSearchIndex(ctx context.Context) error {
 		return fmt.Errorf("重建搜索索引: %w", err)
 	}
 	return nil
+}
+
+// HasUnhashedSearchDocuments reports whether any current document predates the
+// Embedding content hash. Runtime enabling semantic retrieval uses this to run
+// one full rebuild after migration instead of rebuilding on every startup.
+func (s *Store) HasUnhashedSearchDocuments(ctx context.Context) (bool, error) {
+	var present int
+	err := s.reader.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM memory_search_docs d
+		JOIN memories m ON m.id = d.memory_id
+		WHERE m.state <> ? AND d.content_hash = ''
+		LIMIT 1
+	)`, string(memory.StateDeleted)).Scan(&present)
+	if err != nil {
+		return false, fmt.Errorf("检查搜索文档哈希: %w", err)
+	}
+	return present == 1, nil
+}
+
+const indexVersionKey = "index_version"
+
+// IndexVersion returns the embedding contract version that produced the
+// persisted content hashes. An empty value means no marked rebuild has run.
+func (s *Store) IndexVersion(ctx context.Context) (string, error) {
+	var value string
+	err := s.reader.QueryRowContext(ctx,
+		`SELECT value FROM memory_index_meta WHERE key = ?`, indexVersionKey,
+	).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("读取索引版本: %w", err)
+	}
+	return value, nil
+}
+
+// SetIndexVersion records the contract version of a completed rebuild.
+func (s *Store) SetIndexVersion(ctx context.Context, version string) error {
+	return s.WithTx(ctx, func(ctx context.Context, tx *Tx) error {
+		if _, err := tx.tx.ExecContext(ctx, `INSERT INTO memory_index_meta(key, value)
+			VALUES (?, ?)
+			ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+			indexVersionKey, version,
+		); err != nil {
+			return fmt.Errorf("记录索引版本: %w", err)
+		}
+		return nil
+	})
 }

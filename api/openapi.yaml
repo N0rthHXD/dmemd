@@ -163,10 +163,13 @@ paths:
   /v1/memories/search:
     post:
       tags: [memories]
-      summary: Keyword Top-K search
+      summary: Keyword or hybrid Top-K search
       description: |
-        User text is treated as ordinary keywords, never as FTS syntax. Default
-        match is all, top_k is 20 and states is [active]. Deleted memories are
+        User text is treated as ordinary keywords, never as FTS syntax. Mode
+        defaults to keyword. Hybrid runs keyword and semantic recall in parallel
+        and fuses them with Reciprocal Rank Fusion; semantic failures degrade to
+        the keyword result with a stable warning. Default match is all, top_k is
+        20 with a maximum of 100, and states is [active]. Deleted memories are
         never returned. Explanation appears only when explain=true.
       operationId: searchMemories
       requestBody:
@@ -175,14 +178,23 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/SearchRequest'
-            example:
-              query: 回答 语言
-              match: all
-              filters:
-                kinds: [preference]
-                states: [active]
-              top_k: 20
-              explain: true
+            examples:
+              keyword:
+                summary: Keyword search
+                value:
+                  query: 回答 语言
+                  match: all
+                  filters:
+                    kinds: [preference]
+                    states: [active]
+                  top_k: 20
+                  explain: true
+              hybrid:
+                summary: Hybrid search
+                value:
+                  query: 吃饭有什么忌口
+                  mode: hybrid
+                  top_k: 10
       responses:
         '200':
           description: One Top-K result set
@@ -204,15 +216,22 @@ paths:
                       updated_at: '2026-10-20T03:00:00Z'
                       created_by_app: desktop-assistant
                       origin_source_id: 22222222-2222-4222-8222-222222222222
-                    score: 0.0000042
+                    score: 0.03252247
                     snippet: 用户希望默认使用中文回答。
                     matched_terms: [回答, 语言]
                     evidence_refs:
                       - id: 44444444-4444-4444-8444-444444444444
                         source_id: 22222222-2222-4222-8222-222222222222
                     explanation:
-                      ranking: bm25
-                      field_weights: [4, 1]
+                      ranking: rrf
+                      keyword:
+                        rank: 1
+                        bm25: -0.0000042
+                      semantic:
+                        rank: 2
+                        cosine: 0.93
+                retrieval:
+                  mode: hybrid
         '400':
           $ref: '#/components/responses/BadRequest'
         '500':
@@ -921,17 +940,27 @@ components:
           type: string
           description: >-
             Ordinary keywords; empty or punctuation-only input returns an empty
-            items array. Whitespace and punctuation separate groups; continuous
-            Chinese characters are matched as an adjacent phrase.
+            items array. Whitespace and punctuation separate groups; dictionary
+            terms are matched independently. The same text is normalized for
+            semantic retrieval without the document template.
+        mode:
+          type: string
+          enum: [keyword, hybrid]
+          default: keyword
+          description: >-
+            Keyword uses FTS5/BM25 only. Hybrid runs both recall paths and fuses
+            them with RRF; semantic failures degrade to keyword with a warning.
         match:
           type: string
           enum: [all, any]
-          description: Unknown values behave as all
+          description: Unknown values behave as all; only the keyword path uses it
         filters:
           $ref: '#/components/schemas/SearchFilters'
         top_k:
           type: integer
-          description: Default 20 for missing or non-positive values; no business upper bound
+          minimum: 0
+          maximum: 100
+          description: Default 20 for missing or non-positive values; above 100 is 400
         explain:
           type: boolean
           default: false
@@ -960,12 +989,31 @@ components:
 
     SearchResponse:
       type: object
-      required: [items]
+      required: [items, retrieval]
       properties:
         items:
           type: array
           items:
             $ref: '#/components/schemas/SearchItem'
+        retrieval:
+          $ref: '#/components/schemas/SearchRetrieval'
+        warnings:
+          type: array
+          description: >-
+            Only present when semantic retrieval degraded. Stable deduplicated
+            codes: semantic_unavailable, semantic_timeout.
+          items:
+            type: string
+            enum: [semantic_unavailable, semantic_timeout]
+
+    SearchRetrieval:
+      type: object
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          enum: [keyword, hybrid]
+          description: Strategy actually executed, not whether a path returned items
 
     SearchItem:
       type: object
@@ -975,7 +1023,9 @@ components:
           $ref: '#/components/schemas/Memory'
         score:
           type: number
-          description: -bm25; larger is more relevant only within this result set
+          description: >-
+            keyword mode uses -bm25; hybrid mode uses the RRF score. Larger is
+            more relevant only within this result set.
         snippet:
           type: string
           description: >-
@@ -983,7 +1033,9 @@ components:
             long content is truncated around the first match with an ellipsis.
         matched_terms:
           type: array
-          description: Query groups actually found in the title or content.
+          description: >-
+            Keyword query groups actually found in the title or content.
+            Semantic-only results always return an empty array.
           items:
             type: string
         evidence_refs:
@@ -1006,18 +1058,39 @@ components:
 
     Explanation:
       type: object
-      required: [ranking, field_weights]
+      required: [ranking]
       properties:
         ranking:
           type: string
-          enum: [bm25]
+          enum: [bm25, rrf]
         field_weights:
           type: array
+          description: Present only for keyword-mode BM25 ranking
           minItems: 2
           maxItems: 2
           items:
             type: integer
           example: [4, 1]
+        keyword:
+          type: object
+          description: Present when the keyword path recalled this item
+          required: [rank, bm25]
+          properties:
+            rank:
+              type: integer
+              minimum: 1
+            bm25:
+              type: number
+        semantic:
+          type: object
+          description: Present when the semantic path recalled this item
+          required: [rank, cosine]
+          properties:
+            rank:
+              type: integer
+              minimum: 1
+            cosine:
+              type: number
 
     Source:
       type: object

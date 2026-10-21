@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/N0rthHXD/dmemd/internal/embedding"
 	"github.com/N0rthHXD/dmemd/internal/memory"
 	"github.com/N0rthHXD/dmemd/internal/store/sqlite"
 	_ "modernc.org/sqlite"
@@ -118,6 +119,7 @@ func (DocumentBuilder) BuildDocument(item memory.Memory) (memory.SearchDocument,
 		MemoryID:     item.ID,
 		TitleTerms:   strings.ToLower(item.Title),
 		ContentTerms: strings.ToLower(item.Content),
+		ContentHash:  embedding.DocumentHash(item),
 	}, nil
 }
 

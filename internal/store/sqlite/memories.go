@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/N0rthHXD/dmemd/internal/memory"
 	"github.com/N0rthHXD/dmemd/internal/source"
@@ -271,19 +272,102 @@ func listRevisionEvidence(ctx context.Context, q revisionQueryer, memoryID strin
 	return scanEvidenceRows(rows)
 }
 
-// UpsertSearchDocument writes the derived document. Triggers synchronize the
-// external-content FTS index in the same statement.
+// UpsertSearchDocument writes the derived document and maintains the embedding
+// generation in the same transaction. Triggers synchronize the external-content
+// FTS index in the same statement.
+//
+// Input changes delete the old vector and task, then create a fresh task with a
+// reset attempt budget and no claim token. An unchanged input reuses a valid
+// vector; a missing or profile-mismatched vector only gets a task when none with
+// the same generation exists, so attempts and retry time are never reset.
 func (t *Tx) UpsertSearchDocument(ctx context.Context, document memory.SearchDocument) error {
-	_, err := t.tx.ExecContext(ctx, `INSERT INTO memory_search_docs
-		(memory_id, title_terms, content_terms)
-		VALUES (?, ?, ?)
+	var previousHash string
+	err := t.tx.QueryRowContext(ctx,
+		`SELECT content_hash FROM memory_search_docs WHERE memory_id = ?`,
+		document.MemoryID,
+	).Scan(&previousHash)
+	exists := true
+	if errors.Is(err, sql.ErrNoRows) {
+		exists = false
+	} else if err != nil {
+		return fmt.Errorf("读取搜索文档 %s: %w", document.MemoryID, err)
+	}
+
+	_, err = t.tx.ExecContext(ctx, `INSERT INTO memory_search_docs
+		(memory_id, title_terms, content_terms, content_hash)
+		VALUES (?, ?, ?, ?)
 		ON CONFLICT(memory_id) DO UPDATE SET
 			title_terms = excluded.title_terms,
-			content_terms = excluded.content_terms`,
-		document.MemoryID, document.TitleTerms, document.ContentTerms,
+			content_terms = excluded.content_terms,
+			content_hash = excluded.content_hash`,
+		document.MemoryID, document.TitleTerms, document.ContentTerms, document.ContentHash,
 	)
 	if err != nil {
 		return fmt.Errorf("写入搜索文档 %s: %w", document.MemoryID, err)
+	}
+
+	changed := !exists || previousHash != document.ContentHash
+	now := time.Now().UTC()
+	if changed {
+		if _, err := t.tx.ExecContext(ctx,
+			`DELETE FROM memory_embeddings WHERE memory_id = ?`, document.MemoryID,
+		); err != nil {
+			return fmt.Errorf("清除记忆 %s 的过期向量: %w", document.MemoryID, err)
+		}
+		if _, err := t.tx.ExecContext(ctx,
+			`DELETE FROM memory_embedding_jobs WHERE memory_id = ?`, document.MemoryID,
+		); err != nil {
+			return fmt.Errorf("清除记忆 %s 的过期向量任务: %w", document.MemoryID, err)
+		}
+	}
+
+	enabled, profileID := false, ""
+	if t.store != nil {
+		enabled, profileID = t.store.embeddingConfig()
+	}
+	if !enabled || profileID == "" || document.ContentHash == "" {
+		return nil
+	}
+
+	var valid int
+	err = t.tx.QueryRowContext(ctx, `SELECT 1 FROM memory_embeddings
+		WHERE memory_id = ? AND profile_id = ? AND content_hash = ?
+		LIMIT 1`, document.MemoryID, profileID, document.ContentHash).Scan(&valid)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("检查记忆 %s 的向量: %w", document.MemoryID, err)
+	}
+
+	if changed {
+		_, err = t.tx.ExecContext(ctx, `INSERT INTO memory_embedding_jobs
+			(memory_id, profile_id, content_hash, status, attempts,
+			 next_attempt_at, error_code, created_at, updated_at)
+			VALUES (?, ?, ?, 'queued', 0, NULL, '', ?, ?)`,
+			document.MemoryID, profileID, document.ContentHash, formatTime(now), formatTime(now),
+		)
+	} else {
+		_, err = t.tx.ExecContext(ctx, `INSERT INTO memory_embedding_jobs
+			(memory_id, profile_id, content_hash, status, attempts,
+			 next_attempt_at, error_code, created_at, updated_at)
+			VALUES (?, ?, ?, 'queued', 0, NULL, '', ?, ?)
+			ON CONFLICT(memory_id) DO UPDATE SET
+				profile_id = excluded.profile_id,
+				content_hash = excluded.content_hash,
+				status = 'queued',
+				attempts = 0,
+				next_attempt_at = NULL,
+				error_code = '',
+				created_at = excluded.created_at,
+				updated_at = excluded.updated_at
+			WHERE memory_embedding_jobs.profile_id <> excluded.profile_id
+				OR memory_embedding_jobs.content_hash <> excluded.content_hash`,
+			document.MemoryID, profileID, document.ContentHash, formatTime(now), formatTime(now),
+		)
+	}
+	if err != nil {
+		return fmt.Errorf("写入记忆 %s 的向量任务: %w", document.MemoryID, err)
 	}
 	return nil
 }

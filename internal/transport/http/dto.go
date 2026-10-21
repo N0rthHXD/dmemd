@@ -88,9 +88,21 @@ type evidenceRefDTO struct {
 	SourceID string `json:"source_id"`
 }
 
+type keywordExplanationDTO struct {
+	Rank int     `json:"rank"`
+	BM25 float64 `json:"bm25"`
+}
+
+type semanticExplanationDTO struct {
+	Rank   int     `json:"rank"`
+	Cosine float64 `json:"cosine"`
+}
+
 type explanationDTO struct {
-	Ranking      string `json:"ranking"`
-	FieldWeights [2]int `json:"field_weights"`
+	Ranking      string                  `json:"ranking"`
+	FieldWeights *[2]int                 `json:"field_weights,omitempty"`
+	Keyword      *keywordExplanationDTO  `json:"keyword,omitempty"`
+	Semantic     *semanticExplanationDTO `json:"semantic,omitempty"`
 }
 
 type searchItemDTO struct {
@@ -102,8 +114,14 @@ type searchItemDTO struct {
 	Explanation  *explanationDTO  `json:"explanation,omitempty"`
 }
 
+type retrievalDTO struct {
+	Mode string `json:"mode"`
+}
+
 type searchResponse struct {
-	Items []searchItemDTO `json:"items"`
+	Items     []searchItemDTO `json:"items"`
+	Retrieval retrievalDTO    `json:"retrieval"`
+	Warnings  []string        `json:"warnings,omitempty"`
 }
 
 type sourceDTO struct {
@@ -226,8 +244,23 @@ func searchResultFromDomain(result retrieval.Result) searchResponse {
 		var explanation *explanationDTO
 		if item.Explanation != nil {
 			explanation = &explanationDTO{
-				Ranking:      item.Explanation.Ranking,
-				FieldWeights: item.Explanation.FieldWeights,
+				Ranking: item.Explanation.Ranking,
+			}
+			if item.Explanation.FieldWeights != [2]int{} {
+				weights := item.Explanation.FieldWeights
+				explanation.FieldWeights = &weights
+			}
+			if item.Explanation.Keyword != nil {
+				explanation.Keyword = &keywordExplanationDTO{
+					Rank: item.Explanation.Keyword.Rank,
+					BM25: item.Explanation.Keyword.BM25,
+				}
+			}
+			if item.Explanation.Semantic != nil {
+				explanation.Semantic = &semanticExplanationDTO{
+					Rank:   item.Explanation.Semantic.Rank,
+					Cosine: item.Explanation.Semantic.Cosine,
+				}
 			}
 		}
 		items = append(items, searchItemDTO{
@@ -239,7 +272,19 @@ func searchResultFromDomain(result retrieval.Result) searchResponse {
 			Explanation:  explanation,
 		})
 	}
-	return searchResponse{Items: items}
+	mode := string(result.Retrieval.Mode)
+	if mode == "" {
+		mode = string(retrieval.ModeKeyword)
+	}
+	warnings := result.Warnings
+	if len(warnings) == 0 {
+		warnings = nil
+	}
+	return searchResponse{
+		Items:     items,
+		Retrieval: retrievalDTO{Mode: mode},
+		Warnings:  warnings,
+	}
 }
 
 func sourceFromDomain(item source.Source) sourceDTO {

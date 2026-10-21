@@ -87,11 +87,13 @@ type ListOptions struct {
 
 // SearchDocument is the derived, normalized representation written alongside a
 // memory snapshot. TitleTerms and ContentTerms are the normalized text indexed
-// by FTS5; original title and content stay in the memory snapshot.
+// by FTS5; ContentHash identifies the exact embedding document bytes. Original
+// title and content stay in the memory snapshot.
 type SearchDocument struct {
 	MemoryID     string
 	TitleTerms   string
 	ContentTerms string
+	ContentHash  string
 }
 
 // DocumentBuilder is injected into the write path. P4 provides the production

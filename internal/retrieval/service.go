@@ -2,7 +2,6 @@ package retrieval
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,15 +11,19 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/source"
 )
 
-// Service implements keyword search, background related-memory selection and
-// index maintenance over the same normalization rules used by the write path.
+// Service implements keyword search, hybrid search, background related-memory
+// selection and index maintenance over the same normalization rules used by the
+// write path.
 type Service struct {
-	backend   Backend
-	documents memory.DocumentBuilder
-	logger    *slog.Logger
+	backend      Backend
+	documents    memory.DocumentBuilder
+	logger       *slog.Logger
+	encoder      QueryEncoder
+	queryTimeout time.Duration
 }
 
-// Option customizes a Service. It is primarily useful for runtime logging.
+// Option customizes a Service. It is primarily useful for runtime logging and
+// semantic assembly.
 type Option func(*Service)
 
 // WithLogger sets the structured logger used for index maintenance. The logger
@@ -33,17 +36,29 @@ func WithLogger(logger *slog.Logger) Option {
 	}
 }
 
+// WithSemantic installs the online query encoder. A nil encoder keeps the
+// service keyword-only while preserving the hybrid degradation path.
+func WithSemantic(encoder QueryEncoder) Option {
+	return func(service *Service) {
+		service.encoder = encoder
+	}
+}
+
 // NewService assembles the retrieval service. The backend owns read and index
 // maintenance capabilities; the document builder must be the same production
 // builder injected into the memory write path.
 func NewService(backend Backend, documents memory.DocumentBuilder, options ...Option) *Service {
 	service := &Service{
-		backend:   backend,
-		documents: documents,
-		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		backend:      backend,
+		documents:    documents,
+		logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		queryTimeout: DefaultQueryBudget,
 	}
 	for _, option := range options {
 		option(service)
+	}
+	if service.queryTimeout <= 0 {
+		service.queryTimeout = DefaultQueryBudget
 	}
 	return service
 }
@@ -54,15 +69,34 @@ var (
 	_ IndexMaintainer = (*Service)(nil)
 )
 
-// Search runs one Top-K keyword query. Empty or punctuation-only input is a
-// valid empty result, not an error.
+// Search runs one Top-K query. Empty or punctuation-only input is a valid empty
+// result and never calls the model.
 func (s *Service) Search(ctx context.Context, request Request) (Result, error) {
-	return s.searchGroups(ctx, dedupeGroups(Groups(request.Query)), request)
+	mode, err := normalizeMode(request.Mode)
+	if err != nil {
+		return Result{}, err
+	}
+	topK, err := normalizeTopK(request.TopK)
+	if err != nil {
+		return Result{}, err
+	}
+	groups := dedupeGroups(Groups(request.Query))
+	filters, filtersOK := sanitizeFilters(request.Filters)
+	if len(groups) == 0 || !filtersOK {
+		return Result{
+			Items:     []Item{},
+			Retrieval: Retrieval{Mode: mode},
+		}, nil
+	}
+	if mode == ModeHybrid {
+		return s.searchHybrid(ctx, groups, request, filters, topK)
+	}
+	return s.searchKeyword(ctx, groups, request, filters, topK, nil)
 }
 
 // RelatedActive selects at most ten active memories for background extraction.
-// It uses the same normalization and BM25 ordering as public search, match=any,
-// and never returns archived or deleted memories.
+// It always uses the keyword path, match=any, and never returns archived or
+// deleted memories.
 func (s *Service) RelatedActive(ctx context.Context, text string, limit int) ([]memory.Memory, error) {
 	groups := dedupeGroups(Groups(text))
 	if len(groups) > MaxRelatedQueryGroups {
@@ -71,11 +105,12 @@ func (s *Service) RelatedActive(ctx context.Context, text string, limit int) ([]
 	if limit <= 0 || limit > DefaultRelatedLimit {
 		limit = DefaultRelatedLimit
 	}
-	result, err := s.searchGroups(ctx, groups, Request{
-		Match:   MatchAny,
-		Filters: Filters{States: []memory.State{memory.StateActive}},
-		TopK:    limit,
-	})
+	if len(groups) == 0 {
+		return []memory.Memory{}, nil
+	}
+	result, err := s.searchKeyword(ctx, groups, Request{Match: MatchAny}, Filters{
+		States: []memory.State{memory.StateActive},
+	}, limit, []string{})
 	if err != nil {
 		return nil, err
 	}
@@ -87,8 +122,10 @@ func (s *Service) RelatedActive(ctx context.Context, text string, limit int) ([]
 }
 
 // RebuildIndex regenerates search documents from current business snapshots and
-// rebuilds FTS. The store commits all rows or rolls back; a failed rebuild is
-// never reported as success.
+// rebuilds FTS. With semantic retrieval enabled, unchanged documents reuse
+// valid vectors and missing or mismatched vectors receive durable background
+// tasks. The store commits all rows or rolls back; a failed rebuild is never
+// reported as success.
 func (s *Service) RebuildIndex(ctx context.Context) (RebuildResult, error) {
 	started := time.Now()
 	if s.documents == nil {
@@ -112,18 +149,11 @@ func (s *Service) RebuildIndex(ctx context.Context) (RebuildResult, error) {
 	return result, nil
 }
 
-func (s *Service) searchGroups(ctx context.Context, groups []Group, request Request) (Result, error) {
-	result := Result{Items: []Item{}}
-	if len(groups) == 0 {
-		return result, nil
-	}
-	filters, ok := sanitizeFilters(request.Filters)
-	if !ok {
-		return result, nil
-	}
-	topK := request.TopK
-	if topK <= 0 {
-		topK = DefaultTopK
+func (s *Service) searchKeyword(ctx context.Context, groups []Group, request Request, filters Filters, limit int, warnings []string) (Result, error) {
+	result := Result{
+		Items:     []Item{},
+		Retrieval: Retrieval{Mode: ModeKeyword},
+		Warnings:  dedupeWarnings(warnings),
 	}
 	match := normalizeMatch(request.Match)
 	expression, err := Compile(groups, match)
@@ -135,52 +165,159 @@ func (s *Service) searchGroups(ctx context.Context, groups []Group, request Requ
 		Groups:     groups,
 		Expression: expression,
 		Filters:    filters,
-		TopK:       topK,
+		TopK:       limit,
 	})
 	if err != nil {
 		return Result{}, err
 	}
+	assembled, err := s.assembleKeywordHits(ctx, hits, groups, filters, limit, request.Explain)
+	if err != nil {
+		return Result{}, err
+	}
+	result.Items = assembled
+	return result, nil
+}
 
+type rankedCandidate struct {
+	candidate    Candidate
+	keyword      *Hit
+	semantic     *VectorHit
+	keywordRank  int
+	semanticRank int
+	score        float64
+}
+
+func (s *Service) assembleKeywordHits(ctx context.Context, hits []Hit, groups []Group, filters Filters, limit int, explain bool) ([]Item, error) {
+	if len(hits) == 0 {
+		return []Item{}, nil
+	}
+	ids := make([]string, 0, len(hits))
 	for _, hit := range hits {
-		item, err := s.backend.GetMemory(ctx, hit.MemoryID)
-		if errors.Is(err, memory.ErrNotFound) {
-			// The index and snapshot changed between the query and assembly.
-			// A one-shot search simply omits the stale hit.
+		ids = append(ids, hit.MemoryID)
+	}
+	candidates, err := s.backend.LoadSearchCandidates(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	selected := make([]rankedCandidate, 0, limit)
+	for _, hit := range hits {
+		candidate, ok := candidates[hit.MemoryID]
+		if !ok || !matchesFilters(candidate.Memory, filters) || candidate.Memory.State == memory.StateDeleted {
 			continue
 		}
-		if err != nil {
-			return Result{}, fmt.Errorf("读取检索结果 %s: %w", hit.MemoryID, err)
+		position := len(selected) + 1
+		entry := rankedCandidate{candidate: candidate, keyword: &hit, keywordRank: position, score: -hit.BM25}
+		selected = append(selected, entry)
+		if len(selected) >= limit {
+			break
 		}
-		if !matchesFilters(item, filters) {
+	}
+	return s.buildKeywordItems(ctx, selected, groups, explain)
+}
+
+func (s *Service) buildKeywordItems(ctx context.Context, selected []rankedCandidate, groups []Group, explain bool) ([]Item, error) {
+	keys := make([]VersionKey, 0, len(selected))
+	for _, entry := range selected {
+		keys = append(keys, VersionKey{MemoryID: entry.candidate.Memory.ID, Version: entry.candidate.Memory.Version})
+	}
+	assemblies, err := s.backend.LoadSearchAssemblies(ctx, keys)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]Item, 0, len(selected))
+	for _, entry := range selected {
+		key := VersionKey{MemoryID: entry.candidate.Memory.ID, Version: entry.candidate.Memory.Version}
+		assembly, ok := assemblies[key]
+		if !ok || !assembly.Current {
+			// A concurrent revision changed the snapshot after selection. The
+			// contract allows returning fewer than Top-K rather than pairing a
+			// stale snapshot with newer evidence.
 			continue
 		}
-		evidence, err := s.backend.ListRevisionEvidence(ctx, item.ID, item.Version)
-		if err != nil {
-			return Result{}, fmt.Errorf("读取检索结果证据 %s@%d: %w", item.ID, item.Version, err)
-		}
+		item := assembly.Memory
 		matchedTerms := MatchedGroups(groups, item.Title, item.Content)
 		if len(matchedTerms) == 0 {
-			// FTS5 unicode61 applies its own diacritic folding, so a hit can
-			// exist without an exact token match in the original text. Keep
-			// matched_terms non-empty and query-readable for such hits.
+			// FTS5 unicode61 applies diacritic folding, so a hit can exist
+			// without an exact token match. Keep the keyword contract readable.
 			matchedTerms = GroupTexts(groups)
 		}
 		resultItem := Item{
 			Memory:       item,
-			Score:        -hit.BM25,
+			Score:        entry.score,
 			Snippet:      Snippet(item.Content, matchedTerms),
 			MatchedTerms: matchedTerms,
-			EvidenceRefs: EvidenceRefsFrom(evidence),
+			EvidenceRefs: EvidenceRefsFrom(assembly.Evidence),
 		}
-		if request.Explain {
-			resultItem.Explanation = &Explanation{
+		if explain {
+			explanation := &Explanation{
 				Ranking:      "bm25",
 				FieldWeights: [2]int{FieldWeightTitle, FieldWeightContent},
 			}
+			if entry.keyword != nil {
+				explanation.Keyword = &KeywordExplanation{
+					Rank: entry.keywordRank,
+					BM25: entry.keyword.BM25,
+				}
+			}
+			resultItem.Explanation = explanation
 		}
-		result.Items = append(result.Items, resultItem)
+		items = append(items, resultItem)
 	}
-	return result, nil
+	return items, nil
+}
+
+func normalizeMode(mode Mode) (Mode, error) {
+	switch mode {
+	case "", ModeKeyword:
+		return ModeKeyword, nil
+	case ModeHybrid:
+		return ModeHybrid, nil
+	default:
+		return "", fmt.Errorf("%w: mode %q", ErrInvalidRequest, mode)
+	}
+}
+
+func normalizeTopK(topK int) (int, error) {
+	if topK <= 0 {
+		return DefaultTopK, nil
+	}
+	if topK > MaxTopK {
+		return 0, fmt.Errorf("%w: top_k %d 超过上限 %d", ErrInvalidRequest, topK, MaxTopK)
+	}
+	return topK, nil
+}
+
+func candidateLimit(topK int) int {
+	limit := 5 * topK
+	if limit < CandidateLimitMin {
+		return CandidateLimitMin
+	}
+	if limit > CandidateLimitMax {
+		return CandidateLimitMax
+	}
+	return limit
+}
+
+func dedupeWarnings(warnings []string) []string {
+	if len(warnings) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(warnings))
+	result := make([]string, 0, len(warnings))
+	for _, warning := range warnings {
+		if warning == "" {
+			continue
+		}
+		if _, duplicate := seen[warning]; duplicate {
+			continue
+		}
+		seen[warning] = struct{}{}
+		result = append(result, warning)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 func sanitizeFilters(input Filters) (Filters, bool) {

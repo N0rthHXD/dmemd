@@ -20,6 +20,7 @@ func TestMigrationsCreateCoreAndSearchSchema(t *testing.T) {
 	for _, table := range []string{
 		"memories", "memory_revisions", "sources", "evidence", "revision_evidence",
 		"ingest_jobs", "schema_migrations", "memory_search_docs", "memory_fts",
+		"memory_embeddings", "memory_embedding_jobs", "memory_index_meta",
 	} {
 		var name string
 		err := store.writer.QueryRowContext(ctx,
@@ -33,8 +34,8 @@ func TestMigrationsCreateCoreAndSearchSchema(t *testing.T) {
 	if err := store.writer.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 2 {
-		t.Fatalf("migration count = %d, want 2", versions)
+	if versions != 3 {
+		t.Fatalf("migration count = %d, want 3", versions)
 	}
 
 	rows, err := store.writer.QueryContext(ctx, `PRAGMA foreign_key_check`)

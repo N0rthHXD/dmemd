@@ -42,8 +42,11 @@ P4（T4.1–T4.9）关键词检索落定的契约，补充《系统 AI 记忆服
 | `evidence` | 来源引用、可选消息 ID、原文片段、可选定位、模型名和 redacted 状态；来源行保留 |
 | `revision_evidence` | 版本完整证据集合；主键 `(memory_id, version, evidence_id)`，关联版本和证据 |
 | `ingest_jobs` | 状态、尝试次数、下次执行时间、脱敏错误和 `memory_ids` 结果摘要；不保存原始模型响应 |
-| `memory_search_docs` | 派生文档：`row_id` 对应 FTS rowid，`memory_id` 唯一；只保留规范化词项，原文以 `memories` 为准 |
+| `memory_search_docs` | 派生文档：`row_id` 对应 FTS rowid，`memory_id` 唯一，`content_hash` 标识 Embedding 文档字节；只保留规范化词项，原文以 `memories` 为准 |
 | `memory_fts` | 外部内容 FTS5 表，内容表为 `memory_search_docs`，`unicode61` tokenizer |
+| `memory_embeddings` | 每条当前记忆一个向量：`memory_id` 主键、`profile_id`、`content_hash`、`dimensions > 0`、little-endian float32 BLOB、`embedded_at`；外键随搜索文档级联删除，BLOB 长度必须为 `dimensions*4` |
+| `memory_embedding_jobs` | 持久化向量任务：`memory_id` 主键、Profile/内容哈希、`queued/running/failed`、尝试次数、下次重试时间与脱敏错误码；外键随搜索文档级联删除 |
+| `memory_index_meta` | 记录生成当前内容哈希的文档输入契约版本；版本变化时启动阶段执行一次全量本地重建 |
 | `schema_migrations` | 顺序迁移版本记录 |
 
 外键默认启用。来源清除不删除来源标识；永久清除记忆时只删除该记忆的版本、版本证据关联和
@@ -130,14 +133,35 @@ P4（T4.1–T4.9）关键词检索落定的契约，补充《系统 AI 记忆服
 - `memory_search_docs` 是派生数据，`memory_fts` 是外部内容 FTS5 表。插入、更新、删除文档由
   触发器在同一事务内同步 FTS。归档只更新 `memories.state` 并保留索引；逻辑删除删除搜索文档。
 - `Store.RebuildSearchDocuments` 在一个写事务内从 `memories` 重新生成全部未删除（`active` 与
-  `archived`）搜索文档，再重建 FTS；`deleted` 不进入派生索引。构造器或 SQL 失败时事务整体
+  `archived`）搜索文档，再重建 FTS；`deleted` 不进入派生索引。重建按记忆 ID upsert 并逐条清理
+  无效文档，不再先清空整表，因此有效向量不会因重建被级联删除。构造器或 SQL 失败时事务整体
   回滚，返回错误且不报告部分成功。`retrieval.Service.RebuildIndex` 包装该能力并只记录数量、
   耗时和错误，不记录记忆原文。
-- `RelatedActive` 供 ingest 在后台选择相关上下文：使用同一规范化和词典分词，`match=any`，只查
+- `RelatedActive` 供 ingest 在后台选择相关上下文：始终使用关键词路，`match=any`，只查
   `active`，最多取去重后的前 32 个分词词项和 10 条记忆；无匹配返回空切片，不改变公共搜索协议。
 - `RebuildSearchIndex` 仍可用于仅从已有派生文档重建 FTS；生产完整重建使用上述快照重建。
 
-## 9. 测试设施与当前限制
+## 9. 混合检索持久化与向量 Worker
+
+- `memory.DocumentBuilder` 生成 FTS 词项和 `content_hash`。内容哈希是固定文档模板版本与实际
+  文档字节的 SHA-256；标题、正文、kind 变化时改变，状态、证据、版本和时间变化不改变。
+- `Tx.UpsertSearchDocument` 在同一事务内比较旧哈希。输入变化时更新 FTS/哈希、删除旧向量与
+  任务并创建新任务（尝试次数归零）；输入未变且有有效向量时复用；输入未变但
+  缺失或 Profile 不匹配时只补缺失任务，不重置已有任务的尝试次数或重试时间。功能关闭时不创建
+  任务，但仍维护哈希并在输入变化时清除过期向量。
+- 永久清除或逻辑删除通过 `DeleteSearchDocument`/`PurgeMemory` 删除派生文档，外键级联删除
+  向量与任务；在途 Worker 的条件提交会因搜索文档或哈希不存在而失败，不能重新插入结果。
+- `Store.ClaimJob` 在短写事务中领取到期 `queued` 任务并递增 `attempts`；`LoadDocument`
+  读取当前快照与哈希；`CommitJob` 只在 Profile、内容哈希和当前派生文档哈希全部匹配时
+  写向量并删除任务；`FailJob` 只更新仍在 `running` 的同一代际任务。`RecoverJobs` 在
+  启动时把遗留 `running` 重排为 `queued` 并保留尝试次数。
+- `EnqueueMissingJobs` 为当前文档缺失或 Profile/哈希不匹配的向量补任务；同一代际的
+  `queued/running` 任务不会被重置，`failed` 任务在下次启动补任务时重排。
+- 向量由 Go 流式精确检索：SQL 先按当前记忆、状态、类型、应用、更新时间和
+  `profile_id`/`dimensions`/`e.content_hash = d.content_hash` 过滤，再解码并计算点积；使用
+  固定大小堆保留 Top-K，及时响应 context 取消。架构不使用向量扩展或外部向量数据库。
+
+## 10. 测试设施与当前限制
 
 `internal/testutil` 提供：
 

@@ -2,6 +2,10 @@ package runtime
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,5 +91,90 @@ func TestIngestWorkerRejectsMultipleWorkers(t *testing.T) {
 	cfg.Workers = 2
 	if _, err := NewIngestWorker(store, processor, cfg, discardLogger()); err == nil {
 		t.Fatal("multiple workers accepted")
+	}
+}
+
+func TestEmbeddingAssemblyIndexesAndSearchesSemantically(t *testing.T) {
+	chat := testutil.NewFakeModel(t)
+	chat.EnqueueContent(`{"candidates":[{"content":"用户偏好清淡饮食。"}]}`)
+	embeddingServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":[{"index":0,"embedding":[1,0,0]}]}`)
+	}))
+	defer embeddingServer.Close()
+
+	store := testutil.NewStore(t)
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Database.Path = store.Path()
+	cfg.Listen = "127.0.0.1:0"
+	cfg.Model.Name = "extract"
+	cfg.Model.BaseURL = chat.URL()
+	cfg.Model.Timeout = Duration(time.Second)
+	cfg.Embedding.Enabled = true
+	cfg.Embedding.BaseURL = embeddingServer.URL
+	cfg.Embedding.Model = "embedding-test"
+	cfg.Embedding.Dimensions = 3
+	cfg.Embedding.Timeout = Duration(time.Second)
+
+	stack, err := NewStack(cfg, discardLogger(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stack.EmbeddingWorker == nil {
+		t.Fatal("embedding worker missing from stack")
+	}
+	receipt, err := stack.Services.Ingest.Submit(context.Background(), ingest.Submission{Content: []byte(`"用户偏好清淡饮食。"`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processed, err := stack.Worker.ProcessOne(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("ingest processed = %v, err = %v", processed, err)
+	}
+	job, err := stack.Services.Ingest.GetJob(context.Background(), receipt.JobID)
+	if err != nil || job.Status != ingest.JobSucceeded || len(job.MemoryIDs) != 1 {
+		t.Fatalf("job = %+v, err = %v", job, err)
+	}
+	processed, err = stack.EmbeddingWorker.ProcessOne(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("embedding processed = %v, err = %v", processed, err)
+	}
+
+	result, err := stack.Services.Search.Search(context.Background(), retrieval.Request{
+		Query: "吃饭有什么忌口", Mode: retrieval.ModeHybrid, TopK: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Retrieval.Mode != retrieval.ModeHybrid || len(result.Warnings) != 0 {
+		t.Fatalf("retrieval = %+v", result)
+	}
+	if len(result.Items) != 1 || result.Items[0].Memory.ID != job.MemoryIDs[0] {
+		t.Fatalf("items = %+v", result.Items)
+	}
+	if result.Items[0].MatchedTerms == nil || len(result.Items[0].MatchedTerms) != 0 {
+		t.Fatalf("semantic hit fabricated matched_terms: %#v", result.Items[0].MatchedTerms)
+	}
+
+	var documents int
+	if err := testutil.OpenInspector(t, store.Path()).QueryRow(`SELECT count(*) FROM memory_embeddings`).Scan(&documents); err != nil {
+		t.Fatal(err)
+	}
+	if documents != 1 {
+		t.Fatalf("embedding rows = %d", documents)
+	}
+}
+
+func TestNewStackRejectsIncompleteEmbeddingConfig(t *testing.T) {
+	store := testutil.NewStore(t)
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Database.Path = store.Path()
+	cfg.Listen = "127.0.0.1:0"
+	cfg.Embedding.Enabled = true
+	if _, err := NewStack(cfg, discardLogger(), store); err == nil ||
+		!strings.Contains(err.Error(), "embedding") {
+		t.Fatalf("NewStack error = %v", err)
 	}
 }

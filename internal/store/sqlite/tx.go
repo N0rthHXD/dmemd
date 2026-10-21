@@ -21,7 +21,8 @@ type txContextKey struct{}
 // Tx is the concrete transaction scope. It intentionally exposes no Commit or
 // Rollback method: only Store.WithTx controls the transaction boundary.
 type Tx struct {
-	tx *sql.Tx
+	tx    *sql.Tx
+	store *Store
 }
 
 // WithTx runs one short write transaction. The callback must not perform model
@@ -50,7 +51,7 @@ func (s *Store) WithTx(ctx context.Context, fn func(context.Context, *Tx) error)
 	}()
 
 	callbackCtx := context.WithValue(ctx, txContextKey{}, true)
-	if err := fn(callbackCtx, &Tx{tx: tx}); err != nil {
+	if err := fn(callbackCtx, &Tx{tx: tx, store: s}); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {

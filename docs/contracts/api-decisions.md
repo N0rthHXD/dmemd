@@ -149,13 +149,14 @@ JSON 解码失败才返回 `400`，资源不存在返回 `404`，执行失败返
 证据按 `created_at ASC, id ASC` 返回，不分页。来源清除后，`quote`、`location` 和原文副本
 不再返回，条目保留 `redacted=true` 与来源 ID。响应 `{"items":[...]}`。
 
-## 5. 关键词检索
+## 5. 检索
 
 ### `POST /v1/memories/search`
 
 ```json
 {
   "query": "回答 语言",
+  "mode": "hybrid",
   "match": "all",
   "filters": {
     "kinds": ["preference"],
@@ -171,30 +172,34 @@ JSON 解码失败才返回 `400`，资源不存在返回 `404`，执行失败返
 
 | 字段 | 默认/边界 |
 | --- | --- |
-| `query` | 缺失或空白返回 `200` 与空 `items`；按普通关键词处理，先 NFC/小写并使用内置词典精准分词，每个词项独立匹配，不暴露 FTS 语法 |
-| `match` | 缺失或未知值按 `all`；支持 `all`、`any`，分别对分词词项做 `AND`、`OR` |
+| `query` | 缺失或空白返回 `200` 与空 `items`；关键词路按普通文本处理，先 NFC/小写并使用内置词典精准分词，每个词项独立匹配，不暴露 FTS 语法；语义路只做 NFC/首尾空白清理 |
+| `mode` | 缺失或空为 `keyword`；支持 `keyword`、`hybrid`，其他值返回 `400` |
+| `match` | 缺失或未知值按 `all`；支持 `all`、`any`，分别对分词词项做 `AND`、`OR`，只作用于关键词路 |
 | `filters.kinds` | 缺失/空不过滤；无法识别的值忽略；全部不可识别时结果为空 |
 | `filters.states` | 缺失/空默认 `active`；显式包含 `archived` 才查归档；`deleted` 永不返回 |
 | `filters.created_by_app` | 缺失/空不过滤 |
 | `filters.updated_after/before` | RFC 3339；无法解析时忽略该边界 |
-| `top_k` | 缺失、非正整数或无法解析时使用 20；无业务上限 |
+| `top_k` | 缺失、非正整数或无法解析时使用 20；大于 100 返回 `400` |
 | `explain` | 默认 `false`；只有 `true` 返回 `explanation` |
 
-排序固定为加权 BM25（标题 4、正文 1）升序、`updated_at` 降序、`id` 升序。对外
-`score = -bm25`，越大越相关；分数只用于当前查询内比较。响应：
+关键词排序为加权 BM25（标题 4、正文 1）升序、`updated_at` 降序、`id` 升序，对外
+`score = -bm25`。混合模式两路候选按 `1/(60+rank)` 融合，按 RRF 分数降序、
+`updated_at` 降序、`id` 升序输出，`score` 为 RRF 分数；不直接相加 BM25 与余弦。
+分数只用于当前查询内比较。响应：
 
 ```json
 {
   "items": [
     {
       "memory": {"id":"memory-uuid","kind":"preference","title":"回答语言","content":"用户希望默认使用中文回答。","state":"active","version":3,"observed_at":"2026-10-20T02:00:00Z","created_at":"2026-10-20T02:00:01Z","updated_at":"2026-10-20T03:00:00Z","created_by_app":"desktop-assistant","origin_source_id":"source-uuid"},
-      "score": 0.0000042,
+      "score": 0.03252247,
       "snippet": "用户希望默认使用中文回答。",
       "matched_terms": ["回答", "语言"],
       "evidence_refs": [{"id":"evidence-uuid","source_id":"source-uuid"}],
-      "explanation": {"ranking":"bm25","field_weights":[4,1]}
+      "explanation": {"ranking":"rrf","keyword":{"rank":1,"bm25":-0.0000042},"semantic":{"rank":2,"cosine":0.93}}
     }
-  ]
+  ],
+  "retrieval": {"mode": "hybrid"}
 }
 ```
 
@@ -203,9 +208,17 @@ JSON 解码失败才返回 `400`，资源不存在返回 `404`，执行失败返
 开头截取。
 `matched_terms` 列出实际出现在标题或正文中的查询分词词项，保持原查询顺序和可读形式（英文为
 小写），不会返回内部索引片段；若 FTS tokenizer 的折叠规则导致无法精确定位，则回退为本次查询
-词项列表。匹配单位是词典词项，不再保证任意单字都是更长词项的子串命中。
-`evidence_refs` 对应当前版本，来源清除后仍保留 ID/source_id 关联但不含片段副本。`explanation` 仅在 `explain=true` 时出现。空查询、纯标点或纯 FTS 保留字符不是错误，
+词项列表。仅语义命中的结果固定返回空数组，不伪造关键词命中。匹配单位是词典词项，不再保证任意
+单字都是更长词项的子串命中。
+`evidence_refs` 对应当前版本，来源清除后仍保留 ID/source_id 关联但不含片段副本。`explanation` 仅在 `explain=true` 时出现；关键词模式为 `bm25`，混合模式为 `rrf`，并按参与路径返回
+`keyword` 与 `semantic` 的排名和原始分数。空查询、纯标点或纯 FTS 保留字符不是错误，
 返回空 `items`；调用方应改用管理列表接口获取全量列表。搜索没有跨请求快照或分页。
+
+`retrieval.mode` 表示实际执行策略：语义功能关闭、模型网络/协议错误或 429 降级为
+`keyword` 并返回 `semantic_unavailable`；查询模型预算超时返回 `semantic_timeout`。
+`warnings` 仅在降级时出现，使用去重稳定代码；数据库错误返回 `500`。没有有效向量时
+仍按 hybrid 执行并只返回关键词候选；部分向量缺失时继续使用已有有效向量，允许少于
+Top-K。
 
 后台相关 active 记忆选择不属于公共搜索接口：使用同一规范化与 `match=any`，只选 `active`，
 最多取前 32 个去重分词词项和 10 条记忆；选择规则记录在 `model-provider.md`。

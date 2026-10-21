@@ -108,7 +108,7 @@ curl -sS http://127.0.0.1:18432/v1/ingest-jobs/33333333-3333-4333-8333-333333333
 # 默认返回最近更新的 50 条 active/archived 记忆，无分页
 curl -sS 'http://127.0.0.1:18432/v1/memories?limit=20'
 
-# 关键词检索；默认 match=all、top_k=20、仅 active
+# 关键词检索；按词典分词，默认 match=all、top_k=20、仅 active
 curl -sS -X POST http://127.0.0.1:18432/v1/memories/search \
   -H 'Content-Type: application/json' \
   -d '{"query":"回答 语言","filters":{"kinds":["preference"]},"explain":true}'

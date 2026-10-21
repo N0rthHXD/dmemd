@@ -27,8 +27,7 @@ const (
 	FieldWeightContent = 1
 )
 
-// Match controls how whitespace/punctuation separated query groups are
-// combined.
+// Match controls how dictionary terms in a query are combined.
 type Match string
 
 const (
@@ -56,9 +55,9 @@ type Request struct {
 	Explain bool
 }
 
-// Group is one contiguous query unit. Text is the normalized, readable form
-// used for matched_terms; Tokens is the FTS token sequence (continuous Han
-// characters become one token per character).
+// Group is one query unit. Text is the normalized, readable term used for
+// matched_terms; Tokens is its FTS token sequence. Groups produced by Groups
+// contain one dictionary term each.
 type Group struct {
 	Text   string
 	Tokens []string

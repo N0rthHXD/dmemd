@@ -2,7 +2,7 @@
 
 ## 执行说明
 
-本清单依据《系统 AI 记忆服务架构设计.md》（v1）及 `tech-stack.md`、`project-structure.md`、`plan.md`。共保留 67 个任务，P1–P6 的 57 项已完成验收；P7（T7.1–T7.10）共 10 项暂缓。P1（T1.1–T1.9）、P2（T2.1–T2.9）、P3（T3.1–T3.10）、P4（T4.1–T4.8）、P5（T5.1–T5.12）与 P6（T6.1–T6.9）已于 2026-10-20 完成验收并记录；P7 暂缓。不能把规划文档、已完成阶段基础或 P6 的 HTTP 契约视为 P7 容量、备份和发布能力已经完成。
+本清单依据《系统 AI 记忆服务架构设计.md》（v1）及 `tech-stack.md`、`project-structure.md`、`plan.md`。共保留 68 个任务，P1–P6 的 58 项已完成验收；P7（T7.1–T7.10）共 10 项暂缓。P1（T1.1–T1.9）、P2（T2.1–T2.9）、P3（T3.1–T3.10）与 P4（T4.1–T4.9）已于 2026-10-20 至 2026-10-21 完成验收并记录；P5（T5.1–T5.12）与 P6（T6.1–T6.9）已于 2026-10-20 完成验收；P7 暂缓。不能把规划文档、已完成阶段基础或 P6 的 HTTP 契约视为 P7 容量、备份和发布能力已经完成。
 
 每个任务可以单独交给 Code Agent。执行时读取本任务、上述四份依据、适用的仓库指令和已完成依赖；只实现本任务范围，不提前引入后续功能。明确依赖是最低前置条件，阶段入口还要求上一阶段验收通过。当前在 T6.9 验收后结束，不自动进入 P7；用户明确恢复或指定执行后再开展暂缓任务。每项交付包含代码/文档、适当测试、运行命令和结果。测试不依赖真实模型或生产数据；CI 常规测试使用临时真实 SQLite 与可控假模型。P1–P6 原有的功能、事务、重试和恢复测试仍须完成。
 
@@ -217,28 +217,28 @@
 - **依赖**：T3.10。
 - **描述**：实现 NFC、英文大小写归一、英文数字按词、连续汉字逐字 token、标点边界；提供搜索文档构造器并接入 T3.1 的写入能力，替换测试注入用于生产的装配。
 - **验收标准**：文档与查询共享相同规则；规范化等价文本结果一致；一字/两字/长中文及中英文混合测试通过；所有创建/内容更正/恢复路径均写入同一规则的标题和正文文档；保留原正文用于摘要。
-- **执行记录**：新增 `internal/retrieval/normalize.go`、`normalize_test.go`，新增 `internal/runtime/services.go`、`services_test.go`。`Normalize` 使用 NFC + Unicode 小写；`Groups`/`Tokens` 按空白和标点分组，英文数字按词、连续汉字逐字 token；`DocumentBuilder` 保留原始标题/正文并写入规范化词项。`runtime.NewMemoryService` 在生产装配中注入该构造器，创建、内容更正、补证、归档、恢复、删除和永久清除沿用同一 `syncSearchDocument`。验证：`go test -count=1 ./internal/retrieval ./internal/runtime ./tests/integration` 通过 `TestGroupsChineseEnglishNumbersAndPunctuation`、`TestDocumentBuilderKeepsOriginalTextAndNormalizedTerms`、`TestProductionServicesUseSharedNormalization`、`TestP4NormalizationEquivalentInputs`；`make check` 通过。限制：该记录完成时 P5/P6 尚未开始；P5/P6 后续已完成 ingest 组装和 HTTP 接入；首版不做同义词或语义扩展。
+- **执行记录**：新增 `internal/retrieval/normalize.go`、`normalize_test.go`，新增 `internal/runtime/services.go`、`services_test.go`。`Normalize` 使用 NFC + Unicode 小写；`Groups`/`Tokens` 按空白和标点分组，英文数字按词、连续汉字逐字 token；`DocumentBuilder` 保留原始标题/正文并写入规范化词项。`runtime.NewMemoryService` 在生产装配中注入该构造器，创建、内容更正、补证、归档、恢复、删除和永久清除沿用同一 `syncSearchDocument`。验证：`go test -count=1 ./internal/retrieval ./internal/runtime ./tests/integration` 通过 `TestGroupsChineseEnglishNumbersAndPunctuation`、`TestDocumentBuilderKeepsOriginalTextAndNormalizedTerms`、`TestProductionServicesUseSharedNormalization`、`TestP4NormalizationEquivalentInputs`；`make check` 通过。限制：该记录完成时 P5/P6 尚未开始；P5/P6 后续已完成 ingest 组装和 HTTP 接入；首版不做同义词或语义扩展。该记录中的逐字 token 规则已由 T4.9 的词典分词取代。
 
 ### [x] T4.2 实现普通关键词到 FTS 的安全编译
 
 - **依赖**：T4.1。
 - **描述**：将连续汉字编译为相邻短语，按空白分组并用 all/any 组合，处理标点边界；正确转义 FTS 字面量并参数绑定，不把用户文本当作 FTS 表达式。
 - **验收标准**：“记忆”只匹配相邻“记”“忆”；一字查询工作；引号、括号、星号、OR 等输入不会成为用户可控运算符；空查询按契约引导管理列表语义；不增加同义词或语义推断。
-- **执行记录**：新增 `internal/retrieval/query.go`、`query_test.go`。每组 token 编译为双引号相邻短语，`all`/`any` 分别用 `AND`/`OR` 组合；标点只作边界，引号、括号、星号和 `OR`/`NEAR` 均被当作普通 token 或丢弃；最终表达式只作为 `memory_fts MATCH ?` 参数绑定。验证：`go test -count=1 ./internal/retrieval ./tests/integration` 通过 `TestCompileGroupsAsQuotedPhrases`、`TestCompileQuotesUserOperators`、`TestP4ChineseKeywordSearchContract` 中的一字查询、标点与 FTS 特殊字符用例；`make check` 通过。限制：空查询和纯标点返回空结果；不暴露 FTS 高级语法、同义词或语义推断。
+- **执行记录**：新增 `internal/retrieval/query.go`、`query_test.go`。每组 token 编译为双引号相邻短语，`all`/`any` 分别用 `AND`/`OR` 组合；标点只作边界，引号、括号、星号和 `OR`/`NEAR` 均被当作普通 token 或丢弃；最终表达式只作为 `memory_fts MATCH ?` 参数绑定。验证：`go test -count=1 ./internal/retrieval ./tests/integration` 通过 `TestCompileGroupsAsQuotedPhrases`、`TestCompileQuotesUserOperators`、`TestP4ChineseKeywordSearchContract` 中的一字查询、标点与 FTS 特殊字符用例；`make check` 通过。限制：空查询和纯标点返回空结果；不暴露 FTS 高级语法、同义词或语义推断。该记录中的整组短语匹配已由 T4.9 的词项级匹配取代。
 
 ### [x] T4.3 实现搜索过滤与固定排序
 
 - **依赖**：T4.2。
 - **描述**：实现 FTS 与类型、状态、创建应用、更新时间范围过滤；标题/正文 BM25 权重 4/1，按 bm25 升序、updated_at 降序、id 升序，输出 score=-bm25 和默认 top_k=20。
 - **验收标准**：相同查询结果稳定；分数越大越相关但不解释为可信度；默认 active，显式 archived 可查，deleted 绝不返回；all/any 和组合过滤可验证；无跨请求快照或分页。
-- **执行记录**：扩展 `internal/retrieval/{types,ports,service}.go`，在 `internal/store/sqlite/search.go` 实现 `Store.Search`。默认只查 `active`，显式 `archived` 可查，`deleted` 在服务层和存储层双重排除；类型、状态、创建应用和更新时间过滤以 `memories` 当前快照为准；固定 `bm25(memory_fts,4,1) ASC, updated_at DESC, id ASC`，对外 `score=-bm25`，默认 `top_k=20`。验证：`go test -count=1 ./internal/store/sqlite ./tests/integration` 通过 `TestSearchChinesePhraseFiltersRankingAndLimits`、`TestSearchOrdersTiesByUpdatedAtThenID`、`TestP4ChineseKeywordSearchContract` 中的 all/any、过滤、分数和 Top-K 用例；`make check` 通过。限制：一次性 Top-K，无跨请求搜索快照或分页；`top_k` 无业务上限，`app_id` 只作过滤字段。
+- **执行记录**：扩展 `internal/retrieval/{types,ports,service}.go`，在 `internal/store/sqlite/search.go` 实现 `Store.Search`。默认只查 `active`，显式 `archived` 可查，`deleted` 在服务层和存储层双重排除；类型、状态、创建应用和更新时间过滤以 `memories` 当前快照为准；固定 `bm25(memory_fts,4,1) ASC, updated_at DESC, id ASC`，对外 `score=-bm25`，默认 `top_k=20`。验证：`go test -count=1 ./internal/store/sqlite ./tests/integration` 通过 `TestSearchChineseTermsFiltersRankingAndLimits`、`TestSearchOrdersTiesByUpdatedAtThenID`、`TestP4ChineseKeywordSearchContract` 中的 all/any、过滤、分数和 Top-K 用例；`make check` 通过。限制：一次性 Top-K，无跨请求搜索快照或分页；`top_k` 无业务上限，`app_id` 只作过滤字段。
 
 ### [x] T4.4 实现可读摘要、证据引用与按需解释
 
 - **依赖**：T4.3。
 - **描述**：从原始记忆正文生成 snippet、命中词与当前版本 evidence_refs；仅 explain=true 时包含 ranking 与 field_weights 等解释。
 - **验收标准**：中文摘要保持连续原文而非拆字索引；混合 Unicode 不截断非法字符；不嵌入 HTML；explanation 默认省略；证据引用对应当前版本且已清除来源不返回片段副本。
-- **执行记录**：新增 `internal/retrieval/snippet.go`、`snippet_test.go`，并在 `internal/retrieval/service.go` 组装结果。摘要从原始正文取最早命中附近最多 160 个 rune，必要时加 `…`，按 rune 边界截取且不返回拆字文本；`matched_terms` 只包含实际出现在标题/正文的查询组；`evidence_refs` 读取当前版本完整证据，仅保留 ID/source_id；`explanation` 仅在 `explain=true` 返回 `ranking=bm25`、`field_weights=[4,1]`。验证：`go test -count=1 ./internal/retrieval ./tests/integration` 通过 `TestSnippet*`、`TestMatchedGroupsUsesAdjacentSequences`、`TestP4ChineseKeywordSearchContract` 的摘要、证据和解释用例；`make check` 通过。限制：摘要为简单可读窗口，不做高亮、HTML 或语义摘要；来源清除后引用仍保留 ID 关联但不含片段副本。
+- **执行记录**：新增 `internal/retrieval/snippet.go`、`snippet_test.go`，并在 `internal/retrieval/service.go` 组装结果。摘要从原始正文取最早命中附近最多 160 个 rune，必要时加 `…`，按 rune 边界截取且不返回拆字文本；`matched_terms` 只包含实际出现在标题/正文的查询词项；`evidence_refs` 读取当前版本完整证据，仅保留 ID/source_id；`explanation` 仅在 `explain=true` 返回 `ranking=bm25`、`field_weights=[4,1]`。验证：`go test -count=1 ./internal/retrieval ./tests/integration` 通过 `TestSnippet*`、`TestMatchedGroupsUsesDictionaryTerms`、`TestP4ChineseKeywordSearchContract` 的摘要、证据和解释用例；`make check` 通过。限制：摘要为简单可读窗口，不做高亮、HTML 或语义摘要；来源清除后引用仍保留 ID 关联但不含片段副本。
 
 ### [x] T4.5 验证检索与记忆生命周期一致性
 
@@ -266,7 +266,14 @@
 - **依赖**：T4.7。
 - **描述**：向 ingest 暴露基于当前输入关键词的相关 active 记忆查询，用于候选提取/合并上下文；按 T1.3 固定选择与上下文组装方式，不修改公共搜索协议。
 - **验收标准**：上下文只含当前来源及相关 active 记忆，不载入无关来源/全库；archived/deleted 不作为自动合并目标；无匹配可返回空上下文；不强制截断或拒绝用户提交内容。
-- **执行记录**：在 `internal/retrieval/service.go` 增加 `RelatedActive`/`RelatedService`，复用同一规范化与 BM25 排序，`match=any`、只查 `active`，去重后最多取前 32 个查询组和 10 条记忆；`runtime.NewSearchService` 生产装配。`docs/contracts/model-provider.md` 已固定选择与截断规则。验证：`go test -count=1 ./tests/integration ./internal/runtime` 通过 `TestP4RelatedActiveContext`（排除 archived/deleted/无关记忆、limit 生效、无匹配返回非 nil 空切片）和 `TestProductionServicesUseSharedNormalization`；`make check` 通过。限制：该记录完成时 P5 Worker 尚未调用；P5 后续已完成接入，公共搜索 DTO 未改变；输入过长只截断派生查询组，不拒绝原始提交。
+- **执行记录**：在 `internal/retrieval/service.go` 增加 `RelatedActive`/`RelatedService`，复用同一规范化与 BM25 排序，`match=any`、只查 `active`，去重后最多取前 32 个分词词项和 10 条记忆；`runtime.NewSearchService` 生产装配。`docs/contracts/model-provider.md` 已固定选择与截断规则。验证：`go test -count=1 ./tests/integration ./internal/runtime` 通过 `TestP4RelatedActiveContext`（排除 archived/deleted/无关记忆、limit 生效、无匹配返回非 nil 空切片）和 `TestProductionServicesUseSharedNormalization`；`make check` 通过。限制：该记录完成时 P5 Worker 尚未调用；P5 后续已完成接入，公共搜索 DTO 未改变；输入过长只截断派生查询词项，不拒绝原始提交。
+
+### [x] T4.9 改用词典分词并移除整句短语匹配
+
+- **依赖**：T4.8。
+- **描述**：将文档/查询共用规则从“连续汉字逐字 token、整组编译为相邻短语”改为内置词典精准分词；每个分词词项独立作为查询组，`all/any` 对词项做 `AND`/`OR`；保留 NFC、小写和标点边界，不删除停用词、不做 n-gram 扩展。
+- **验收标准**：索引与查询使用同一分词结果；长中文查询按多个词项匹配，不再编译为整句短语；非相邻词项可在同一文档中命中；`matched_terms` 返回词项；HTTP 请求和响应结构不变。
+- **执行记录**：在 `internal/retrieval/normalize.go` 引入固定版本 `github.com/go-ego/gse v1.1.0`，以 `SkipSubSeg` 精准模式加载内置中文词典；`Groups` 每个词项生成独立 `Group`，`Tokens`/`IndexText`/`MatchedGroups` 复用同一分词。更新 `internal/retrieval/*_test.go`、`internal/store/sqlite/search_query_test.go` 和 `tests/integration/p4_search_test.go`，覆盖 `Jon是什么时候失去银行职员工作的？`、非相邻词项、词项缺失与相关 active 选择。验证：`go test -count=1 ./...`、`make check`。限制：不迁移旧派生索引、不兼容旧逐字索引，开发库需重建索引；不做停用词、n-gram 或同义词扩展。
 
 ## P5：模型与持久化处理链
 
@@ -296,7 +303,7 @@
 - **依赖**：T5.3、T4.8。
 - **描述**：编排来源加载、关键词相关记忆选择、模型调用和候选整理；固定 observed_at 缺失时的接收时间回退规则，全部网络和长计算在写事务外完成。
 - **验收标准**：假模型检查只收到当前输入与相关上下文；blocked 模型不持有数据库写事务；调用失败不改已有记忆；任意 content 形态不依赖独立提取模式或调用方证据。
-- **执行记录**：新增 `internal/ingest/processor.go`、`internal/ingest/processor_test.go`。处理流程先读来源、以字符串/对象/数组/标量中的文本构造派生查询，调用 `retrieval.RelatedActive`，再在事务外调用 Provider 和整理候选；候选 `observed_at` 缺失时使用来源 `created_at`。验证：`go test -count=1 ./internal/ingest` 通过 blocked 模型期间独立提交可完成、请求只含当前来源和相关 active 记忆、无关/归档记忆不进入上下文、不同 `content` 形态可处理。限制：相关查询沿用 P4 的连续汉字短语规则，长连续中文句可能比空格分隔关键词命中更少；本任务不改变该检索契约。
+- **执行记录**：新增 `internal/ingest/processor.go`、`internal/ingest/processor_test.go`。处理流程先读来源、以字符串/对象/数组/标量中的文本构造派生查询，调用 `retrieval.RelatedActive`，再在事务外调用 Provider 和整理候选；候选 `observed_at` 缺失时使用来源 `created_at`。验证：`go test -count=1 ./internal/ingest` 通过 blocked 模型期间独立提交可完成、请求只含当前来源和相关 active 记忆、无关/归档记忆不进入上下文、不同 `content` 形态可处理。限制：相关查询沿用 P4 的词典分词规则，按去重后的词项做 `any` 匹配；本任务不改变该检索契约。
 
 ### [x] T5.5 实现新增与同事实更新决策
 

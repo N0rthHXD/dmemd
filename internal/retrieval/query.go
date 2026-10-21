@@ -4,7 +4,9 @@ import "strings"
 
 // Compile turns normalized groups into an FTS5 MATCH expression. Each group is
 // quoted as a phrase, so user punctuation, quotes, parentheses, stars and words
-// such as OR/NEAR can never become FTS operators.
+// such as OR/NEAR can never become FTS operators. Groups from Groups contain a
+// single dictionary term each; the phrase form also keeps multi-token groups
+// passed by other callers safe.
 func Compile(groups []Group, match Match) (string, error) {
 	if len(groups) == 0 {
 		return "", nil

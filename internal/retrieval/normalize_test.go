@@ -27,16 +27,16 @@ func TestGroupsChineseEnglishNumbersAndPunctuation(t *testing.T) {
 		tokens [][]string
 	}{
 		{
-			name:   "one and two character Chinese phrases",
+			name:   "Chinese dictionary terms",
 			input:  "记忆 回答",
 			texts:  []string{"记忆", "回答"},
-			tokens: [][]string{{"记", "忆"}, {"回", "答"}},
+			tokens: [][]string{{"记忆"}, {"回答"}},
 		},
 		{
-			name:   "mixed English and Chinese stays one group",
+			name:   "mixed English and Chinese becomes separate terms",
 			input:  "AI记忆，2026",
-			texts:  []string{"ai记忆", "2026"},
-			tokens: [][]string{{"ai", "记", "忆"}, {"2026"}},
+			texts:  []string{"ai", "记忆", "2026"},
+			tokens: [][]string{{"ai"}, {"记忆"}, {"2026"}},
 		},
 		{
 			name:   "English words and case",
@@ -45,22 +45,22 @@ func TestGroupsChineseEnglishNumbersAndPunctuation(t *testing.T) {
 			tokens: [][]string{{"hello"}, {"world"}, {"next"}},
 		},
 		{
-			name:   "punctuation closes groups without whitespace",
+			name:   "punctuation closes terms without whitespace",
 			input:  "记忆,检索。回答",
 			texts:  []string{"记忆", "检索", "回答"},
-			tokens: [][]string{{"记", "忆"}, {"检", "索"}, {"回", "答"}},
+			tokens: [][]string{{"记忆"}, {"检索"}, {"回答"}},
 		},
 		{
 			name:   "quotes stars and parentheses are boundaries",
 			input:  `"记忆" OR * (NEAR)`,
 			texts:  []string{"记忆", "or", "near"},
-			tokens: [][]string{{"记", "忆"}, {"or"}, {"near"}},
+			tokens: [][]string{{"记忆"}, {"or"}, {"near"}},
 		},
 		{
 			name:   "emoji is a boundary",
 			input:  "记忆😀检索",
 			texts:  []string{"记忆", "检索"},
-			tokens: [][]string{{"记", "忆"}, {"检", "索"}},
+			tokens: [][]string{{"记忆"}, {"检索"}},
 		},
 		{
 			name:   "punctuation only",
@@ -88,27 +88,41 @@ func TestGroupsChineseEnglishNumbersAndPunctuation(t *testing.T) {
 	}
 }
 
-func TestIndexTextKeepsChineseCharactersAsSingleTokens(t *testing.T) {
-	if got := IndexText("用户希望默认使用中文回答。"); got != "用 户 希 望 默 认 使 用 中 文 回 答" {
+func TestGroupsLongChineseQueryBecomesDictionaryTerms(t *testing.T) {
+	groups := Groups("Jon是什么时候失去银行职员工作的？")
+	got := GroupTexts(groups)
+	want := []string{"jon", "是", "什么", "时候", "失去", "银行职员", "工作", "的"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("texts = %#v, want %#v", got, want)
+	}
+	for _, group := range groups {
+		if len(group.Tokens) != 1 || group.Tokens[0] != group.Text {
+			t.Fatalf("group is not a single dictionary term: %+v", group)
+		}
+	}
+}
+
+func TestIndexTextUsesDictionaryTerms(t *testing.T) {
+	if got := IndexText("用户希望默认使用中文回答。"); got != "用户 希望 默认 使用 中文 回答" {
 		t.Fatalf("IndexText = %q", got)
 	}
-	if got := IndexText("AI 记忆"); got != "ai 记 忆" {
+	if got := IndexText("AI 记忆"); got != "ai 记忆" {
 		t.Fatalf("IndexText mixed = %q", got)
 	}
 }
 
-func TestMatchedGroupsUsesAdjacentSequences(t *testing.T) {
+func TestMatchedGroupsUsesDictionaryTerms(t *testing.T) {
 	groups := Groups("回答 语言 记忆")
 	matched := MatchedGroups(groups, "回答格式", "默认使用中文回答，并保留记忆。")
 	want := []string{"回答", "记忆"}
 	if !reflect.DeepEqual(matched, want) {
 		t.Fatalf("matched = %#v, want %#v", matched, want)
 	}
-	if matched := MatchedGroups(Groups("记忆"), "无关", "记 忆"); len(matched) != 1 {
-		t.Fatalf("spaced adjacent characters should match: %#v", matched)
+	if matched := MatchedGroups(Groups("记忆"), "中文记忆检索", "无关"); !reflect.DeepEqual(matched, []string{"记忆"}) {
+		t.Fatalf("dictionary term should match: %#v", matched)
 	}
-	if matched := MatchedGroups(Groups("记忆"), "无关", "记 录 忆"); len(matched) != 0 {
-		t.Fatalf("non-adjacent characters must not match the phrase: %#v", matched)
+	if matched := MatchedGroups(Groups("记"), "中文记忆检索", "无关"); len(matched) != 0 {
+		t.Fatalf("substring of a dictionary term must not match: %#v", matched)
 	}
 }
 
@@ -130,7 +144,7 @@ func TestDocumentBuilderProducesNormalizedTerms(t *testing.T) {
 	if document.TitleTerms != "answer language" {
 		t.Fatalf("title terms = %q", document.TitleTerms)
 	}
-	if document.ContentTerms != "用 户 希 望 默 认 使 用 中 文 回 答" {
+	if document.ContentTerms != "用户 希望 默认 使用 中文 回答" {
 		t.Fatalf("content terms = %q", document.ContentTerms)
 	}
 }

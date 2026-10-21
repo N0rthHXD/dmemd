@@ -2,12 +2,30 @@ package retrieval
 
 import (
 	"strings"
+	"sync"
 	"unicode"
 
+	"github.com/go-ego/gse"
 	"golang.org/x/text/unicode/norm"
 
 	"github.com/N0rthHXD/dmemd/internal/memory"
 )
+
+var (
+	segmenterOnce sync.Once
+	segmenter     *gse.Segmenter
+)
+
+func dictionarySegmenter() *gse.Segmenter {
+	segmenterOnce.Do(func() {
+		loaded := &gse.Segmenter{SkipSubSeg: true}
+		if err := loaded.LoadDictEmbed("zh"); err != nil {
+			panic("retrieval: load gse dictionary: " + err.Error())
+		}
+		segmenter = loaded
+	})
+	return segmenter
+}
 
 // Normalize applies the single normalization rule shared by documents and
 // queries: NFC first, then Unicode lowercase.
@@ -15,47 +33,39 @@ func Normalize(text string) string {
 	return strings.ToLower(norm.NFC.String(text))
 }
 
-// Groups splits normalized text into query groups. Whitespace and punctuation
-// are boundaries. Continuous Han characters become one token per character but
-// stay in the same group, so "记忆" compiles to the adjacent phrase "记 忆".
-// Letters and numbers from other scripts are kept as word tokens.
+// Groups splits normalized text into one group per dictionary term. Whitespace
+// and punctuation are boundaries; within each boundary-delimited word run the
+// embedded gse dictionary is used in accurate mode. Every term therefore has
+// the same representation on the document and query paths.
 func Groups(text string) []Group {
 	normalized := Normalize(text)
-	groups := make([]Group, 0, 4)
-	tokens := make([]string, 0, 4)
+	groups := make([]Group, 0, 8)
 	var word []rune
 
 	flushWord := func() {
 		if len(word) == 0 {
 			return
 		}
-		tokens = append(tokens, string(word))
-		word = word[:0]
-	}
-	closeGroup := func() {
-		flushWord()
-		if len(tokens) == 0 {
-			return
+		for _, token := range dictionarySegmenter().Cut(string(word)) {
+			if !isWordToken(token) {
+				continue
+			}
+			groups = append(groups, Group{
+				Text:   token,
+				Tokens: []string{token},
+			})
 		}
-		groups = append(groups, Group{
-			Text:   strings.Join(tokens, ""),
-			Tokens: append([]string(nil), tokens...),
-		})
-		tokens = tokens[:0]
+		word = word[:0]
 	}
 
 	for _, value := range normalized {
-		switch {
-		case unicode.IsSpace(value) || !isWordRune(value):
-			closeGroup()
-		case unicode.Is(unicode.Han, value):
+		if unicode.IsSpace(value) || !isWordRune(value) {
 			flushWord()
-			tokens = append(tokens, string(value))
-		default:
-			word = append(word, value)
+			continue
 		}
+		word = append(word, value)
 	}
-	closeGroup()
+	flushWord()
 	return groups
 }
 
@@ -75,8 +85,9 @@ func IndexText(text string) string {
 	return strings.Join(Tokens(text), " ")
 }
 
-// MatchedGroups reports which query groups occur as adjacent token sequences in
-// the original title or content. It never returns tokenized single characters.
+// MatchedGroups reports which query groups occur in the original title or
+// content using the same dictionary segmentation as indexing. It never returns
+// internal index fragments.
 func MatchedGroups(groups []Group, title, content string) []string {
 	titleTokens := Tokens(title)
 	contentTokens := Tokens(content)
@@ -110,6 +121,18 @@ func isWordRune(value rune) bool {
 	return unicode.IsLetter(value) || unicode.IsNumber(value) || unicode.IsMark(value)
 }
 
+func isWordToken(token string) bool {
+	if token == "" {
+		return false
+	}
+	for _, value := range token {
+		if !isWordRune(value) {
+			return false
+		}
+	}
+	return true
+}
+
 func containsSequence(haystack, needle []string) bool {
 	if len(needle) == 0 || len(needle) > len(haystack) {
 		return false
@@ -130,7 +153,7 @@ func containsSequence(haystack, needle []string) bool {
 }
 
 // DocumentBuilder is the production memory.DocumentBuilder. It uses the same
-// Normalize/Groups rules as query compilation.
+// normalization and dictionary segmentation rules as query compilation.
 type DocumentBuilder struct{}
 
 // NewDocumentBuilder returns the production builder for runtime assembly.

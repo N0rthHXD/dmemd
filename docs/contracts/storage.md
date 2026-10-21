@@ -1,7 +1,7 @@
 # SQLite 存储与事务契约
 
 本文件记录 P2（T2.1–T2.9）存储基础、P3（T3.1–T3.10）记忆/来源生命周期和
-P4（T4.1–T4.8）关键词检索落定的契约，补充《系统 AI 记忆服务架构设计.md》和
+P4（T4.1–T4.9）关键词检索落定的契约，补充《系统 AI 记忆服务架构设计.md》和
 `tech-stack.md`。SQL、迁移、连接设置和事务实现集中在 `internal/store/sqlite`；业务包只依赖
 `memory`、`source`、`ingest`、`retrieval` 中按能力定义的接口。
 
@@ -115,14 +115,15 @@ P4（T4.1–T4.8）关键词检索落定的契约，补充《系统 AI 记忆服
 ## 8. 搜索文档、关键词查询与索引重建（P4）
 
 - 生产写入路径使用 `retrieval.DocumentBuilder`，与查询共享同一套规则：先 NFC，再 Unicode
-  小写；英文/其他文字和数字按词，连续汉字逐字成为 token，空白和标点作为边界。派生文档只写
-  规范化 token（`title_terms`/`content_terms`）；原始标题/正文只保存在 `memories`，摘要从
-  当前快照读取。
+  小写；英文/其他文字和数字按词，汉字使用内置 gse 词典精准分词，空白和标点作为边界。每个
+  分词词项作为一个独立查询组写入或编译，索引与查询的词项表示一致。派生文档只写规范化 token
+  （`title_terms`/`content_terms`）；原始标题/正文只保存在 `memories`，摘要从当前快照读取。
 - `runtime.NewMemoryService` 把生产构造器注入记忆写入；创建、内容更正、纯证据变更、归档、
   删除、恢复和永久清除都沿用该构造器。测试仍可注入 `testutil.DocumentBuilder` 验证事务边界。
-- 查询由 `retrieval.Compile` 生成：每个连续组编译为带引号的相邻短语，`all` 用 `AND`、`any`
-  用 `OR` 组合。用户文本不会进入 FTS 语法；引号、括号、星号、`OR`/`NEAR` 等只作为普通 token
-  或被标点边界丢弃。最终表达式通过参数绑定传给 `memory_fts MATCH ?`。
+- 查询由 `retrieval.Compile` 生成：每个分词词项编译为带引号的字面量短语，`all` 用 `AND`、`any`
+  用 `OR` 组合；不再把连续汉字或整句查询编译为一个相邻短语。用户文本不会进入 FTS 语法；
+  引号、括号、星号、`OR`/`NEAR` 等只作为普通 token 或被标点边界丢弃。最终表达式通过参数
+  绑定传给 `memory_fts MATCH ?`。
 - `Store.Search` 以 `memories` 当前快照为准执行状态、类型、创建应用和更新时间过滤；默认只查
   `active`，显式请求可查 `archived`，`deleted` 在服务层和存储层都被移除，永不返回。排序固定为
   `bm25(memory_fts, 4, 1) ASC, updated_at DESC, id ASC`，返回 `score=-bm25` 和 Top-K。
@@ -132,8 +133,8 @@ P4（T4.1–T4.8）关键词检索落定的契约，补充《系统 AI 记忆服
   `archived`）搜索文档，再重建 FTS；`deleted` 不进入派生索引。构造器或 SQL 失败时事务整体
   回滚，返回错误且不报告部分成功。`retrieval.Service.RebuildIndex` 包装该能力并只记录数量、
   耗时和错误，不记录记忆原文。
-- `RelatedActive` 供 ingest 在后台选择相关上下文：使用同一规范化和排序，`match=any`，只查
-  `active`，最多取去重后的前 32 个查询组和 10 条记忆；无匹配返回空切片，不改变公共搜索协议。
+- `RelatedActive` 供 ingest 在后台选择相关上下文：使用同一规范化和词典分词，`match=any`，只查
+  `active`，最多取去重后的前 32 个分词词项和 10 条记忆；无匹配返回空切片，不改变公共搜索协议。
 - `RebuildSearchIndex` 仍可用于仅从已有派生文档重建 FTS；生产完整重建使用上述快照重建。
 
 ## 9. 测试设施与当前限制

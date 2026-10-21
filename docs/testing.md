@@ -44,8 +44,8 @@ README 中的开发入口与这些命令保持一致。
 | `internal/store/sqlite/tx_test.go` | 提交、回调错误、SQL 失败、取消、嵌套事务拒绝、panic 回滚 |
 | `internal/store/sqlite/migrate_test.go` | 顺序迁移、重复启动、失败回滚与重试、未知版本、版本唯一键、来源标识非唯一 |
 | `internal/store/sqlite/search_test.go` | 外部内容 FTS5 插入/更新/删除触发器、归档保留、FTS 重建 |
-| `internal/store/sqlite/search_query_test.go` | 中文短语、过滤、BM25 权重、时间/ID 平局排序、Top-K、快照重建与失败回滚 |
-| `internal/retrieval/*_test.go` | NFC/大小写/中英文分词、安全 FTS 编译、命中组、可读摘要和文档构造器 |
+| `internal/store/sqlite/search_query_test.go` | 中文词典分词、非相邻词项、过滤、BM25 权重、时间/ID 平局排序、Top-K、快照重建与失败回滚 |
+| `internal/retrieval/*_test.go` | NFC/大小写/中英文词典分词、安全 FTS 编译、命中词项、可读摘要和文档构造器 |
 | `internal/store/sqlite/sources_test.go` | 来源/任务原子插入与回滚、原始 JSON 形态、缺少可选标识、重复提交不同 ID、存储级重复清除 |
 | `internal/store/sqlite/jobs_test.go` | 领取顺序、到期时间、尝试计数、终态不重复领取、结果/错误持久化、running 重排、耗尽预算失败、来源取消 |
 | `internal/store/sqlite/memories_test.go` | 快照/完整版本/证据往返、列表默认 50 条、过滤、稳定排序、墓碑读取 |

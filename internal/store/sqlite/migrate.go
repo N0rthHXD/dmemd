@@ -16,6 +16,11 @@ import (
 //go:embed migrations/*.sql
 var embeddedMigrations embed.FS
 
+// SchemaContract identifies the current initialization layout. It is stored in
+// schema_meta by the first migration so a database created with an incompatible
+// pre-release layout can be rejected before any new migration runs.
+const SchemaContract = "dmemd-s3-2026-10-22"
+
 type migration struct {
 	version int
 	name    string
@@ -25,16 +30,62 @@ type migration struct {
 // Migrate applies every pending embedded migration in order. Each migration is
 // one transaction: a failure rolls back that file and records nothing, while
 // already applied versions remain valid and are skipped on retry. The database
-// is only marked ready after every migration has committed.
+// is only marked ready after every migration has committed and the initialization
+// contract matches this program.
 func (s *Store) Migrate(ctx context.Context) error {
 	s.migrate.Lock()
 	defer s.migrate.Unlock()
 
+	applied, err := appliedMigrationCount(ctx, s.writer)
+	if err != nil {
+		s.ready.Store(false)
+		return err
+	}
+	if applied > 0 {
+		if err := verifySchemaContract(ctx, s.writer); err != nil {
+			s.ready.Store(false)
+			return err
+		}
+	}
 	if err := applyMigrations(ctx, s.writer, embeddedMigrations); err != nil {
 		s.ready.Store(false)
 		return err
 	}
+	if err := verifySchemaContract(ctx, s.writer); err != nil {
+		s.ready.Store(false)
+		return err
+	}
 	s.ready.Store(true)
+	return nil
+}
+
+func appliedMigrationCount(ctx context.Context, db *sql.DB) (int, error) {
+	var exists int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master
+		WHERE type = 'table' AND name = 'schema_migrations'`).Scan(&exists); err != nil {
+		return 0, fmt.Errorf("检查迁移记录表: %w", err)
+	}
+	if exists == 0 {
+		return 0, nil
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("读取迁移记录: %w", err)
+	}
+	return count, nil
+}
+
+func verifySchemaContract(ctx context.Context, db *sql.DB) error {
+	var value string
+	if err := db.QueryRowContext(ctx,
+		`SELECT value FROM schema_meta WHERE key = 'contract'`).Scan(&value); err != nil {
+		return fmt.Errorf("数据库结构不兼容当前程序（无法读取初始化契约 %s）: %w；请使用新的数据目录或显式重建数据库",
+			SchemaContract, err)
+	}
+	if value != SchemaContract {
+		return fmt.Errorf("数据库初始化契约为 %q，当前程序需要 %q；请使用新的数据目录或显式重建数据库，程序不会自动删除或覆盖现有数据",
+			value, SchemaContract)
+	}
 	return nil
 }
 

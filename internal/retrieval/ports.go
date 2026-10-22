@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/N0rthHXD/dmemd/internal/artifact"
 	"github.com/N0rthHXD/dmemd/internal/memory"
 )
 
@@ -39,6 +40,14 @@ type CandidateReader interface {
 	LoadSearchAssemblies(ctx context.Context, keys []VersionKey) (map[VersionKey]Assembly, error)
 }
 
+// ConflictReader loads open conflicts and fact-group timelines for consistent
+// context selection and recall decoration.
+type ConflictReader interface {
+	OpenConflictsForMemories(ctx context.Context, memoryIDs []string) ([]memory.Conflict, error)
+	FactTimeline(ctx context.Context, groupID string, limit int) ([]memory.Memory, error)
+	CatalogGeneration(ctx context.Context) (int64, error)
+}
+
 // IndexWriter regenerates derived search documents from non-deleted business
 // snapshots and rebuilds FTS in one transaction.
 type IndexWriter interface {
@@ -50,7 +59,13 @@ type Backend interface {
 	Searcher
 	VectorSearcher
 	CandidateReader
+	ConflictReader
 	IndexWriter
+}
+
+// ArtifactSearcher reads active derived versions for unified recall.
+type ArtifactSearcher interface {
+	Search(ctx context.Context, query artifact.SearchQuery) ([]artifact.SearchHit, error)
 }
 
 // QueryEncoder is the online Embedding capability. It is nil when semantic

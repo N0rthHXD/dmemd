@@ -15,9 +15,10 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/testutil"
 )
 
-func TestProviderMapsRequestAndResponse(t *testing.T) {
+func TestProviderMapsRequestsAndResponses(t *testing.T) {
 	fake := testutil.NewFakeModel(t)
-	fake.EnqueueContent(`{"candidates":[{"action":"update","target_memory_id":"memory-1","kind":"preference","title":"回答语言","content":"默认中文","observed_at":"2026-10-20T02:00:00Z","evidence":[{"message_id":"m1","quote":"默认中文"}]}]}`)
+	fake.EnqueueContent(`{"candidates":[{"kind":"preference","title":"回答语言","content":"默认中文","observed_at":"2026-10-20T02:00:00Z","evidence":[{"message_id":"m1","quote":"默认中文"}]}]}`)
+	fake.EnqueueContent(`{"decisions":[{"candidate_id":"c1","action":"correct","target_memory_ids":["memory-1"],"content":"默认中文","evidence_refs":[{"candidate_id":"c1","evidence_index":0}]}]}`)
 	provider, err := NewProvider(Config{Name: "test-model", BaseURL: fake.URL() + "/v1", APIKey: "secret-key", Timeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
@@ -27,25 +28,40 @@ func TestProviderMapsRequestAndResponse(t *testing.T) {
 		Content:   json.RawMessage(`{"messages":[{"id":"m1","content":"默认中文","occurred_at":"2026-10-20T02:00:00Z"}]}`),
 		CreatedAt: time.Date(2026, 10, 20, 2, 0, 1, 0, time.UTC),
 	}
-	related := []memory.Memory{{
-		ID: "memory-1", Kind: memory.KindPreference, Title: "回答语言", Content: "用户希望中文。",
-		Version: 2, ObservedAt: time.Date(2026, 10, 20, 1, 0, 0, 0, time.UTC),
-		UpdatedAt: time.Date(2026, 10, 20, 1, 30, 0, 0, time.UTC),
-	}}
-	result, err := provider.Extract(context.Background(), ingest.ExtractionRequest{Source: src, RelatedMemories: related})
+	result, err := provider.Extract(context.Background(), ingest.ExtractionRequest{Source: src})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Candidates) != 1 || result.Candidates[0].Action != ingest.ActionUpdate ||
-		result.Candidates[0].TargetMemoryID != "memory-1" || result.Candidates[0].Content != "默认中文" {
+	if len(result.Candidates) != 1 || result.Candidates[0].Content != "默认中文" ||
+		result.Candidates[0].Kind != memory.KindPreference {
 		t.Fatalf("result = %+v", result)
 	}
 	if len(result.Candidates[0].Evidence) != 1 || result.Candidates[0].Evidence[0].Quote != "默认中文" {
 		t.Fatalf("evidence = %+v", result.Candidates[0].Evidence)
 	}
 
+	related := []memory.Memory{{
+		ID: "memory-1", Kind: memory.KindPreference, Title: "回答语言", Content: "用户希望中文。",
+		Version: 2, AssertionStatus: memory.AssertionAccepted,
+		ObservedAt: time.Date(2026, 10, 20, 1, 0, 0, 0, time.UTC),
+		UpdatedAt:  time.Date(2026, 10, 20, 1, 30, 0, 0, time.UTC),
+	}}
+	decision, err := provider.Decide(context.Background(), ingest.DecisionRequest{
+		Source:          src,
+		Candidates:      result.Candidates,
+		RelatedMemories: related,
+		ContextComplete: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decision.Decisions) != 1 || decision.Decisions[0].Action != ingest.ActionCorrect ||
+		decision.Decisions[0].TargetMemoryIDs[0] != "memory-1" {
+		t.Fatalf("decision = %+v", decision)
+	}
+
 	requests := fake.Requests()
-	if len(requests) != 1 {
+	if len(requests) != 2 {
 		t.Fatalf("requests = %d", len(requests))
 	}
 	request := requests[0]
@@ -65,10 +81,9 @@ func TestProviderMapsRequestAndResponse(t *testing.T) {
 	if len(body.Messages) != 2 || body.Messages[0].Role != "system" || body.Messages[1].Role != "user" {
 		t.Fatalf("messages = %+v", body.Messages)
 	}
-	if !strings.Contains(body.Messages[0].Content, "content (the memory text)") ||
-		!strings.Contains(body.Messages[0].Content, "target_memory_id") ||
-		!strings.Contains(body.Messages[0].Content, "empty candidates array") {
-		t.Fatalf("system prompt = %q", body.Messages[0].Content)
+	if !strings.Contains(body.Messages[0].Content, "candidates array") ||
+		strings.Contains(body.Messages[0].Content, "target_memory_ids") {
+		t.Fatalf("extraction prompt = %q", body.Messages[0].Content)
 	}
 	var payload extractionPayload
 	if err := json.Unmarshal([]byte(body.Messages[1].Content), &payload); err != nil {
@@ -78,12 +93,24 @@ func TestProviderMapsRequestAndResponse(t *testing.T) {
 		payload.CurrentSource.ExternalID != "external-1" || string(payload.CurrentSource.Content) != string(src.Content) {
 		t.Fatalf("current source payload = %+v", payload.CurrentSource)
 	}
-	if len(payload.RelatedMemories) != 1 || payload.RelatedMemories[0].ID != "memory-1" ||
-		payload.RelatedMemories[0].Version != 2 {
-		t.Fatalf("related payload = %+v", payload.RelatedMemories)
-	}
 	if strings.Contains(body.Messages[1].Content, "secret-key") {
 		t.Fatal("request leaked the model credential")
+	}
+
+	var decisionBody chatRequest
+	if err := json.Unmarshal(requests[1].Body, &decisionBody); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(decisionBody.Messages[0].Content, "decisions array") {
+		t.Fatalf("decision prompt = %q", decisionBody.Messages[0].Content)
+	}
+	var decisionPayload decisionContextPayload
+	if err := json.Unmarshal([]byte(decisionBody.Messages[1].Content), &decisionPayload); err != nil {
+		t.Fatal(err)
+	}
+	if len(decisionPayload.RelatedMemories) != 1 || decisionPayload.RelatedMemories[0].ID != "memory-1" ||
+		decisionPayload.RelatedMemories[0].Version != 2 {
+		t.Fatalf("decision payload = %+v", decisionPayload)
 	}
 }
 
@@ -124,7 +151,7 @@ func TestProviderStatusAndMalformedErrors(t *testing.T) {
 	}
 }
 
-func TestProviderMalformedCompletionIsRetryable(t *testing.T) {
+func TestProviderMalformedCompletionIsProtocolError(t *testing.T) {
 	fake := testutil.NewFakeModel(t)
 	fake.EnqueueMalformed()
 	provider, err := NewProvider(Config{Name: "test", BaseURL: fake.URL(), Timeout: time.Second})
@@ -133,7 +160,8 @@ func TestProviderMalformedCompletionIsRetryable(t *testing.T) {
 	}
 	_, err = provider.Extract(context.Background(), ingest.ExtractionRequest{Source: source.Source{ID: "s", Content: []byte(`"x"`)}})
 	var providerErr *ingest.ProviderError
-	if !errors.As(err, &providerErr) || !providerErr.Retryable || !errors.Is(err, ErrUnparseable) {
+	if !errors.As(err, &providerErr) || providerErr.Operation != "protocol" ||
+		providerErr.Retryable || !errors.Is(err, ErrUnparseable) {
 		t.Fatalf("error = %v", err)
 	}
 }

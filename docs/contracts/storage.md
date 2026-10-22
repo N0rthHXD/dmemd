@@ -31,18 +31,40 @@
   已提交的早期版本保留，修复后可继续应用后续版本。
 - 重复启动跳过已应用版本。数据库包含程序未知的版本或同名版本对应不同文件名时，迁移失败，
   服务保持不就绪。
-- 迁移只创建结构，不填充业务数据；后续结构变化必须追加新版本文件，不修改已应用文件。
+- `schema_meta` 保存初始化契约编号（当前 `dmemd-s3-2026-10-22`）。已有迁移记录但契约缺失或
+  不匹配时，`Migrate` 在应用任何新迁移前失败，程序不自动删除、清空或重建开发库。空库完整
+  初始化后写入并核对同一契约。
+- 迁移只创建结构，不填充业务数据。项目尚未发布：当前 `0001_core.sql` 已直接包含时间/
+  断言、`scope_key`/`topics_json` 字段和初始化契约；`0004_temporal_conflicts.sql` 增加事实组、
+  关系、冲突和目录 generation；`0005_governance.sql` 增加持久治理任务；
+  `0006_artifacts.sql` 增加派生对象、版本、直接原子依赖和派生 FTS；
+  `0007_experiences.sql` 增加应用结果反馈、结果依赖和 Skill 来源。不提供存量数据库升级
+  或旧字段回填。发布后新增结构变化必须追加新版本文件，不修改已应用文件。
 
 ## 3. 表与关键约束
 
 | 表 | 关键内容与约束 |
 | --- | --- |
-| `sources` | 原始 JSON 以 BLOB 原样保存；`app_id`、`external_id` 可选且没有唯一约束；`redacted` 与 `redacted_at` 表示显式清除 |
-| `memories` | 当前快照；`id` 主键；`version >= 1`；`created_by_app` 为创建时来源应用快照；`origin_source_id` 关联首次来源 |
-| `memory_revisions` | 完整历史快照；主键 `(memory_id, version)`；操作类型和原因；版本时间取快照 `updated_at`；随记忆永久清除级联删除 |
+| `sources` | 原始 JSON 以 BLOB 原样保存；`app_id`、`external_id` 可选且没有唯一约束；`scope_key` 为可选平面作用域；`redacted` 与 `redacted_at` 表示显式清除 |
+| `memories` | 当前快照；`id` 主键；`version >= 1`；含 `assertion_status`、`valid_from/valid_to` 及依据、`fact_group_id`、`scope_key`、规范化 `topics_json`；CHECK 保证空边界对应 unknown、非空边界有依据且左闭右开；`created_by_app` 为创建时来源应用快照；`origin_source_id` 关联首次来源 |
+| `memory_revisions` | 完整历史快照，含与 `memories` 相同的时间/断言/组/作用域/主题字段；主键 `(memory_id, version)`；操作类型和原因；版本时间取快照 `updated_at`；随记忆永久清除级联删除 |
+| `memory_fact_groups` | 服务生成 ID、主体/属性/场景、`cardinality`、`generation`；成员或语义变化递增 |
+| `memory_relations` | 只记录 `supersedes`；保存两端决策时版本；未决矛盾只存于冲突成员 |
+| `memory_conflicts` | open/resolved、固定原因码、结构化裁决 JSON、revision、创建/更新时间；`resolution` 是裁决 payload 的唯一来源 |
+| `memory_conflict_members` | 冲突 ID、记忆 ID、检测时版本；当前版本读取时计算；记忆永久清除时级联，剩余不足两方时删除冲突 |
+| `memory_conflict_events` | 检测、成员变化、解决的不可变审计；只含固定动作和成员引用，不复制原文、原因码或模型理由 |
+| `memory_catalog` | 单行语义目录 generation；记忆、事实组和冲突写入时递增，向量完成不递增 |
 | `evidence` | 来源引用、可选消息 ID、原文片段、可选定位、模型名和 redacted 状态；来源行保留 |
 | `revision_evidence` | 版本完整证据集合；主键 `(memory_id, version, evidence_id)`，关联版本和证据 |
-| `ingest_jobs` | 状态、尝试次数、下次执行时间、脱敏错误和 `memory_ids` 结果摘要；不保存原始模型响应 |
+| `ingest_jobs` | 状态（`queued/running/waiting/succeeded/failed/cancelled`）、尝试次数、连续协议失败次数、固定等待原因、下次执行时间、脱敏错误、`memory_ids`、`conflict_ids`、`pending_memory_ids` 与固定 `warnings`；不保存原始模型响应或推理过程 |
+| `governance_jobs` | 固定治理目标；`(kind,target_key)` 唯一；`revision` 保护在途结果，输入变化或取消时递增；状态、尝试次数、连续失败、固定等待/错误码、`input_hash` 和时间字段 |
+| `artifacts` | 派生对象；`(kind,target_key)` 唯一；`current_version=0` 表示尚无可用版本；`state` 仅为 `active/stale/disabled`；`scope_key/topic` 用于作用域召回 |
+| `artifact_revisions` | 不可变派生版本；标题、正文或结构化 payload、内容哈希、生成器/协议版本、固定原因码、截断标记和创建时间；随对象级联删除 |
+| `artifact_memory_dependencies` | 每个派生版本使用的精确原子修订；主键 `(artifact_id, artifact_version, memory_id)`；外键指向 `memory_revisions`，反向索引支持同步失效和清除前枚举 |
+| `experience_runs` | 应用报告的结果：服务内部 ID、可选唯一 `run_id`、`source_id`、可选 Skill ID/精确版本、作用域、目标/条件/行动、`outcome=success/failure/unknown`、`state=recorded/revoked` 和时间；不保存验证认证 |
+| `artifact_run_dependencies` | 每个派生版本使用的经验运行；主键 `(artifact_id, artifact_version, experience_id)`；外键指向 `experience_runs`，反向索引支持撤销时同步失效 |
+| `artifact_search_docs` / `artifact_fts` | 只索引 `active` 对象的当前版本；规范化标题/正文词项与外部内容 FTS5；可重建且不保存来源原文 |
+| `schema_meta` | 初始化契约编号等元数据；契约与当前程序不匹配时启动失败 |
 | `memory_search_docs` | 派生文档：`row_id` 对应 FTS rowid，`memory_id` 唯一，`content_hash` 标识 Embedding 文档字节；只保留规范化词项，原文以 `memories` 为准 |
 | `memory_fts` | 外部内容 FTS5 表，内容表为 `memory_search_docs`，`unicode61` tokenizer |
 | `memory_embeddings` | 每条当前记忆一个向量：`memory_id` 主键、`profile_id`、`content_hash`、`dimensions > 0`、little-endian float32 BLOB、`embedded_at`；外键随搜索文档级联删除，BLOB 长度必须为 `dimensions*4` |
@@ -59,26 +81,46 @@
   `Commit`/`Rollback`。
 - 成功返回后提交；回调错误、SQL 错误、context 取消/超时、panic 都回滚。
 - 从回调 context 再次调用 `WithTx` 返回 `ErrNestedTransaction`，业务不得自行嵌套或提前提交。
-- `MemoryStore`、`SourceStore`、`IngestStore` 适配器把同一事务分别暴露为
-  `memory.Tx`、`source.Tx`、`ingest.Tx`，因此快照、版本、证据、搜索文档、来源和任务结果可在
-  一个事务中组合。
+- `MemoryStore`、`SourceStore`、`IngestStore`、`GovernanceStore` 适配器把同一事务分别暴露为
+  `memory.Tx`、`source.Tx`、`ingest.Tx`、`governance.Tx`，因此快照、版本、证据、搜索文档、
+  来源、任务结果和治理任务登记可在同一个事务中组合。
 - 事务回调不得发起模型请求或执行长计算；模型与候选分析必须在事务外完成。
+- `memory.Service` 的原子写入在同一事务 upsert `classify` 治理任务；输入哈希不变且任务已
+  完成时为空操作。逻辑删除和永久清除取消对应任务并递增 revision，迟到结果不能恢复记录。
+- 原子写入启用派生同步时，同一事务把直接依赖对象置为 `stale`、删除当前 FTS 文档，并 upsert
+  受影响 `(scope,topic)` 摘要、作用域画像以及 procedure 对应 Skill 的治理任务。证据补充不
+  触发重算；删除/永久清除立即生效，不等待去抖。
+- 永久清除先在事务内枚举依赖该记忆的派生对象，删除对象全部版本、依赖和索引，再删除原子
+  数据；同一事务递增相关治理任务 revision，因此迟到模型结果不能恢复已清除内容。
+- 结果反馈在同一事务保存来源、`experience_runs` 和案例 `aggregate` 任务。可选 `run_id`
+  由唯一约束去重；重复提交直接读取已有结果，不比较正文、不覆盖、不恢复已撤销记录。
+- 撤销结果在同一事务把运行置为 `revoked`、取消案例任务、停用案例、删除其 FTS，并把依赖
+  该运行的 Skill 置为 `stale` 后登记 `build_skill`。读取路径额外排除依赖非 `recorded` 运行
+  的派生对象，因此迟到提交不能恢复已撤销内容。
+- `POST /v1/forget` 在同一事务先枚举来源关联记忆（来源 origin、历史 origin 和证据引用）与
+  结果，再按运行、记忆、来源的顺序清除。派生对象在任何外键级联前先按全部历史版本枚举并删除
+  对象、依赖和 FTS；结果案例任务取消，受影响 Skill 目标重新排队。来源的最后一步删除 ingest
+  任务、证据和来源行。任一步失败整体回滚，不部分清理。
+- 冲突创建、成员扩展或相关记忆版本变化时，同一事务 upsert `review_conflict` 目标。复查只做
+  确定性判断：唯一存续 accepted 成员、正文收敛或已完全已知且互不重叠的区间；复杂情况保持
+  open，不调用模型，也不因重复扫描刷新相同输入。
 
 ## 5. 来源、任务与状态
 
 - 来源与初始 `queued` 任务通过同一个 `ingest.Tx` 插入；任一步失败不留下孤立行。
-- `ClaimNextJob` 只选择 `queued` 且 `next_attempt_at` 已到期的任务，按 `created_at ASC, id ASC`
-  的顺序领取；领取时 `attempts + 1`，进入 `running`。`succeeded`、`failed`、`cancelled` 永不
-  被普通领取。
+- `ClaimNextJob` 选择已到期的 `queued` 或非配置等待的 `waiting` 任务，按
+  `created_at ASC, id ASC` 的顺序领取；领取时 `attempts + 1`，进入 `running`。`succeeded`、
+  `failed`、`cancelled` 和配置等待任务不会被普通领取。
 - `RequeueRunningJobs` 把遗留 `running` 改回 `queued`，保留尝试次数和首次开始时间，并把下次
-  执行时间设为当前时间。
-- `FailExhaustedJobs` 只把 `attempts` 已达到最大预算的 `queued` 任务置为 `failed`，写入固定
-  脱敏原因和结束时间；成功、取消及其他状态不变。Worker 启动恢复先重排 running，再调用它，
-  防止中断的第三次尝试变成第四次模型调用。
+  执行时间设为当前时间；`RequeueWaitingConfigurationJobs` 在重启后让配置/凭据等待任务重新
+  可执行；`RequeueProtocolFailedJobs` 让协议隔离任务在重启后重新评估一次。
+- 暂时性网络、超时和限流错误进入 `waiting`，`next_attempt_at` 按 5 秒、30 秒、2 分钟递增，
+  之后最长 30 分钟；恢复后继续同一任务。连续三次协议/解析错误进入 `failed`；配置和凭据错误
+  保持等待，不在进程内高频探测。
 - `UpdateJob` 持久化终态、脱敏错误和 `memory_ids`；`memory_ids` 始终是 JSON 数组，没有结果时
   为 `[]`。
-- `CancelJobsBySource` 只取消该来源的 `queued`/`running` 任务，保留尝试次数，不改变终态任务
-  的状态。
+- `CancelJobsBySource` 只取消该来源的 `queued`/`running`/`waiting` 任务，保留尝试次数，不改变
+  终态任务的状态。
 - `ScrubJobErrorsBySource` 只替换该来源终态任务中非空且不等于固定清除说明的错误摘要，保留状态、
   尝试次数和 `memory_ids`；用于避免原文通过历史任务错误字段残留。
 
@@ -140,8 +182,9 @@
   无效文档，不再先清空整表，因此有效向量不会因重建被级联删除。构造器或 SQL 失败时事务整体
   回滚，返回错误且不报告部分成功。`retrieval.Service.RebuildIndex` 包装该能力并只记录数量、
   耗时和错误，不记录记忆原文。
-- `RelatedActive` 供 ingest 在后台选择相关上下文：始终使用关键词路，`match=any`，只查
-  `active`，最多取去重后的前 32 个分词词项和 10 条记忆；无匹配返回空切片，不改变公共搜索协议。
+- `RelatedContext` 供 ingest 在后台选择相关上下文：使用关键词路，启用 Embedding 时补充语义候选；
+  可读取 active/archived 的 accepted/pending 记忆，最多取去重后的前 32 个分词词项和指定条数；
+  截断时 `Complete=false`，不改变公共搜索协议。
 - `RebuildSearchIndex` 仍可用于仅从已有派生文档重建 FTS；生产完整重建使用上述快照重建。
 
 ## 9. 混合检索持久化与向量 Worker
@@ -179,11 +222,57 @@
 
 - 生产搜索文档构造器、关键词查询、过滤/排序、摘要/证据/解释、索引重建和后台相关 active
   记忆选择均已接入；统一来源/任务接收、远端模型适配、容错解析、合并决策、原子结果提交、
-  单 Worker、三次尝试和启动恢复由 `internal/ingest` 与 `internal/runtime` 提供，HTTP 业务
-  路由由 `internal/transport/http` 提供。
+  单 Worker、暂时失败等待/恢复、协议失败隔离和启动恢复由 `internal/ingest` 与 `internal/runtime`
+  提供，HTTP 业务路由由 `internal/transport/http` 提供。
 - 结果事务在同一 `ingest.Tx` 中检查 cancelled、读取来源/记忆当前状态，并复用
   `memory.Writer` 写入快照、版本、完整证据和搜索文档，最后写入任务 `succeeded` 与
   `memory_ids`。事务回调内不调用模型。
-- 启动恢复在单写事务中先 `RequeueRunningJobs`，再 `FailExhaustedJobs`；不引入租约、心跳或
-  分布式协调。
+- 启动恢复在单写事务中先 `RequeueRunningJobs`，再 `RequeueWaitingConfigurationJobs`；不引入
+  租约、心跳或分布式协调。暂时性失败不再按固定总尝试次数永久终止。
+- 一万条原子记忆的临时真实数据库容量场景由 `tests/capacity` 覆盖，记录在 `docs/quality.md`：
+  11,200 个治理任务收敛、1,200 个派生对象、并发召回和单事务来源遗忘均完成；十万条、长期
+  负载和恢复时间尚未验证，不能作为性能 SLA。
+- 固定标注质量和可选真实模型评估由 `tests/quality` 提供；离线套件检查协议、来源、作用域、
+  截断和确定性冲突规则，不证明真实模型语义质量。真实模型评估未执行时保持未通过。
 - 备份/恢复命令尚未实现。
+
+
+## 11. 有效时间、断言与冲突
+
+- 有效区间为左闭右开 `[valid_from, valid_to)`，两端非空时要求起点早于终点。空边界表示未知；
+  冲突检查把未知边界按可能重叠保守处理。
+- 普通召回只读取 `assertion_status=accepted`，按生命周期和 `as_of` 区间过滤；`pending` 只
+  通过冲突/管理接口读取，`rejected` 保留审计但不召回。
+- FTS SQL、向量扫描 SQL 与 Go 层最终过滤使用同一组时间/断言条件，过滤发生在候选截断之前。
+- `memory_catalog.generation` 在记忆写入、事实组写入/成员 generation 变化、冲突写入和清除时
+  递增。ingest 在模型调用前记录该值，写入事务再次读取；不一致则返回内部可重试错误，由现有
+  Worker 按暂时失败退避重跑整个来源，不做部分提交。
+- 事实组写入只增加成员 generation；不要把 `(group_id, accepted)` 设为唯一键，历史非重叠段
+  必须允许共存。
+- 关系两端引用已存在的 revision；当前只写 `supersedes`，新版本不会自动解决旧冲突。冲突成员只记录检测时版本，当前版本读取时计算。
+- 永久清除记忆时，关系随 revision 级联删除，冲突成员随之移除；冲突剩余成员不足两方时整条
+  冲突和事件删除。来源清除只清空证据原文和定位，不复制正文到冲突审计中。
+- 认证/配置错误进入 `waiting` 并在重启后重评；网络、限流和超时按递增退避继续同一任务；
+  连续三次协议/解析错误进入 `failed`。`unresolved` 与 `pending` 是业务成功，不触发网络重试。
+
+## 12. 治理任务
+
+- `governance_jobs` 以 `(kind,target_key)` 唯一，固定类型为 `classify/review_conflict/
+  aggregate/build_skill/reconcile`。业务事务直接 upsert；不建设事件表、控制器游标或调用账本。
+- `input_hash` 相同的已存在目标为空操作；输入变化时递增 `revision`、清空失败计数并按去抖时间
+  重新排队。逻辑删除、永久清除和显式取消在任务 revision 上留下变化，迟到结果不能提交。
+- `ClaimNextGovernanceJob` 只领取到期且非配置等待的任务。`FinishJob` 与 `RescheduleJob` 均要求
+  同一任务 revision 且状态仍为 `running`；否则不写入，处理器的结果事务整体回滚。
+- 启动把遗留 `running` 置回 `queued`，重评配置等待，并让连续协议失败隔离的任务在进程重启
+  后获得一次新的评估机会（模型/协议版本可能已变化）。暂时失败等待 5 秒、30 秒、2 分钟，之后
+  最长 30 分钟；连续三次协议错误隔离为 `failed`。
+- 单 Worker 串行执行；进程内软限速默认最少调用间隔 2 分钟、每小时约 30 次，仅推迟治理模型
+  调用。周期对账默认每 15 分钟扫描最多 100 个目标。
+- `aggregate` 目标包含主题摘要、画像和单运行经验案例；`build_skill` 目标为 `(scope,topic)`
+  指导型 Skill。Skill 和案例只追加不可变版本并原子切换 `current_version`，成功即 `active`；
+  失效先退出召回再后台重建，历史保留用于追溯。
+- 经验案例与 Skill 以原子修订和 `experience_runs` 为叶子依据，没有 artifact→artifact 持久
+  依赖。输入上限由 `governance.max_inputs` 限制；超过上限的版本标记 `truncated`，不声称
+  覆盖全部输入。
+- `review_conflict` 目标键使用 `conflict:` 前缀加无歧义编码的冲突 ID。输入哈希覆盖冲突
+  revision、原因码、成员检测版本和当前版本；复查不调用模型，未变化集合不重复刷新任务。

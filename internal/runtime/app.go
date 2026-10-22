@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/N0rthHXD/dmemd/internal/embedding"
+	"github.com/N0rthHXD/dmemd/internal/governance"
 	"github.com/N0rthHXD/dmemd/internal/ingest"
 	httptransport "github.com/N0rthHXD/dmemd/internal/transport/http"
 )
@@ -67,16 +68,26 @@ func WithEmbeddingWorker(worker *embedding.Worker) Option {
 	}
 }
 
+// WithGovernanceWorker installs the single persistent governance worker. Its
+// failures degrade background organization only; HTTP and atomic reads remain
+// available.
+func WithGovernanceWorker(worker *governance.Worker) Option {
+	return func(app *App) {
+		app.governanceWorker = worker
+	}
+}
+
 // App is the process runtime: configuration, HTTP lifecycle, health endpoints,
 // business routes and the optional background workers.
 type App struct {
-	cfg             Config
-	logger          *slog.Logger
-	ready           Readiness
-	services        Services
-	worker          *ingest.Worker
-	embeddingWorker *embedding.Worker
-	server          *http.Server
+	cfg              Config
+	logger           *slog.Logger
+	ready            Readiness
+	services         Services
+	worker           *ingest.Worker
+	governanceWorker *governance.Worker
+	embeddingWorker  *embedding.Worker
+	server           *http.Server
 }
 
 // New validates configuration and assembles the HTTP surface. Business routes
@@ -142,48 +153,29 @@ func (a *App) Serve(ctx context.Context, listener net.Listener) error {
 	var workerCtx context.Context
 	var cancelWorker context.CancelFunc
 	var workerWG sync.WaitGroup
-	workerErrors := make(chan error, 2)
 	activeWorkers := 0
 
-	if a.worker != nil || a.embeddingWorker != nil {
+	if a.worker != nil || a.governanceWorker != nil || a.embeddingWorker != nil {
 		workerCtx, cancelWorker = context.WithCancel(ctx)
 		defer cancelWorker()
 	}
 
 	if a.worker != nil {
-		if err := a.worker.Recover(workerCtx); err != nil {
-			cancelWorker()
-			if ctx.Err() != nil {
-				return nil
-			}
-			return fmt.Errorf("恢复后台任务: %w", err)
-		}
-	}
-	if a.embeddingWorker != nil {
-		if err := a.embeddingWorker.Recover(workerCtx); err != nil {
-			cancelWorker()
-			if ctx.Err() != nil {
-				return nil
-			}
-			return fmt.Errorf("恢复向量任务: %w", err)
-		}
-	}
-	if a.worker != nil {
 		activeWorkers++
 		workerWG.Add(1)
-		go func() {
-			defer workerWG.Done()
-			workerErrors <- a.worker.Run(workerCtx)
-		}()
+		go a.superviseWorker(workerCtx, &workerWG, "ingest", a.worker.Run)
 		a.logger.Info("ingest worker starting")
 	}
+	if a.governanceWorker != nil {
+		activeWorkers++
+		workerWG.Add(1)
+		go a.superviseWorker(workerCtx, &workerWG, "governance", a.governanceWorker.Run)
+		a.logger.Info("governance worker starting")
+	}
 	if a.embeddingWorker != nil {
 		activeWorkers++
 		workerWG.Add(1)
-		go func() {
-			defer workerWG.Done()
-			workerErrors <- a.embeddingWorker.Run(workerCtx)
-		}()
+		go a.superviseWorker(workerCtx, &workerWG, "embedding", a.embeddingWorker.Run)
 		a.logger.Info("embedding worker starting")
 	}
 
@@ -203,11 +195,6 @@ func (a *App) Serve(ctx context.Context, listener net.Listener) error {
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			runErr = fmt.Errorf("HTTP 服务: %w", err)
 		}
-	case err := <-workerErrors:
-		if err == nil {
-			err = errors.New("后台任务意外退出")
-		}
-		runErr = fmt.Errorf("后台任务: %w", err)
 	}
 	if cancelWorker != nil {
 		cancelWorker()
@@ -248,6 +235,63 @@ func (a *App) Serve(ctx context.Context, listener net.Listener) error {
 		a.logger.Info("http server stopped")
 	}
 	return runErr
+}
+
+// superviseWorker restarts one background loop with bounded exponential
+// backoff. The old loop has fully returned before a replacement starts, so a
+// timed-out model call can never continue writing in the background. Exhausting
+// the restart budget degrades only this worker; the HTTP service stays up.
+func (a *App) superviseWorker(ctx context.Context, wg *sync.WaitGroup, name string,
+	run func(context.Context) error) {
+	defer wg.Done()
+	const (
+		window       = 10 * time.Minute
+		maxRestarts  = 5
+		initialDelay = time.Second
+		maxDelay     = 16 * time.Second
+	)
+	var restarts []time.Time
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		err := run(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil {
+			err = errors.New("后台任务意外退出")
+		}
+		now := time.Now()
+		kept := restarts[:0]
+		for _, at := range restarts {
+			if now.Sub(at) < window {
+				kept = append(kept, at)
+			}
+		}
+		restarts = kept
+		if len(restarts) >= maxRestarts {
+			a.logger.Error("background worker degraded", "worker", name, "error", err)
+			return
+		}
+		restarts = append(restarts, now)
+		delay := initialDelay << uint(len(restarts)-1)
+		if delay > maxDelay {
+			delay = maxDelay
+		}
+		a.logger.Warn("background worker restarting",
+			"worker", name,
+			"delay", delay.String(),
+			"error", err,
+		)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
 }
 
 type statusRecorder struct {

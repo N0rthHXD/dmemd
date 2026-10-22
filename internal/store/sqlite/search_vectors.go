@@ -24,6 +24,7 @@ func (s *Store) SearchVectors(ctx context.Context, query retrieval.VectorQuery) 
 	if len(states) == 0 {
 		return []retrieval.VectorHit{}, nil
 	}
+	assertions := searchAssertionStatuses(query.Filters.AssertionStatus)
 	limit := query.Limit
 	if limit <= 0 {
 		limit = retrieval.CandidateLimitMin
@@ -44,6 +45,16 @@ func (s *Store) SearchVectors(ctx context.Context, query retrieval.VectorQuery) 
 	conditions = append(conditions, "m.state IN ("+placeholders(len(states))+")")
 	for _, state := range states {
 		args = append(args, string(state))
+	}
+	conditions = append(conditions, "m.assertion_status IN ("+placeholders(len(assertions))+")")
+	for _, status := range assertions {
+		args = append(args, string(status))
+	}
+	if query.Filters.AsOf != nil {
+		conditions = append(conditions, "(m.valid_from IS NULL OR m.valid_from <= ?)")
+		args = append(args, formatTime(*query.Filters.AsOf))
+		conditions = append(conditions, "(m.valid_to IS NULL OR ? < m.valid_to)")
+		args = append(args, formatTime(*query.Filters.AsOf))
 	}
 	if query.Filters.CreatedByApp != "" {
 		conditions = append(conditions, "m.created_by_app = ?")

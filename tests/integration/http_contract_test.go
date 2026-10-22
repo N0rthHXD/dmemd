@@ -84,13 +84,30 @@ func (c *apiClient) items(object map[string]any) []any {
 	return value
 }
 
+func (c *apiClient) memories(object map[string]any) []any {
+	c.t.Helper()
+	value, ok := object["memories"].([]any)
+	if !ok {
+		c.t.Fatalf("response has no memories array: %#v", object)
+	}
+	return value
+}
+
 func waitForJob(t *testing.T, client *apiClient, jobID string) map[string]any {
+	t.Helper()
+	return waitForJobCondition(t, client, jobID, func(object map[string]any) bool {
+		status, _ := object["status"].(string)
+		return status == "succeeded" || status == "failed" || status == "cancelled"
+	})
+}
+
+func waitForJobCondition(t *testing.T, client *apiClient, jobID string,
+	done func(map[string]any) bool) map[string]any {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		object := client.expect(http.MethodGet, "/v1/ingest-jobs/"+jobID, "", nil, http.StatusOK)
-		status, _ := object["status"].(string)
-		if status == "succeeded" || status == "failed" || status == "cancelled" {
+		if done(object) {
 			return object
 		}
 		if time.Now().After(deadline) {
@@ -100,7 +117,7 @@ func waitForJob(t *testing.T, client *apiClient, jobID string) map[string]any {
 	}
 }
 
-func newP6Server(t *testing.T, retryDelays []appruntime.Duration) (*httptest.Server, *testutil.FakeModel) {
+func newHTTPServer(t *testing.T, retryDelays []appruntime.Duration) (*httptest.Server, *testutil.FakeModel) {
 	t.Helper()
 	store := testutil.NewStore(t)
 	fake := testutil.NewFakeModel(t)
@@ -136,10 +153,11 @@ func newP6Server(t *testing.T, retryDelays []appruntime.Duration) (*httptest.Ser
 	return server, fake
 }
 
-func TestP6HTTPContract(t *testing.T) {
-	server, fake := newP6Server(t, []appruntime.Duration{
-		appruntime.Duration(10 * time.Millisecond),
-		appruntime.Duration(20 * time.Millisecond),
+func TestHTTPContract(t *testing.T) {
+	server, fake := newHTTPServer(t, []appruntime.Duration{
+		appruntime.Duration(0),
+		appruntime.Duration(0),
+		appruntime.Duration(time.Hour),
 	})
 	client := newAPIClient(t, server.URL)
 
@@ -200,8 +218,12 @@ func TestP6HTTPContract(t *testing.T) {
 		fake.EnqueueStatus(http.StatusInternalServerError)
 	}
 	failedReceipt := client.expect(http.MethodPost, "/v1/ingestions", `{"content":"模型失败时仍接收。"}`, nil, http.StatusAccepted)
-	failedJob := waitForJob(t, client, failedReceipt["job_id"].(string))
-	if failedJob["status"] != "failed" {
+	failedJob := waitForJobCondition(t, client, failedReceipt["job_id"].(string), func(object map[string]any) bool {
+		status, _ := object["status"].(string)
+		attempts, _ := object["attempts"].(float64)
+		return status == "waiting" && attempts == 3
+	})
+	if failedJob["status"] != "waiting" || failedJob["wait_reason"] != "transient" {
 		t.Fatalf("failed job = %#v", failedJob)
 	}
 	if message, _ := failedJob["error"].(string); !strings.Contains(message, "HTTP 500") {
@@ -230,7 +252,12 @@ func TestP6HTTPContract(t *testing.T) {
 	recall := client.expect(http.MethodPost, "/v1/memories/recall",
 		`{"query":"中文","match":"all","filters":{"kinds":["preference"],"states":["active"]},"top_k":20,"explain":true}`,
 		nil, http.StatusOK)
-	recallItems := client.items(recall)
+	for _, partition := range []string{"memories", "summaries", "experiences", "skills", "conflicts", "warnings"} {
+		if _, ok := recall[partition].([]any); !ok {
+			t.Fatalf("recall partition %s missing: %#v", partition, recall)
+		}
+	}
+	recallItems := client.memories(recall)
 	if len(recallItems) != 1 {
 		t.Fatalf("recall items = %#v", recallItems)
 	}
@@ -360,11 +387,11 @@ func TestP6HTTPContract(t *testing.T) {
 		t.Fatalf("tombstone = %#v", tombstone)
 	}
 	emptyRecall := client.expect(http.MethodPost, "/v1/memories/recall", `{"query":"中文"}`, nil, http.StatusOK)
-	if len(client.items(emptyRecall)) != 0 {
+	if len(client.memories(emptyRecall)) != 0 {
 		t.Fatalf("deleted memory returned by recall: %#v", emptyRecall)
 	}
 	special := client.expect(http.MethodPost, "/v1/memories/recall", `{"query":"\"*( OR *"}`, nil, http.StatusOK)
-	if len(client.items(special)) != 0 {
+	if len(client.memories(special)) != 0 {
 		t.Fatalf("FTS syntax input returned items: %#v", special)
 	}
 
@@ -395,8 +422,8 @@ func TestP6HTTPContract(t *testing.T) {
 
 }
 
-func TestP6SourceRedactionCancelsRunningJob(t *testing.T) {
-	server, fake := newP6Server(t, nil)
+func TestSourceRedactionCancelsRunningJob(t *testing.T) {
+	server, fake := newHTTPServer(t, nil)
 	client := newAPIClient(t, server.URL)
 	fake.Enqueue(testutil.FakeResponse{
 		Status:  http.StatusOK,

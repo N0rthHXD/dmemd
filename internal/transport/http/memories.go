@@ -23,6 +23,7 @@ func (h *handler) createIngestion(w http.ResponseWriter, request *http.Request) 
 	submission := ingest.Submission{
 		AppID:      rawString(object, "app_id"),
 		ExternalID: rawString(object, "external_id"),
+		ScopeKey:   rawString(object, "scope_key"),
 		Content:    object["content"],
 	}
 	receipt, err := service.Submit(request.Context(), submission)
@@ -47,20 +48,29 @@ func (h *handler) listMemories(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 	query := request.URL.Query()
+	updatedAfter, validAfter := queryTimeStrict(query.Get("updated_after"))
+	updatedBefore, validBefore := queryTimeStrict(query.Get("updated_before"))
+	if !validAfter || !validBefore {
+		h.writeBadRequest(w)
+		return
+	}
 	options := memory.ListOptions{
+		FactGroupID:   strings.TrimSpace(query.Get("fact_group_id")),
 		CreatedByApp:  strings.TrimSpace(query.Get("created_by_app")),
-		UpdatedAfter:  queryTime(query.Get("updated_after")),
-		UpdatedBefore: queryTime(query.Get("updated_before")),
+		UpdatedAfter:  updatedAfter,
+		UpdatedBefore: updatedBefore,
 		Limit:         parseLimit(query.Get("limit")),
 	}
 	kinds, emptyKinds := parseKinds(query["kinds"])
 	states, emptyStates := parseStates(query["states"])
-	if emptyKinds || emptyStates {
+	assertions, emptyAssertions := parseAssertionStatuses(query["assertion_status"])
+	if emptyKinds || emptyStates || emptyAssertions {
 		writeJSON(w, http.StatusOK, memoryListResponse{Items: []memoryDTO{}})
 		return
 	}
 	options.Kinds = kinds
 	options.States = states
+	options.AssertionStatus = assertions
 
 	items, err := service.List(request.Context(), options)
 	if err != nil {
@@ -80,7 +90,15 @@ func (h *handler) getMemory(w http.ResponseWriter, request *http.Request) {
 		h.writeServiceError(w, request, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, memoryFromDomain(item))
+	relations, err := service.Relations(request.Context(), item.ID)
+	if err != nil {
+		h.writeServiceError(w, request, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, memoryDetailDTO{
+		memoryDTO: memoryFromDomain(item),
+		Relations: relationsFromDomain(relations),
+	})
 }
 
 func (h *handler) setMemoryState(w http.ResponseWriter, request *http.Request) {

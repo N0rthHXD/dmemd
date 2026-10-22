@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -21,6 +22,10 @@ func TestMigrationsCreateCoreAndSearchSchema(t *testing.T) {
 		"memories", "memory_revisions", "sources", "evidence", "revision_evidence",
 		"ingest_jobs", "schema_migrations", "memory_search_docs", "memory_fts",
 		"memory_embeddings", "memory_embedding_jobs", "memory_index_meta",
+		"memory_fact_groups", "memory_relations", "memory_conflicts",
+		"memory_conflict_members", "memory_conflict_events", "memory_catalog",
+		"schema_meta", "governance_jobs", "artifacts", "artifact_revisions",
+		"artifact_memory_dependencies", "artifact_search_docs", "artifact_fts",
 	} {
 		var name string
 		err := store.writer.QueryRowContext(ctx,
@@ -34,8 +39,16 @@ func TestMigrationsCreateCoreAndSearchSchema(t *testing.T) {
 	if err := store.writer.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 3 {
-		t.Fatalf("migration count = %d, want 3", versions)
+	if versions != 7 {
+		t.Fatalf("migration count = %d, want 7", versions)
+	}
+	var contract string
+	if err := store.writer.QueryRowContext(ctx,
+		`SELECT value FROM schema_meta WHERE key = 'contract'`).Scan(&contract); err != nil {
+		t.Fatal(err)
+	}
+	if contract != SchemaContract {
+		t.Fatalf("schema contract = %q, want %q", contract, SchemaContract)
 	}
 
 	rows, err := store.writer.QueryContext(ctx, `PRAGMA foreign_key_check`)
@@ -100,6 +113,43 @@ func TestMigrationFailureRollsBackAndCanBeRetried(t *testing.T) {
 	}
 	if !tableExists(t, db, "recovered") {
 		t.Fatal("repaired migration was not applied")
+	}
+}
+
+func TestMigrateRejectsIncompatibleInitializationContract(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old-layout.db")
+	db, err := sql.Open("sqlite", writerDSN(path, 5*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(`CREATE TABLE schema_migrations (
+		version INTEGER NOT NULL PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_migrations(version, name, applied_at) VALUES (1, '0001_core.sql', ?)`,
+		formatTime(time.Now())); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(context.Background(), Config{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	err = store.Migrate(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "初始化契约") {
+		t.Fatalf("Migrate error = %v, want initialization-contract rejection", err)
+	}
+	var count int
+	if err := store.writer.QueryRow(`SELECT count(*) FROM schema_migrations`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("incompatible database was partially migrated: %d", count)
 	}
 }
 

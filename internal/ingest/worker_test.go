@@ -14,16 +14,16 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/store/sqlite"
 )
 
-func newP5Worker(f *p5Fixture, options ...ingest.WorkerOption) *ingest.Worker {
+func newProcessorWorker(f *processorFixture, options ...ingest.WorkerOption) *ingest.Worker {
 	base := []ingest.WorkerOption{
 		ingest.WithWorkerClock(time.Now),
-		ingest.WithRetryDelays(10*time.Millisecond, 20*time.Millisecond),
+		ingest.WithRetryDelays(0, 0, 0),
 		ingest.WithPollInterval(5 * time.Millisecond),
 	}
 	return ingest.NewWorker(sqlite.IngestStore{Store: f.store}, f.store, f.processor, append(base, options...)...)
 }
 
-func waitForJob(t *testing.T, f *p5Fixture, id string, done func(ingest.Job) bool) ingest.Job {
+func waitForJob(t *testing.T, f *processorFixture, id string, done func(ingest.Job) bool) ingest.Job {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
@@ -38,10 +38,10 @@ func waitForJob(t *testing.T, f *p5Fixture, id string, done func(ingest.Job) boo
 	}
 }
 
-func TestWorkerRetriesTransientFailuresAndStopsAtThree(t *testing.T) {
-	f := newP5Fixture(t)
+func TestWorkerKeepsTransientFailuresWaitingInsteadOfFailing(t *testing.T) {
+	f := newProcessorFixture(t)
 	var logs bytes.Buffer
-	worker := newP5Worker(f, ingest.WithWorkerLogger(slog.New(slog.NewTextHandler(&logs, nil))))
+	worker := newProcessorWorker(f, ingest.WithWorkerLogger(slog.New(slog.NewTextHandler(&logs, nil))))
 	f.fake.EnqueueStatus(500)
 	f.fake.EnqueueStatus(500)
 	f.fake.EnqueueStatus(500)
@@ -50,7 +50,7 @@ func TestWorkerRetriesTransientFailuresAndStopsAtThree(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		job := f.job(t, receipt.JobID)
-		if job.Status == ingest.JobFailed {
+		if job.Status == ingest.JobWaiting && job.Attempts == 3 {
 			break
 		}
 		processed, err := worker.ProcessOne(context.Background())
@@ -61,12 +61,15 @@ func TestWorkerRetriesTransientFailuresAndStopsAtThree(t *testing.T) {
 			time.Sleep(5 * time.Millisecond)
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("job did not fail: %+v", job)
+			t.Fatalf("job did not wait: %+v", job)
 		}
 	}
 	job := f.job(t, receipt.JobID)
-	if job.Status != ingest.JobFailed || job.Attempts != 3 {
+	if job.Status != ingest.JobWaiting || job.Attempts != 3 || job.WaitReason != ingest.WaitReasonTransient {
 		t.Fatalf("job = %+v", job)
+	}
+	if job.NextAttemptAt == nil {
+		t.Fatal("waiting job has no next attempt")
 	}
 	if job.Error == "" || job.Error == "scripted failure" || strings.Contains(job.Error, "模型暂时不可用的输入") {
 		t.Fatalf("error summary = %q", job.Error)
@@ -74,20 +77,14 @@ func TestWorkerRetriesTransientFailuresAndStopsAtThree(t *testing.T) {
 	if f.fake.RequestCount() != 3 {
 		t.Fatalf("model requests = %d, want 3", f.fake.RequestCount())
 	}
-	if processed, err := worker.ProcessOne(context.Background()); err != nil || processed {
-		t.Fatalf("terminal job processed again: processed=%v err=%v", processed, err)
-	}
-	if f.fake.RequestCount() != 3 {
-		t.Fatalf("fourth model call occurred")
-	}
 	if strings.Contains(logs.String(), "模型暂时不可用的输入") || strings.Contains(logs.String(), "scripted failure") {
 		t.Fatalf("logs leaked input or raw response: %s", logs.String())
 	}
 }
 
 func TestWorkerRecoversAfterTransientFailure(t *testing.T) {
-	f := newP5Fixture(t)
-	worker := newP5Worker(f)
+	f := newProcessorFixture(t)
+	worker := newProcessorWorker(f)
 	f.fake.EnqueueStatus(500)
 	f.fake.EnqueueContent(`{"candidates":[{"content":"恢复后形成的记忆"}]}`)
 	receipt := f.submit(t, `"恢复后形成的记忆"`)
@@ -117,9 +114,9 @@ func TestWorkerRecoversAfterTransientFailure(t *testing.T) {
 	}
 }
 
-func TestWorkerDoesNotRetryPermanentProviderError(t *testing.T) {
-	f := newP5Fixture(t)
-	worker := newP5Worker(f)
+func TestWorkerParksPermanentProviderErrorUntilRestart(t *testing.T) {
+	f := newProcessorFixture(t)
+	worker := newProcessorWorker(f)
 	f.fake.EnqueueStatus(401)
 	receipt := f.submit(t, `"永久失败"`)
 	processed, err := worker.ProcessOne(context.Background())
@@ -127,14 +124,18 @@ func TestWorkerDoesNotRetryPermanentProviderError(t *testing.T) {
 		t.Fatalf("processed=%v err=%v", processed, err)
 	}
 	job := f.job(t, receipt.JobID)
-	if job.Status != ingest.JobFailed || job.Attempts != 1 || f.fake.RequestCount() != 1 {
+	if job.Status != ingest.JobWaiting || job.WaitReason != ingest.WaitReasonConfiguration ||
+		job.Attempts != 1 || f.fake.RequestCount() != 1 {
 		t.Fatalf("job = %+v requests=%d", job, f.fake.RequestCount())
+	}
+	if job.NextAttemptAt != nil {
+		t.Fatalf("configuration wait must not poll: %+v", job)
 	}
 }
 
 func TestWorkerUnparseableResponseUsesRetryBudget(t *testing.T) {
-	f := newP5Fixture(t)
-	worker := newP5Worker(f)
+	f := newProcessorFixture(t)
+	worker := newProcessorWorker(f)
 	for i := 0; i < 3; i++ {
 		f.fake.EnqueueMalformed()
 	}
@@ -166,8 +167,8 @@ func TestWorkerUnparseableResponseUsesRetryBudget(t *testing.T) {
 
 func TestWorkerRunsSequentiallyAndCancellationExitsWait(t *testing.T) {
 	t.Run("sequential", func(t *testing.T) {
-		f := newP5Fixture(t)
-		worker := newP5Worker(f)
+		f := newProcessorFixture(t)
+		worker := newProcessorWorker(f)
 		f.fake.Enqueue(ingestFakeBlockedCandidate("第一条"))
 		first := f.submit(t, `"第一条"`)
 		f.advance(time.Millisecond)
@@ -215,8 +216,8 @@ func TestWorkerRunsSequentiallyAndCancellationExitsWait(t *testing.T) {
 	})
 
 	t.Run("idle wait cancellation", func(t *testing.T) {
-		f := newP5Fixture(t)
-		worker := newP5Worker(f)
+		f := newProcessorFixture(t)
+		worker := newProcessorWorker(f)
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() { done <- worker.Run(ctx) }()
@@ -233,14 +234,16 @@ func TestWorkerRunsSequentiallyAndCancellationExitsWait(t *testing.T) {
 	})
 
 	t.Run("retry wait cancellation", func(t *testing.T) {
-		f := newP5Fixture(t)
-		worker := newP5Worker(f, ingest.WithRetryDelays(time.Hour))
+		f := newProcessorFixture(t)
+		worker := newProcessorWorker(f, ingest.WithRetryDelays(time.Hour))
 		f.fake.EnqueueStatus(503)
 		receipt := f.submit(t, `"等待重试"`)
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() { done <- worker.Run(ctx) }()
-		waitForJob(t, f, receipt.JobID, func(job ingest.Job) bool { return job.Status == ingest.JobQueued && job.Attempts == 1 })
+		waitForJob(t, f, receipt.JobID, func(job ingest.Job) bool {
+			return job.Status == ingest.JobWaiting && job.Attempts == 1
+		})
 		cancel()
 		select {
 		case err := <-done:
@@ -251,15 +254,15 @@ func TestWorkerRunsSequentiallyAndCancellationExitsWait(t *testing.T) {
 			t.Fatal("worker did not stop while waiting for retry")
 		}
 		job := f.job(t, receipt.JobID)
-		if job.Status != ingest.JobQueued || job.Attempts != 1 || job.NextAttemptAt == nil {
+		if job.Status != ingest.JobWaiting || job.Attempts != 1 || job.NextAttemptAt == nil {
 			t.Fatalf("job after cancellation = %+v", job)
 		}
 	})
 }
 
-func TestWorkerRecoveryRequeuesRunningAndFailsExhausted(t *testing.T) {
-	f := newP5Fixture(t)
-	worker := newP5Worker(f)
+func TestWorkerRecoveryRequeuesRunningWithoutFailingAttemptBudget(t *testing.T) {
+	f := newProcessorFixture(t)
+	worker := newProcessorWorker(f)
 	ctx := context.Background()
 	now := time.Now().UTC()
 
@@ -283,6 +286,18 @@ func TestWorkerRecoveryRequeuesRunningAndFailsExhausted(t *testing.T) {
 	insertJob("succeeded", ingest.JobSucceeded, 2)
 	insertJob("cancelled", ingest.JobCancelled, 1)
 	insertJob("queued-2", ingest.JobQueued, 2)
+	src := source.Source{ID: "source-failed-protocol", Content: json.RawMessage(`"恢复"`), CreatedAt: now}
+	if err := f.store.WithTx(ctx, func(ctx context.Context, tx *sqlite.Tx) error {
+		if err := tx.InsertSource(ctx, src); err != nil {
+			return err
+		}
+		return tx.InsertJob(ctx, ingest.Job{
+			ID: "failed-protocol", SourceID: src.ID, Status: ingest.JobFailed, Attempts: 3,
+			ProtocolFailures: 3, MemoryIDs: []string{}, CreatedAt: now, UpdatedAt: now,
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := worker.Recover(ctx); err != nil {
 		t.Fatal(err)
@@ -292,7 +307,7 @@ func TestWorkerRecoveryRequeuesRunningAndFailsExhausted(t *testing.T) {
 		t.Fatalf("running-1 = %+v", running)
 	}
 	exhausted := f.job(t, "running-3")
-	if exhausted.Status != ingest.JobFailed || exhausted.Attempts != 3 || exhausted.Error == "" {
+	if exhausted.Status != ingest.JobQueued || exhausted.Attempts != 3 {
 		t.Fatalf("running-3 = %+v", exhausted)
 	}
 	if job := f.job(t, "succeeded"); job.Status != ingest.JobSucceeded {
@@ -303,6 +318,10 @@ func TestWorkerRecoveryRequeuesRunningAndFailsExhausted(t *testing.T) {
 	}
 	if job := f.job(t, "queued-2"); job.Status != ingest.JobQueued || job.Attempts != 2 {
 		t.Fatalf("queued-2 = %+v", job)
+	}
+	if job := f.job(t, "failed-protocol"); job.Status != ingest.JobQueued ||
+		job.ProtocolFailures != 0 || job.Attempts != 3 {
+		t.Fatalf("failed-protocol = %+v", job)
 	}
 	if f.fake.RequestCount() != 0 {
 		t.Fatalf("recovery called the model %d times", f.fake.RequestCount())
@@ -335,8 +354,8 @@ func TestWorkerRecoveryRequeuesRunningAndFailsExhausted(t *testing.T) {
 }
 
 func TestWorkerRejectsTerminalJobs(t *testing.T) {
-	f := newP5Fixture(t)
-	worker := newP5Worker(f)
+	f := newProcessorFixture(t)
+	worker := newProcessorWorker(f)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	for _, status := range []ingest.JobStatus{ingest.JobSucceeded, ingest.JobFailed, ingest.JobCancelled} {

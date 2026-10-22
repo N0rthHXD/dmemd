@@ -14,7 +14,7 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/testutil"
 )
 
-func TestP3LifecycleVersionEvidenceRedactionAndPurge(t *testing.T) {
+func TestLifecycleVersionEvidenceRedactionAndPurge(t *testing.T) {
 	store := testutil.NewStore(t)
 	ctx := context.Background()
 	clock := time.Date(2026, 10, 20, 2, 0, 0, 0, time.UTC)
@@ -23,7 +23,7 @@ func TestP3LifecycleVersionEvidenceRedactionAndPurge(t *testing.T) {
 	sources := source.NewService(store, sqlite.SourceStore{Store: store}, source.WithClock(now))
 
 	src := source.Source{
-		ID: "source-p3", AppID: "desktop-assistant",
+		ID: "source-lifecycle", AppID: "desktop-assistant",
 		Content:   []byte(`{"messages":[{"id":"m1","content":"默认中文回答"}]}`),
 		CreatedAt: clock,
 	}
@@ -36,8 +36,8 @@ func TestP3LifecycleVersionEvidenceRedactionAndPurge(t *testing.T) {
 			return err
 		}
 		for _, job := range []ingest.Job{
-			{ID: "job-p3-queued", SourceID: src.ID, Status: ingest.JobQueued, CreatedAt: clock, UpdatedAt: clock},
-			{ID: "job-p3-running", SourceID: src.ID, Status: ingest.JobRunning, Attempts: 1, CreatedAt: clock, UpdatedAt: clock},
+			{ID: "job-lifecycle-queued", SourceID: src.ID, Status: ingest.JobQueued, CreatedAt: clock, UpdatedAt: clock},
+			{ID: "job-lifecycle-running", SourceID: src.ID, Status: ingest.JobRunning, Attempts: 1, CreatedAt: clock, UpdatedAt: clock},
 		} {
 			if err := tx.InsertJob(ctx, job); err != nil {
 				return err
@@ -142,7 +142,7 @@ func TestP3LifecycleVersionEvidenceRedactionAndPurge(t *testing.T) {
 	if current.Content != "默认中文回答" {
 		t.Fatalf("memory body after redaction = %q", current.Content)
 	}
-	for _, jobID := range []string{"job-p3-queued", "job-p3-running"} {
+	for _, jobID := range []string{"job-lifecycle-queued", "job-lifecycle-running"} {
 		job, err := store.GetJob(ctx, jobID)
 		if err != nil {
 			t.Fatal(err)

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/N0rthHXD/dmemd/internal/idgen"
+	"github.com/N0rthHXD/dmemd/internal/memory"
 	"github.com/N0rthHXD/dmemd/internal/source"
 )
 
@@ -63,6 +64,7 @@ func (s *Service) Submit(ctx context.Context, submission Submission) (Receipt, e
 		ID:         idgen.NewUUID(),
 		AppID:      submission.AppID,
 		ExternalID: submission.ExternalID,
+		ScopeKey:   memory.NormalizeScopeKey(submission.ScopeKey),
 		Content:    content,
 		CreatedAt:  now,
 	}

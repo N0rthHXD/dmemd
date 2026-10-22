@@ -1,6 +1,11 @@
 # 远端模型协议（首个适配器）
 
-本文件固定首个 `ExtractionProvider` 协议，明确请求字段、候选结构或错误语义。协议采用
+> 当前实现已把提取与判断分离为 `ExtractionProvider` 和 `DecisionProvider`。同一个远端
+> 适配器实现两个接口，复用端点、凭据和模型配置。第 2～4 节保留的 `action`、
+> `target_memory_id` 和提取阶段 `related_memories` 描述已废除；当前请求/响应字段以第 9 节
+> 为准，旧动作不提供兼容。
+
+本文件固定远端模型协议，明确请求字段、候选/决策结构和错误语义。协议采用
 OpenAI-compatible Chat Completions，但只使用下文列出的字段；Provider 不接收完整记忆库、
 无关来源或本地 API Token。
 
@@ -225,15 +230,15 @@ HTTP `200` 但 `message.content` 为自然语言而非 JSON（可重试，最终
 
 | 情况 | Provider 返回 | Worker 处理 |
 | --- | --- | --- |
-| 连接失败、DNS 失败、超时（默认 60s） | `ProviderError{Retryable:true}` | 按持久化尝试计数重试，最多三次 |
-| `429 Too Many Requests` | 可重试错误 | 重试；记录脱敏状态码 |
-| `500`/`502`/`503`/`504` | 可重试错误 | 重试 |
-| `400`/`401`/`403`/`404` | 不可重试错误 | 直接标记任务失败，不继续调用 |
-| `200` 但整体不可解析 | 可重试错误 | 最多三次后失败 |
+| 连接失败、DNS 失败、超时（默认 60s） | `ProviderError{Retryable:true}` | 进入 `waiting`，按 5 秒/30 秒/2 分钟、之后最长 30 分钟继续同一任务 |
+| `429 Too Many Requests` | 可重试错误 | 进入 `waiting` 并退避；记录脱敏状态码 |
+| `500`/`502`/`503`/`504` | 可重试错误 | 进入 `waiting` 并退避 |
+| `400`/`401`/`403`/`404` | 不可重试错误 | `waiting`（配置/凭据原因），重启后重评 |
+| `200` 但整体不可解析 | 协议错误 | 连续三次后 `failed`，重启后重新评估一次 |
 | `200` 且零候选 | 成功 | 任务 `succeeded`，`memory_ids=[]` |
 | 部分候选可解析 | 成功 | 处理可用候选，失败的候选跳过 |
 
-重试次数、1 秒/5 秒退避、`queued → running → succeeded/failed/cancelled` 状态机和崩溃恢复
+重试调度、`queued → running → waiting → succeeded/failed/cancelled` 状态机和崩溃恢复
 由 ingest Worker 负责；Provider 内部不自行重试，也不创建第二套状态。已发出的远端请求
 无法撤回；来源清除后的取消只保证本地不提交结果，不承诺远端擦除。
 
@@ -246,29 +251,36 @@ HTTP `200` 但 `message.content` 为自然语言而非 JSON（可重试，最终
 - 整体不可解析、部分可解析；
 - 超时、连接失败、429、5xx、4xx；
 - 阻塞响应开始后来源被清除的取消竞态；
-- 校验请求只包含当前来源和相关 active 记忆，且不包含真实凭据或完整记忆库。
+- 校验请求只包含当前来源和有界相关上下文，且不包含真实凭据或完整记忆库。
 
 测试不得访问外网或使用真实模型凭据；真实连通性检查只能作为显式可选操作，不作为默认测试
 前提。
 
 ## 7. 处理编排与合并边界
 
-`ingest.Processor` 在模型调用前读取当前来源并选择相关 active 记忆，模型调用和候选整理
-全部在写事务外完成。结果提交时重新读取任务、来源和记忆的实际持久化状态：
+`ingest.Processor` 在模型调用前读取来源，先调用一次提取；随后为每个候选选择关键词
+（启用 Embedding 时补充语义）上下文、事实组时间线和 open 冲突。无相关事实且可确定时直接
+构建新增/补证计划，否则按最多 8 个候选一批调用决策模型。所有模型与 Embedding 请求都在写
+事务外完成。
 
-- `update`/`merge_evidence` 的 `target_memory_id` 不在本次相关上下文中时按 `add` 处理；
-  服务从不使用模型返回的证据 ID、来源 ID 或版本号。
-- 目标仍为 active 且 `update` 的候选 `observed_at` 早于当前值时不覆盖当前事实，改用新增；
-  正文未变化时把 `update` 视为补证，保留现有证据并合并新证据。
-- 目标在候选计算后被归档或逻辑删除时不自动恢复/更新，也不为同一目标新建 active 记忆；
-  目标被永久清除时，`update` 按新增处理，`merge_evidence` 跳过。
-- `add` 与现有同 kind、规范化正文相同的 active 记忆合并；已有完整证据时跳过，新来源证据
-  生成 `add_evidence` 版本。内容更正只使用本次候选证据，不继承旧结论证据。
-- 多候选、版本、证据、索引和任务 `succeeded`/`memory_ids` 在同一短事务提交；事务先检查
-  cancelled，已取消任务不写任何候选。零候选同样提交成功空结果。
-- 单 Worker 首次尝试即计入三次预算；暂时失败按 1 秒、5 秒退避，不可重试的 4xx 立即失败。
-  启动恢复把 running 重排 queued 并保留尝试次数，已耗尽预算的 queued 直接 failed；成功和
-  取消任务不重跑。错误摘要只保留类别、HTTP 状态或截断的安全文本。
+提交时重新读取任务、来源、目录 generation、目标版本和组 generation：
+
+- 非法目标、缺失决策、未知动作和非法区间属于协议错误，整个尝试不提交并进入任务重试；
+  不再把非法目标降级为 `add`。
+- 上下文不完整时禁止 `change/correct/enrich/merge_evidence`，规范化为 pending/unresolved。
+- `add` 只在同组 single 冲突检查通过时 accepted；同结论重复合并证据，不扩大区间。
+- `change` 关闭一个已确认前驱、创建后继并写 `supersedes`；乱序、未知边界、多段拆分或
+  越过后继时转 pending/冲突。
+- `correct` 仅在有当前来源可定位引文时自动执行；局部时间纠错、无依据更正转 pending。
+- `conflict`/`unresolved` 生成 pending 记录和固定原因码；同组同成员版本同原因复用 open
+  冲突，不堆叠重复记录。
+- 目录 generation、目标版本或组 generation 在模型期间变化时返回内部可重试错误；现有
+  Worker 以暂时失败退避重跑整个来源。不允许先提交部分来源结果。
+- 多候选、版本、证据、关系、冲突、索引和任务 `succeeded`/结果摘要在同一短事务提交；
+  cancelled 优先，已取消或已成功任务不重复写入。零候选成功提交空结果。
+- 暂时失败进入 `waiting`，按 5 秒、30 秒、2 分钟后最长每 30 分钟继续同一任务；连续三次
+  协议/解析错误隔离为 `failed`。配置/凭据错误等待重启后重评；启动恢复把 running 重排 queued、
+  重评配置等待，并让协议隔离任务按新的模型/协议版本重新评估一次。
 - 已发出的远端请求不能撤回。来源清除只保证本地取消后不提交结果，不宣称远端副本被擦除。
 
 ## 8. Embedding 协议
@@ -290,3 +302,250 @@ OpenAI-compatible Embeddings：`POST <base_url>/embeddings`，请求体包含 `m
   上限 60 秒并加抖动。
 - 适配器不记录或持久化查询、正文、向量、完整响应或凭据。测试使用本地假 Embeddings
   服务，不访问外网。
+
+
+## 9. 两阶段协议（当前实现）
+
+### 9.1 提取
+
+`ExtractionProvider.Extract` 的输入只有 `current_source`，不包含数据库目标、相关记忆或
+动作。系统提示要求返回一个 JSON 对象：
+
+```json
+{
+  "candidates": [
+    {
+      "kind": "fact",
+      "title": "常住城市",
+      "content": "用户常住上海。",
+      "observed_at": "2026-01-10T02:00:00Z",
+      "valid_from": "2026-01-10T02:00:00Z",
+      "valid_to": null,
+      "valid_from_basis": "explicit",
+      "valid_to_basis": "unknown",
+      "topics": ["housing", "shanghai"],
+      "fact_group": {"subject": "用户", "predicate": "常住城市", "scope": "", "cardinality": "single"},
+      "evidence": [{"message_id": "m1", "quote": "用户常住上海", "field": "messages.0.content", "start": 0, "end": 6}]
+    }
+  ]
+}
+```
+
+- `candidate_id` 不来自模型；服务按提取顺序分配，作为决策协议中的唯一引用。
+- 模型不得输出记忆 ID、版本、证据 ID、断言状态、组 ID、作用域或动作。`topics` 只能是
+  平面短标签，由服务 trim、转小写并去重；不是层级路径。
+- `current_source.scope_key` 由调用方显式提供并原样交给模型作为上下文；模型无权提升为
+  用户全局作用域。
+- `valid_from/to` 只接受可确定到具体时刻的 RFC 3339；月份、模糊日期和缺少时区时留空，
+  不伪造精度。非空边界必须带 `explicit` 或 `inferred` 依据；空边界对应 `unknown`。
+- 正文、否定、条件、主体和时间必须保留；“去北京出差”不能提取成“常住北京”。
+- 每来源最多接受 64 个非空候选；超出以固定 `candidate_limit_exceeded` 失败，不静默丢弃。
+
+### 9.2 决策
+
+`DecisionProvider.Decide` 接收最多 8 个候选、有限相关事实、事实组和 open 冲突。相关事实
+已包含事实组时间线，不再单独重复发送时间线。输出一个对象，所有候选必须恰有一项决策：
+
+```json
+{
+  "decisions": [
+    {
+      "candidate_id": "c1",
+      "action": "change",
+      "target_memory_ids": ["m1"],
+      "target_group_id": "g1",
+      "content": "用户常住北京。",
+      "valid_from": "2026-06-15T02:00:00Z",
+      "valid_to": null,
+      "valid_from_basis": "explicit",
+      "valid_to_basis": "unknown",
+      "reason_code": "explicit_transition",
+      "evidence_refs": [{"candidate_id": "c1", "evidence_index": 0}],
+      "fact_group": {"subject": "用户", "predicate": "常住城市", "cardinality": "single"}
+    }
+  ]
+}
+```
+
+允许动作：`add`、`merge_evidence`、`enrich`、`change`、`correct`、`separate`、`conflict`、
+`unresolved`、`skip`。`enrich/correct/change/merge_evidence` 首版只允许一个目标。目标记忆
+和组 ID 必须出现在本次上下文中；证据引用只能来自本批候选。未知动作、缺失决策、重复
+candidate_id、伪造目标和非法区间属于协议错误，整个尝试不提交并进入任务重试；业务上证据
+不足的动作规范化为 pending/unresolved，不降级为 add。
+
+### 9.3 上下文与预算
+
+- 每个候选按主体/属性/场景/正文做关键词召回，默认最多 20 条初始相似记忆；同组时间线
+  额外最多 50 条。任一上限截断时 `context_complete=false`，破坏性动作转 pending。
+- 一致性上下文可包含历史段、pending 和归档背景，但不含删除墓碑；归档记录不能被自动激活。
+- 每次任务尝试共用 120 秒总预算；单次远端调用仍受 `model.timeout` 与剩余预算约束。
+- 调用次数为一次提取加每 8 个候选一批决策；无相关事实且可确定性新增/补证时不调用决策。
+- 网络、限流、超时进入 `waiting` 并按 5 秒、30 秒、2 分钟递增退避，之后最长 30 分钟；
+  恢复后继续同一任务。连续三次解析/协议错误进入 `failed`；认证/配置错误保持等待并在重启后
+  重评。`generation`/version 变化按任务 revision 丢弃旧结果。
+- 模型返回 `unresolved` 是业务成功；持久化 pending 记录和固定原因码，不保存推理过程、
+  自由文本理由或完整响应。
+
+### 9.4 分类
+
+当原子记忆没有可用主题时，治理分类处理器可调用同一个适配器：
+
+```json
+{
+  "title": "项目数据库",
+  "content": "项目使用 SQLite 保存记忆。",
+  "scope_key": "project:dmemd"
+}
+```
+
+系统提示要求只返回：
+
+```json
+{"topics": ["go", "sqlite"]}
+```
+
+- 输入只包含选中的一条原子快照，正文按固定上限截断；不发送来源原文、全库或凭据。
+- 缺少 `topics` 数组按空结果处理；数组类型错误属于协议错误。服务再次规范化后保存，
+  标签完全相同时不生成新版本。
+- 分类调用受进程内软限速约束；限速只推迟任务，不影响输入持久化或原子查询。
+
+### 9.5 聚合摘要与画像
+
+治理 Worker 在选出的原子记忆有界集合上调用同一适配器：
+
+```json
+{
+  "kind": "topic_summary",
+  "scope_key": "project:dmemd",
+  "topic": "sqlite",
+  "truncated": false,
+  "memories": [
+    {
+      "id": "memory-uuid",
+      "version": 3,
+      "kind": "fact",
+      "title": "项目数据库",
+      "content": "项目使用 SQLite 保存记忆。",
+      "scope_key": "project:dmemd",
+      "topics": ["go", "sqlite"],
+      "observed_at": "2026-10-20T02:00:00Z",
+      "updated_at": "2026-10-20T03:00:00Z"
+    }
+  ]
+}
+```
+
+系统提示要求只返回：
+
+```json
+{"title": "SQLite 使用", "content": "项目使用 SQLite 保存记忆，并受项目作用域限制。"}
+```
+
+- 输入只来自 `active`、`accepted`、时间适用且没有未决冲突的原子记忆；每个 scope/topic
+  最多 64 条，正文按单条和总量上限截断，`truncated=true` 时摘要必须声明只覆盖局部输入。
+- `kind=profile` 时使用同一 scope 的偏好、程序与事实；首版不实现独立画像模型。
+- 正文为空或 JSON 不可解析属于协议错误；标题缺失使用固定默认值，不因辅助字段缺失丢弃
+  可用正文。
+- 返回正文不会成为原子事实、配置或可执行动作；服务只保存来源引用和派生版本。输入变化、
+  归档、删除或冲突裁决使当前版本失效，迟到结果因任务 revision 变化被丢弃。
+
+### 9.6 经验案例
+
+`ExperienceProvider.ComposeExperience` 把一条应用报告的运行结果和有限的原子程序/事件
+组织为结构化案例：
+
+```json
+{
+  "run": {
+    "id": "experience-uuid",
+    "run_id": "run-1",
+    "scope_key": "project:dmemd",
+    "goal": "验证修改",
+    "conditions": ["依赖已安装"],
+    "actions": ["运行 go test"],
+    "outcome": "success",
+    "skill_id": "skill-uuid",
+    "skill_version": 2,
+    "created_at": "2026-10-22T08:00:00Z"
+  },
+  "skill": {"id": "skill-uuid", "version": 2, "title": "验证工作流", "content": "..."},
+  "memories": [
+    {"id": "memory-uuid", "version": 2, "kind": "procedure", "title": "验证步骤",
+     "content": "修改后运行 go test。", "scope_key": "project:dmemd", "topics": ["testing"]}
+  ],
+  "truncated": false
+}
+```
+
+系统提示要求只返回一个 JSON 对象：
+
+```json
+{
+  "problem": "验证 dmemd 修改",
+  "preconditions": ["依赖已安装"],
+  "actions": ["运行 go test"],
+  "lessons": ["先执行单元测试"],
+  "failure_modes": ["跳过构建会遗漏编译错误"],
+  "content": "问题、条件、行动和结果的示例正文"
+}
+```
+
+- 结果保留调用方提交的 `outcome`，模型输出中的任何结果声明都不采用；服务不将“没有报错”
+  转为成功，也不写执行认证。
+- 服务自行附上真实 `memory_refs`、`experience_refs` 和选中的 Skill 上下文；模型伪造的
+  来源引用不建立关联。
+- 输入只含结构化运行摘要和有界原子记忆，不读取来源原文；超过上限时标记截断。
+
+### 9.7 指导型 Skill
+
+`SkillProvider.ComposeSkill` 使用同一适配器生成单个指导型工作流：
+
+```json
+{
+  "scope_key": "project:dmemd",
+  "topic": "testing",
+  "procedures": [{"id": "memory-uuid", "version": 2, "kind": "procedure",
+    "title": "验证步骤", "content": "修改后运行 go test。", "topics": ["testing"]}],
+  "experiences": [{"id": "experience-uuid", "goal": "验证修改",
+    "actions": ["运行 go test"], "outcome": "failure"}],
+  "truncated": false
+}
+```
+
+系统提示要求返回：
+
+```json
+{
+  "name": "验证工作流",
+  "description": "修改 dmemd 后的验证步骤",
+  "content": "## 前置条件\n- 依赖已安装\n\n## 步骤\n1. 运行 go test\n2. 执行构建检查",
+  "preconditions": ["依赖已安装"],
+  "steps": ["运行 go test", "执行构建检查"],
+  "stop_conditions": ["测试失败"],
+  "completion_checks": ["全部命令通过"],
+  "counterexamples": ["不要跳过测试"]
+}
+```
+
+- 只要正文或步骤可用即保存并启用；辅助字段缺失不丢弃可用内容。服务自行保存本次选用的
+  原子修订与运行结果引用，不要求模型生成逐步骤证据图。
+- 生成提示要求保留作用域、前置条件、否定、失败分支、停止条件和反例；首次版本不包含
+  可执行脚本、资源缓存、凭据或工具授权。
+- 模型文本不修改配置、不授予权限、不触发工具执行。生成失败保持停用并沿用任务重试；
+  依赖变化或失败反馈使旧版本退出默认召回并在后台重生成，不自动回滚旧版本。
+
+### 9.8 固定样例与真实模型评估
+
+分类、摘要、冲突和 Skill 的固定标注样例位于 `tests/quality/testdata/labeled.json`。默认
+`make test-quality` 使用样例中的回放输出验证协议、作用域、来源引用、截断和确定性冲突规则，
+不访问真实模型。真实模型评估是显式入口：
+
+```sh
+DMEMD_EVAL_BASE_URL=http://127.0.0.1:8000/v1 \
+DMEMD_EVAL_MODEL=<model-name> \
+DMEMD_EVAL_API_KEY=<optional-key> \
+go test -count=1 -run TestLiveModelQuality -v ./tests/quality
+```
+
+真实模型评估和容量实测分开记录在 `docs/quality.md`。未执行时不得把离线回放结果当作真实
+语义质量通过；模型版本、提示词版本和 token/耗时需要随实际报告记录。

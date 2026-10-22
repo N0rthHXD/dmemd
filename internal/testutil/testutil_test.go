@@ -24,8 +24,8 @@ func TestNewStoreCreatesIsolatedMigratedDatabases(t *testing.T) {
 		if err := OpenInspector(t, store.Path()).QueryRow(`SELECT count(*) FROM schema_migrations`).Scan(&count); err != nil {
 			t.Fatal(err)
 		}
-		if count != 3 {
-			t.Fatalf("migration count = %d, want 3", count)
+		if count != 7 {
+			t.Fatalf("migration count = %d, want 7", count)
 		}
 	}
 	CheckPrivateDatabaseFiles(t, first.Path())

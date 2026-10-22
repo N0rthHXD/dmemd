@@ -8,7 +8,7 @@ import (
 )
 
 func (h *handler) recallMemories(w http.ResponseWriter, request *http.Request) {
-	service, ok := h.requireSearch(w)
+	service, ok := h.requireRecall(w)
 	if !ok {
 		return
 	}
@@ -32,29 +32,50 @@ func (h *handler) recallMemories(w http.ResponseWriter, request *http.Request) {
 		h.writeBadRequest(w)
 		return
 	}
-	searchRequest := retrieval.Request{
-		Query:   rawString(object, "query"),
-		Mode:    mode,
-		Match:   retrieval.Match(rawString(object, "match")),
-		TopK:    topK,
-		Explain: rawBool(object, "explain"),
+	maxContextTokens, _ := rawInt(object, "max_context_tokens")
+	layers := make([]retrieval.Layer, 0)
+	_, layersSpecified := object["layers"]
+	for _, value := range rawStringSlice(object, "layers") {
+		layer := retrieval.Layer(value)
+		if !layer.Known() {
+			h.writeBadRequest(w)
+			return
+		}
+		layers = append(layers, layer)
+	}
+	recallRequest := retrieval.RecallRequest{
+		Query:            rawString(object, "query"),
+		ScopeKey:         rawString(object, "scope_key"),
+		Layers:           layers,
+		LayersSpecified:  layersSpecified,
+		Mode:             mode,
+		Match:            retrieval.Match(rawString(object, "match")),
+		TopK:             topK,
+		Explain:          rawBool(object, "explain"),
+		MaxContextTokens: maxContextTokens,
 	}
 	if filters, ok := rawObject(object, "filters"); ok {
-		searchRequest.Filters = retrieval.Filters{
+		asOf, valid := rawTimeStrict(filters, "as_of")
+		if !valid {
+			h.writeBadRequest(w)
+			return
+		}
+		recallRequest.Filters = retrieval.Filters{
 			Kinds:         searchKinds(rawStringSlice(filters, "kinds")),
 			States:        searchStates(rawStringSlice(filters, "states")),
+			AsOf:          asOf,
 			CreatedByApp:  rawString(filters, "created_by_app"),
 			UpdatedAfter:  rawTime(filters, "updated_after"),
 			UpdatedBefore: rawTime(filters, "updated_before"),
 		}
 	}
 
-	result, err := service.Search(request.Context(), searchRequest)
+	result, err := service.Recall(request.Context(), recallRequest)
 	if err != nil {
 		h.writeServiceError(w, request, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, searchResultFromDomain(result))
+	writeJSON(w, http.StatusOK, recallFromDomain(result))
 }
 
 func searchKinds(values []string) []memory.Kind {

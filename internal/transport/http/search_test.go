@@ -7,36 +7,43 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/N0rthHXD/dmemd/internal/artifact"
 	"github.com/N0rthHXD/dmemd/internal/memory"
 	"github.com/N0rthHXD/dmemd/internal/retrieval"
 )
 
 func TestRecallModeTopKValidationAndRequestMapping(t *testing.T) {
-	var captured retrieval.Request
+	var captured retrieval.RecallRequest
 	calls := 0
-	services := Services{Search: stubSearch{search: func(_ context.Context, request retrieval.Request) (retrieval.Result, error) {
+	services := Services{Search: stubSearch{recall: func(_ context.Context, request retrieval.RecallRequest) (retrieval.RecallResult, error) {
 		calls++
 		captured = request
-		return retrieval.Result{Items: []retrieval.Item{}, Retrieval: retrieval.Retrieval{Mode: request.Mode}}, nil
+		return retrieval.RecallResult{Memories: []retrieval.Item{}}, nil
 	}}}
 
 	response := serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/recall",
-		strings.NewReader(`{"query":"吃饭有什么忌口","mode":"hybrid","match":"any","top_k":10,"explain":true}`)))
+		strings.NewReader(`{"query":"吃饭有什么忌口","scope_key":"project:dmemd","layers":["atomic","summary"],"mode":"hybrid","match":"any","top_k":10,"explain":true}`)))
 	if response.Code != http.StatusOK {
 		t.Fatalf("hybrid request = %d %q", response.Code, response.Body.String())
 	}
 	if calls != 1 || captured.Mode != retrieval.ModeHybrid || captured.Match != retrieval.MatchAny ||
-		captured.TopK != 10 || !captured.Explain {
+		captured.TopK != 10 || !captured.Explain || captured.ScopeKey != "project:dmemd" {
 		t.Fatalf("captured request = %+v", captured)
 	}
-	if !strings.Contains(response.Body.String(), `"retrieval":{"mode":"hybrid"}`) {
+	if len(captured.Layers) != 2 || captured.Layers[0] != retrieval.LayerAtomic ||
+		captured.Layers[1] != retrieval.LayerSummary {
+		t.Fatalf("layers = %+v", captured.Layers)
+	}
+	if !strings.Contains(response.Body.String(), `"memories":[]`) {
 		t.Fatalf("response = %q", response.Body.String())
 	}
 
 	for _, body := range []string{
 		`{"query":"x","mode":"semantic"}`,
 		`{"query":"x","top_k":101}`,
+		`{"query":"x","layers":["episode"]}`,
 	} {
 		before := calls
 		response = serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/recall", strings.NewReader(body)))
@@ -53,13 +60,16 @@ func TestRecallModeTopKValidationAndRequestMapping(t *testing.T) {
 	if response.Code != http.StatusOK || captured.Mode != retrieval.ModeKeyword {
 		t.Fatalf("default mode = %d %+v", response.Code, captured)
 	}
+	if len(captured.Layers) != 0 {
+		t.Fatalf("omitted layers should reach the service empty: %+v", captured.Layers)
+	}
 }
 
 func TestRecallMatchRequestMapping(t *testing.T) {
-	var captured retrieval.Request
-	services := Services{Search: stubSearch{search: func(_ context.Context, request retrieval.Request) (retrieval.Result, error) {
+	var captured retrieval.RecallRequest
+	services := Services{Search: stubSearch{recall: func(_ context.Context, request retrieval.RecallRequest) (retrieval.RecallResult, error) {
 		captured = request
-		return retrieval.Result{Items: []retrieval.Item{}}, nil
+		return retrieval.RecallResult{Memories: []retrieval.Item{}}, nil
 	}}}
 
 	tests := []struct {
@@ -86,10 +96,11 @@ func TestRecallMatchRequestMapping(t *testing.T) {
 	}
 }
 
-func TestRecallResponseIncludesWarningsAndHybridExplanation(t *testing.T) {
-	services := Services{Search: stubSearch{search: func(context.Context, retrieval.Request) (retrieval.Result, error) {
-		return retrieval.Result{
-			Items: []retrieval.Item{{
+func TestRecallResponseIncludesPartitionsWarningsAndExplanation(t *testing.T) {
+	created := time.Date(2026, 10, 22, 8, 0, 0, 0, time.UTC)
+	services := Services{Search: stubSearch{recall: func(context.Context, retrieval.RecallRequest) (retrieval.RecallResult, error) {
+		return retrieval.RecallResult{
+			Memories: []retrieval.Item{{
 				Memory:       memory.Memory{ID: "memory-1", Kind: memory.KindFact, State: memory.StateActive, Version: 1},
 				Score:        1.0 / 61.0,
 				Snippet:      "摘要",
@@ -101,8 +112,18 @@ func TestRecallResponseIncludesWarningsAndHybridExplanation(t *testing.T) {
 					Semantic: &retrieval.SemanticExplanation{Rank: 2, Cosine: 0.9},
 				},
 			}},
-			Retrieval: retrieval.Retrieval{Mode: retrieval.ModeHybrid},
-			Warnings:  []string{retrieval.WarningSemanticTimeout},
+			Summaries: []artifact.SearchHit{{
+				Artifact: artifact.Artifact{
+					ID: "artifact-1", Kind: artifact.KindTopicSummary, ScopeKey: "project:dmemd",
+					Topic: "go", State: artifact.StateActive, CurrentVersion: 1, UpdatedAt: created,
+				},
+				Revision: artifact.Revision{
+					ArtifactID: "artifact-1", Version: 1, Title: "Go 摘要", Content: "使用 SQLite",
+					MemoryRefs: []artifact.MemoryRef{{MemoryID: "memory-1", Version: 1}}, CreatedAt: created,
+				},
+				Score: -1.2,
+			}},
+			Warnings: []string{retrieval.WarningSemanticTimeout},
 		}, nil
 	}}}
 	response := serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/recall",
@@ -111,7 +132,7 @@ func TestRecallResponseIncludesWarningsAndHybridExplanation(t *testing.T) {
 		t.Fatalf("response = %d %q", response.Code, response.Body.String())
 	}
 	var decoded struct {
-		Items []struct {
+		Memories []struct {
 			MatchedTerms []string `json:"matched_terms"`
 			Explanation  struct {
 				Ranking      string          `json:"ranking"`
@@ -125,36 +146,47 @@ func TestRecallResponseIncludesWarningsAndHybridExplanation(t *testing.T) {
 					Cosine float64 `json:"cosine"`
 				} `json:"semantic"`
 			} `json:"explanation"`
-		} `json:"items"`
-		Retrieval struct {
-			Mode string `json:"mode"`
-		} `json:"retrieval"`
-		Warnings []string `json:"warnings"`
+		} `json:"memories"`
+		Summaries []struct {
+			ID         string `json:"id"`
+			Kind       string `json:"kind"`
+			Version    int    `json:"version"`
+			MemoryRefs []struct {
+				MemoryID string `json:"memory_id"`
+				Version  int    `json:"version"`
+			} `json:"memory_refs"`
+		} `json:"summaries"`
+		Experiences []any    `json:"experiences"`
+		Skills      []any    `json:"skills"`
+		Conflicts   []any    `json:"conflicts"`
+		Warnings    []string `json:"warnings"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Retrieval.Mode != "hybrid" || len(decoded.Warnings) != 1 || decoded.Warnings[0] != retrieval.WarningSemanticTimeout {
-		t.Fatalf("retrieval/warnings = %+v", decoded)
+	if len(decoded.Warnings) != 1 || decoded.Warnings[0] != retrieval.WarningSemanticTimeout {
+		t.Fatalf("warnings = %+v", decoded.Warnings)
 	}
-	if len(decoded.Items) != 1 {
-		t.Fatalf("items = %+v", decoded.Items)
+	if len(decoded.Memories) != 1 || decoded.Memories[0].Explanation.Ranking != "rrf" {
+		t.Fatalf("memories = %+v", decoded.Memories)
 	}
-	explanation := decoded.Items[0].Explanation
-	if explanation.Ranking != "rrf" || len(explanation.FieldWeights) != 0 {
+	explanation := decoded.Memories[0].Explanation
+	if len(explanation.FieldWeights) != 0 || explanation.Keyword.Rank != 1 || explanation.Semantic.Rank != 2 {
 		t.Fatalf("explanation = %+v", explanation)
 	}
-	if explanation.Keyword.Rank != 1 || explanation.Semantic.Rank != 2 {
-		t.Fatalf("path ranks = %+v", explanation)
+	if len(decoded.Summaries) != 1 || decoded.Summaries[0].ID != "artifact-1" ||
+		decoded.Summaries[0].Kind != "topic_summary" ||
+		len(decoded.Summaries[0].MemoryRefs) != 1 || decoded.Summaries[0].MemoryRefs[0].MemoryID != "memory-1" {
+		t.Fatalf("summaries = %+v", decoded.Summaries)
 	}
-	if decoded.Items[0].MatchedTerms == nil || len(decoded.Items[0].MatchedTerms) != 0 {
-		t.Fatalf("matched_terms = %#v", decoded.Items[0].MatchedTerms)
+	if decoded.Experiences == nil || decoded.Skills == nil || decoded.Conflicts == nil {
+		t.Fatalf("empty partitions must be arrays: %+v", decoded)
 	}
 }
 
-func TestKeywordResponseKeepsFieldWeightsAndDefaultRetrievalMode(t *testing.T) {
-	services := Services{Search: stubSearch{search: func(context.Context, retrieval.Request) (retrieval.Result, error) {
-		return retrieval.Result{Items: []retrieval.Item{{
+func TestKeywordResponseKeepsFieldWeightsAndNoRetrievalEnvelope(t *testing.T) {
+	services := Services{Search: stubSearch{recall: func(context.Context, retrieval.RecallRequest) (retrieval.RecallResult, error) {
+		return retrieval.RecallResult{Memories: []retrieval.Item{{
 			Memory:       memory.Memory{ID: "m", State: memory.StateActive, Version: 1},
 			MatchedTerms: []string{"回答"},
 			EvidenceRefs: []retrieval.EvidenceRef{},
@@ -167,13 +199,13 @@ func TestKeywordResponseKeepsFieldWeightsAndDefaultRetrievalMode(t *testing.T) {
 	response := serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/recall",
 		strings.NewReader(`{"query":"回答","explain":true}`)))
 	body := response.Body.String()
-	if response.Code != http.StatusOK || !strings.Contains(body, `"retrieval":{"mode":"keyword"}`) {
+	if response.Code != http.StatusOK {
 		t.Fatalf("response = %d %q", response.Code, body)
 	}
 	if !strings.Contains(body, `"field_weights":[4,1]`) {
 		t.Fatalf("keyword explanation = %q", body)
 	}
-	if strings.Contains(body, `"warnings"`) {
-		t.Fatalf("empty warnings were emitted: %q", body)
+	if strings.Contains(body, `"retrieval"`) || strings.Contains(body, `"items"`) {
+		t.Fatalf("old recall envelope leaked into response: %q", body)
 	}
 }

@@ -17,9 +17,9 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/testutil"
 )
 
-var p4BaseTime = time.Date(2026, 10, 20, 2, 0, 0, 0, time.UTC)
+var searchBaseTime = time.Date(2026, 10, 20, 2, 0, 0, 0, time.UTC)
 
-type p4Fixture struct {
+type searchFixture struct {
 	store    *sqlite.Store
 	clock    time.Time
 	memories *memory.Service
@@ -28,17 +28,17 @@ type p4Fixture struct {
 	logs     bytes.Buffer
 }
 
-func newP4Fixture(t *testing.T) *p4Fixture {
+func newSearchFixture(t *testing.T) *searchFixture {
 	t.Helper()
 	store := testutil.NewStore(t)
-	fixture := &p4Fixture{
+	fixture := &searchFixture{
 		store: store,
-		clock: p4BaseTime,
+		clock: searchBaseTime,
 		source: source.Source{
-			ID:        "source-p4",
+			ID:        "source-search",
 			AppID:     "desktop-assistant",
 			Content:   []byte(`{"messages":[{"id":"m1","content":"用户希望默认使用中文回答。"}]}`),
-			CreatedAt: p4BaseTime,
+			CreatedAt: searchBaseTime,
 		},
 	}
 	if err := store.WithTx(context.Background(), func(ctx context.Context, tx *sqlite.Tx) error {
@@ -54,9 +54,9 @@ func newP4Fixture(t *testing.T) *p4Fixture {
 	return fixture
 }
 
-func (f *p4Fixture) advance(delta time.Duration) { f.clock = f.clock.Add(delta) }
+func (f *searchFixture) advance(delta time.Duration) { f.clock = f.clock.Add(delta) }
 
-func (f *p4Fixture) create(t *testing.T, input memory.CreateInput) memory.Memory {
+func (f *searchFixture) create(t *testing.T, input memory.CreateInput) memory.Memory {
 	t.Helper()
 	if input.ObservedAt.IsZero() {
 		input.ObservedAt = f.clock
@@ -75,7 +75,7 @@ func (f *p4Fixture) create(t *testing.T, input memory.CreateInput) memory.Memory
 	return created
 }
 
-func (f *p4Fixture) revise(t *testing.T, input memory.ReviseInput) memory.Memory {
+func (f *searchFixture) revise(t *testing.T, input memory.ReviseInput) memory.Memory {
 	t.Helper()
 	var revised memory.Memory
 	if err := f.store.WithTx(context.Background(), func(ctx context.Context, tx *sqlite.Tx) error {
@@ -88,11 +88,11 @@ func (f *p4Fixture) revise(t *testing.T, input memory.ReviseInput) memory.Memory
 	return revised
 }
 
-func (f *p4Fixture) evidence(quote string) source.Evidence {
+func (f *searchFixture) evidence(quote string) source.Evidence {
 	return source.NewEvidence(f.source, "", quote, "test-model", f.clock)
 }
 
-func (f *p4Fixture) run(t *testing.T, request retrieval.Request) retrieval.Result {
+func (f *searchFixture) run(t *testing.T, request retrieval.Request) retrieval.Result {
 	t.Helper()
 	result, err := f.search.Search(context.Background(), request)
 	if err != nil {
@@ -101,8 +101,8 @@ func (f *p4Fixture) run(t *testing.T, request retrieval.Request) retrieval.Resul
 	return result
 }
 
-func TestP4ChineseKeywordSearchContract(t *testing.T) {
-	f := newP4Fixture(t)
+func TestChineseKeywordSearchContract(t *testing.T) {
+	f := newSearchFixture(t)
 	answerEvidence := f.evidence("用户希望默认使用中文回答。")
 	answer := f.create(t, memory.CreateInput{
 		Kind: memory.KindPreference, Title: "回答语言", Content: "用户希望默认使用中文回答。",
@@ -139,49 +139,49 @@ func TestP4ChineseKeywordSearchContract(t *testing.T) {
 		Kind: memory.KindFact, Title: "长摘要", Content: longContent, CreatedByApp: "desktop",
 	})
 
-	if result := f.run(t, retrieval.Request{Query: "回答"}); !p4SameMembers(p4IDs(result), answer.ID, format.ID, longSnippet.ID) {
-		t.Fatalf("two-character Chinese query = %+v", p4IDs(result))
+	if result := f.run(t, retrieval.Request{Query: "回答"}); !sameMembers(searchIDs(result), answer.ID, format.ID, longSnippet.ID) {
+		t.Fatalf("two-character Chinese query = %+v", searchIDs(result))
 	}
-	if result := f.run(t, retrieval.Request{Query: "终端"}); !slices.Equal(p4IDs(result), p4Set(procedure.ID)) {
-		t.Fatalf("two-character content query = %+v", p4IDs(result))
+	if result := f.run(t, retrieval.Request{Query: "终端"}); !slices.Equal(searchIDs(result), searchSet(procedure.ID)) {
+		t.Fatalf("two-character content query = %+v", searchIDs(result))
 	}
-	if result := f.run(t, retrieval.Request{Query: "运行服务", Match: retrieval.MatchAll}); !slices.Equal(p4IDs(result), p4Set(procedure.ID)) {
-		t.Fatalf("multi-term Chinese query = %+v", p4IDs(result))
+	if result := f.run(t, retrieval.Request{Query: "运行服务", Match: retrieval.MatchAll}); !slices.Equal(searchIDs(result), searchSet(procedure.ID)) {
+		t.Fatalf("multi-term Chinese query = %+v", searchIDs(result))
 	}
-	if result := f.run(t, retrieval.Request{Query: "部署步骤", Match: retrieval.MatchAll}); !slices.Equal(p4IDs(result), p4Set(procedure.ID)) {
-		t.Fatalf("long Chinese title query = %+v", p4IDs(result))
+	if result := f.run(t, retrieval.Request{Query: "部署步骤", Match: retrieval.MatchAll}); !slices.Equal(searchIDs(result), searchSet(procedure.ID)) {
+		t.Fatalf("long Chinese title query = %+v", searchIDs(result))
 	}
-	if result := f.run(t, retrieval.Request{Query: "记忆检索", Match: retrieval.MatchAll}); !slices.Equal(p4IDs(result), p4Set(memoryResult.ID)) {
-		t.Fatalf("phrase query = %+v", p4IDs(result))
+	if result := f.run(t, retrieval.Request{Query: "记忆检索", Match: retrieval.MatchAll}); !slices.Equal(searchIDs(result), searchSet(memoryResult.ID)) {
+		t.Fatalf("phrase query = %+v", searchIDs(result))
 	}
-	if result := f.run(t, retrieval.Request{Query: "记忆"}); !p4SameMembers(p4IDs(result), memoryResult.ID, aiMemory.ID) {
-		t.Fatalf("two-character query = %+v", p4IDs(result))
+	if result := f.run(t, retrieval.Request{Query: "记忆"}); !sameMembers(searchIDs(result), memoryResult.ID, aiMemory.ID) {
+		t.Fatalf("two-character query = %+v", searchIDs(result))
 	}
-	if result := f.run(t, retrieval.Request{Query: "AI记忆", Match: retrieval.MatchAll}); !slices.Equal(p4IDs(result), p4Set(aiMemory.ID)) {
-		t.Fatalf("mixed query = %+v", p4IDs(result))
+	if result := f.run(t, retrieval.Request{Query: "AI记忆", Match: retrieval.MatchAll}); !slices.Equal(searchIDs(result), searchSet(aiMemory.ID)) {
+		t.Fatalf("mixed query = %+v", searchIDs(result))
 	}
-	if result := f.run(t, retrieval.Request{Query: "MEMORY"}); !slices.Equal(p4IDs(result), p4Set(meeting.ID)) {
-		t.Fatalf("case-insensitive English query = %+v", p4IDs(result))
+	if result := f.run(t, retrieval.Request{Query: "MEMORY"}); !slices.Equal(searchIDs(result), searchSet(meeting.ID)) {
+		t.Fatalf("case-insensitive English query = %+v", searchIDs(result))
 	}
-	if result := f.run(t, retrieval.Request{Query: "终端，运行", Match: retrieval.MatchAll}); !slices.Equal(p4IDs(result), p4Set(procedure.ID)) {
-		t.Fatalf("punctuation boundary query = %+v", p4IDs(result))
+	if result := f.run(t, retrieval.Request{Query: "终端，运行", Match: retrieval.MatchAll}); !slices.Equal(searchIDs(result), searchSet(procedure.ID)) {
+		t.Fatalf("punctuation boundary query = %+v", searchIDs(result))
 	}
 
 	all := f.run(t, retrieval.Request{Query: "回答 语言", Match: retrieval.MatchAll})
-	if !slices.Equal(p4IDs(all), p4Set(answer.ID)) {
-		t.Fatalf("match=all result = %+v", p4IDs(all))
+	if !slices.Equal(searchIDs(all), searchSet(answer.ID)) {
+		t.Fatalf("match=all result = %+v", searchIDs(all))
 	}
 	anyResult := f.run(t, retrieval.Request{Query: "回答 语言", Match: retrieval.MatchAny})
-	if !p4SameMembers(p4IDs(anyResult), answer.ID, format.ID, longSnippet.ID) {
-		t.Fatalf("match=any result = %+v", p4IDs(anyResult))
+	if !sameMembers(searchIDs(anyResult), answer.ID, format.ID, longSnippet.ID) {
+		t.Fatalf("match=any result = %+v", searchIDs(anyResult))
 	}
 	defaultAny := f.run(t, retrieval.Request{Query: "回答 语言"})
-	if !p4SameMembers(p4IDs(defaultAny), answer.ID, format.ID, longSnippet.ID) {
-		t.Fatalf("default match result = %+v", p4IDs(defaultAny))
+	if !sameMembers(searchIDs(defaultAny), answer.ID, format.ID, longSnippet.ID) {
+		t.Fatalf("default match result = %+v", searchIDs(defaultAny))
 	}
 	unknownAny := f.run(t, retrieval.Request{Query: "回答 语言", Match: "unknown"})
-	if !p4SameMembers(p4IDs(unknownAny), answer.ID, format.ID, longSnippet.ID) {
-		t.Fatalf("unknown match result = %+v", p4IDs(unknownAny))
+	if !sameMembers(searchIDs(unknownAny), answer.ID, format.ID, longSnippet.ID) {
+		t.Fatalf("unknown match result = %+v", searchIDs(unknownAny))
 	}
 	for _, item := range anyResult.Items {
 		switch item.Memory.ID {
@@ -201,7 +201,7 @@ func TestP4ChineseKeywordSearchContract(t *testing.T) {
 	if len(answerEvidence.ID) == 0 {
 		t.Fatal("test evidence missing")
 	}
-	answerItem := p4Item(t, all, answer.ID)
+	answerItem := searchItem(t, all, answer.ID)
 	if len(answerItem.EvidenceRefs) != 1 || answerItem.EvidenceRefs[0].ID != answerEvidence.ID ||
 		answerItem.EvidenceRefs[0].SourceID != f.source.ID {
 		t.Fatalf("evidence_refs = %+v", answerItem.EvidenceRefs)
@@ -210,32 +210,32 @@ func TestP4ChineseKeywordSearchContract(t *testing.T) {
 		t.Fatalf("score = %v, want -bm25 > 0", answerItem.Score)
 	}
 	explained := f.run(t, retrieval.Request{Query: "回答", Explain: true})
-	if item := p4Item(t, explained, answer.ID); item.Explanation == nil ||
+	if item := searchItem(t, explained, answer.ID); item.Explanation == nil ||
 		item.Explanation.Ranking != "bm25" || item.Explanation.FieldWeights != [2]int{4, 1} {
 		t.Fatalf("explanation = %+v", item.Explanation)
 	}
 
 	if result := f.run(t, retrieval.Request{Query: "回答", Filters: retrieval.Filters{
 		Kinds: []memory.Kind{memory.KindPreference},
-	}}); !slices.Equal(p4IDs(result), p4Set(answer.ID)) {
-		t.Fatalf("kind filter = %+v", p4IDs(result))
+	}}); !slices.Equal(searchIDs(result), searchSet(answer.ID)) {
+		t.Fatalf("kind filter = %+v", searchIDs(result))
 	}
 	if result := f.run(t, retrieval.Request{Query: "记忆", Filters: retrieval.Filters{
 		CreatedByApp: "notes",
-	}}); !slices.Equal(p4IDs(result), p4Set(memoryResult.ID)) {
-		t.Fatalf("app filter = %+v", p4IDs(result))
+	}}); !slices.Equal(searchIDs(result), searchSet(memoryResult.ID)) {
+		t.Fatalf("app filter = %+v", searchIDs(result))
 	}
-	after := p4BaseTime.Add(3*time.Minute + 30*time.Second)
+	after := searchBaseTime.Add(3*time.Minute + 30*time.Second)
 	if result := f.run(t, retrieval.Request{Query: "回答", Filters: retrieval.Filters{
 		UpdatedAfter: &after,
-	}}); !p4SameMembers(p4IDs(result), format.ID, longSnippet.ID) {
-		t.Fatalf("updated_after filter = %+v", p4IDs(result))
+	}}); !sameMembers(searchIDs(result), format.ID, longSnippet.ID) {
+		t.Fatalf("updated_after filter = %+v", searchIDs(result))
 	}
-	before := p4BaseTime.Add(30 * time.Second)
+	before := searchBaseTime.Add(30 * time.Second)
 	if result := f.run(t, retrieval.Request{Query: "回答", Filters: retrieval.Filters{
 		UpdatedBefore: &before,
-	}}); !slices.Equal(p4IDs(result), p4Set(answer.ID)) {
-		t.Fatalf("updated_before filter = %+v", p4IDs(result))
+	}}); !slices.Equal(searchIDs(result), searchSet(answer.ID)) {
+		t.Fatalf("updated_before filter = %+v", searchIDs(result))
 	}
 	if result := f.run(t, retrieval.Request{Query: "记忆", TopK: 1}); len(result.Items) != 1 {
 		t.Fatalf("top_k = %d", len(result.Items))
@@ -243,24 +243,24 @@ func TestP4ChineseKeywordSearchContract(t *testing.T) {
 	if result := f.run(t, retrieval.Request{Query: "回答", Filters: retrieval.Filters{
 		Kinds: []memory.Kind{"unknown"},
 	}}); len(result.Items) != 0 {
-		t.Fatalf("all-unknown kinds returned %+v", p4IDs(result))
+		t.Fatalf("all-unknown kinds returned %+v", searchIDs(result))
 	}
 	if result := f.run(t, retrieval.Request{Query: "回答", Filters: retrieval.Filters{
 		States: []memory.State{"unknown"},
 	}}); len(result.Items) != 0 {
-		t.Fatalf("all-unknown states returned %+v", p4IDs(result))
+		t.Fatalf("all-unknown states returned %+v", searchIDs(result))
 	}
 	if result := f.run(t, retrieval.Request{Query: "回答", Filters: retrieval.Filters{
 		States: []memory.State{memory.StateActive, memory.StateDeleted},
-	}}); !p4SameMembers(p4IDs(result), answer.ID, format.ID, longSnippet.ID) {
-		t.Fatalf("deleted state was not removed from active search: %+v", p4IDs(result))
+	}}); !sameMembers(searchIDs(result), answer.ID, format.ID, longSnippet.ID) {
+		t.Fatalf("deleted state was not removed from active search: %+v", searchIDs(result))
 	}
 
 	longResult := f.run(t, retrieval.Request{Query: "关键回答", Match: retrieval.MatchAll})
-	if !slices.Equal(p4IDs(longResult), p4Set(longSnippet.ID)) {
-		t.Fatalf("long snippet result = %+v", p4IDs(longResult))
+	if !slices.Equal(searchIDs(longResult), searchSet(longSnippet.ID)) {
+		t.Fatalf("long snippet result = %+v", searchIDs(longResult))
 	}
-	item := p4Item(t, longResult, longSnippet.ID)
+	item := searchItem(t, longResult, longSnippet.ID)
 	if !strings.Contains(item.Snippet, "关键回答") || strings.Contains(item.Snippet, "关 键") {
 		t.Fatalf("snippet = %q", item.Snippet)
 	}
@@ -270,13 +270,13 @@ func TestP4ChineseKeywordSearchContract(t *testing.T) {
 
 	for _, query := range []string{"", " ，。！？ ", "*", `记忆" OR * (NEAR)`} {
 		if result := f.run(t, retrieval.Request{Query: query, Match: retrieval.MatchAll}); len(result.Items) != 0 {
-			t.Fatalf("query %q returned %+v", query, p4IDs(result))
+			t.Fatalf("query %q returned %+v", query, searchIDs(result))
 		}
 	}
 }
 
-func TestP4ChineseDictionaryTermsMatchIndependently(t *testing.T) {
-	f := newP4Fixture(t)
+func TestChineseDictionaryTermsMatchIndependently(t *testing.T) {
+	f := newSearchFixture(t)
 	reordered := f.create(t, memory.CreateInput{
 		Kind: memory.KindEvent, Title: "工作变动",
 		Content: "Jon工作的时候失去银行职员身份，是什么？",
@@ -288,18 +288,18 @@ func TestP4ChineseDictionaryTermsMatchIndependently(t *testing.T) {
 
 	query := "Jon是什么时候失去银行职员工作的？"
 	result := f.run(t, retrieval.Request{Query: query, Match: retrieval.MatchAll})
-	if !slices.Equal(p4IDs(result), p4Set(reordered.ID)) {
-		t.Fatalf("long Chinese query = %+v", p4IDs(result))
+	if !slices.Equal(searchIDs(result), searchSet(reordered.ID)) {
+		t.Fatalf("long Chinese query = %+v", searchIDs(result))
 	}
-	item := p4Item(t, result, reordered.ID)
+	item := searchItem(t, result, reordered.ID)
 	wantTerms := []string{"jon", "是", "什么", "时候", "失去", "银行职员", "工作", "的"}
 	if !slices.Equal(item.MatchedTerms, wantTerms) {
 		t.Fatalf("matched_terms = %#v, want %#v", item.MatchedTerms, wantTerms)
 	}
 }
 
-func TestP4KeywordTermSelectionAndCoverageRerank(t *testing.T) {
-	f := newP4Fixture(t)
+func TestKeywordTermSelectionAndCoverageRerank(t *testing.T) {
+	f := newSearchFixture(t)
 	exact := f.create(t, memory.CreateInput{
 		Kind: memory.KindEvent, Title: "记录", Content: "Jon失去银行职员工作。",
 	})
@@ -317,8 +317,8 @@ func TestP4KeywordTermSelectionAndCoverageRerank(t *testing.T) {
 	})
 
 	result := f.run(t, retrieval.Request{Query: "Jon是什么时候失去银行职员工作的？"})
-	if !slices.Equal(p4IDs(result), []string{exact.ID, partial.ID, borderline.ID, weak.ID}) {
-		t.Fatalf("reranked result = %+v, want exact, partial, borderline, weak", p4IDs(result))
+	if !slices.Equal(searchIDs(result), []string{exact.ID, partial.ID, borderline.ID, weak.ID}) {
+		t.Fatalf("reranked result = %+v, want exact, partial, borderline, weak", searchIDs(result))
 	}
 	for i := 1; i < len(result.Items); i++ {
 		if result.Items[i-1].Score < result.Items[i].Score {
@@ -332,24 +332,24 @@ func TestP4KeywordTermSelectionAndCoverageRerank(t *testing.T) {
 			}
 		}
 	}
-	if got := p4Item(t, result, exact.ID).MatchedTerms; !slices.Equal(got, []string{"jon", "失去", "银行职员", "工作"}) {
+	if got := searchItem(t, result, exact.ID).MatchedTerms; !slices.Equal(got, []string{"jon", "失去", "银行职员", "工作"}) {
 		t.Fatalf("exact matched_terms = %#v", got)
 	}
-	if got := p4Item(t, result, partial.ID).MatchedTerms; !slices.Equal(got, []string{"jon", "失去", "工作"}) {
+	if got := searchItem(t, result, partial.ID).MatchedTerms; !slices.Equal(got, []string{"jon", "失去", "工作"}) {
 		t.Fatalf("partial matched_terms = %#v", got)
 	}
-	if got := p4Item(t, result, weak.ID).MatchedTerms; !slices.Equal(got, []string{"工作"}) {
+	if got := searchItem(t, result, weak.ID).MatchedTerms; !slices.Equal(got, []string{"工作"}) {
 		t.Fatalf("low-coverage matched_terms = %#v", got)
 	}
 
 	strict := f.run(t, retrieval.Request{Query: "jon 失去 银行职员 工作", Match: retrieval.MatchAll})
-	if !slices.Equal(p4IDs(strict), p4Set(exact.ID)) {
-		t.Fatalf("explicit all result = %+v", p4IDs(strict))
+	if !slices.Equal(searchIDs(strict), searchSet(exact.ID)) {
+		t.Fatalf("explicit all result = %+v", searchIDs(strict))
 	}
 }
 
-func TestP4NormalizationEquivalentInputs(t *testing.T) {
-	f := newP4Fixture(t)
+func TestNormalizationEquivalentInputs(t *testing.T) {
+	f := newSearchFixture(t)
 	created := f.create(t, memory.CreateInput{
 		Kind: memory.KindPreference, Title: "Café 2026",
 		Content:      "记住 Cafe\u0301 偏好与 AI 记忆。",
@@ -357,8 +357,8 @@ func TestP4NormalizationEquivalentInputs(t *testing.T) {
 	})
 	for _, query := range []string{"café", "Cafe\u0301", "CAFÉ", "cafe", "2026", "AI记忆"} {
 		result := f.run(t, retrieval.Request{Query: query})
-		if !slices.Equal(p4IDs(result), p4Set(created.ID)) {
-			t.Fatalf("query %q result = %+v", query, p4IDs(result))
+		if !slices.Equal(searchIDs(result), searchSet(created.ID)) {
+			t.Fatalf("query %q result = %+v", query, searchIDs(result))
 		}
 		if len(result.Items[0].MatchedTerms) == 0 {
 			t.Fatalf("query %q returned no matched_terms", query)
@@ -366,16 +366,16 @@ func TestP4NormalizationEquivalentInputs(t *testing.T) {
 	}
 }
 
-func TestP4SearchLifecycleCorrectionAndRollback(t *testing.T) {
-	f := newP4Fixture(t)
+func TestSearchLifecycleCorrectionAndRollback(t *testing.T) {
+	f := newSearchFixture(t)
 	ctx := context.Background()
 	oldEvidence := f.evidence("旧的记忆内容")
 	created := f.create(t, memory.CreateInput{
 		Kind: memory.KindFact, Title: "旧标题", Content: "旧的记忆内容",
 		CreatedByApp: "desktop", Evidence: []source.Evidence{oldEvidence},
 	})
-	if result := f.run(t, retrieval.Request{Query: "旧"}); !slices.Equal(p4IDs(result), p4Set(created.ID)) {
-		t.Fatalf("initial search = %+v", p4IDs(result))
+	if result := f.run(t, retrieval.Request{Query: "旧"}); !slices.Equal(searchIDs(result), searchSet(created.ID)) {
+		t.Fatalf("initial search = %+v", searchIDs(result))
 	}
 
 	f.advance(time.Minute)
@@ -384,10 +384,10 @@ func TestP4SearchLifecycleCorrectionAndRollback(t *testing.T) {
 		ObservedAt: f.clock, Operation: memory.OperationUpdate, Reason: "correction",
 	})
 	if result := f.run(t, retrieval.Request{Query: "旧"}); len(result.Items) != 0 {
-		t.Fatalf("corrected old text still matched: %+v", p4IDs(result))
+		t.Fatalf("corrected old text still matched: %+v", searchIDs(result))
 	}
-	if result := f.run(t, retrieval.Request{Query: "新"}); !slices.Equal(p4IDs(result), p4Set(created.ID)) {
-		t.Fatalf("corrected text search = %+v", p4IDs(result))
+	if result := f.run(t, retrieval.Request{Query: "新"}); !slices.Equal(searchIDs(result), searchSet(created.ID)) {
+		t.Fatalf("corrected text search = %+v", searchIDs(result))
 	}
 
 	f.advance(time.Minute)
@@ -397,7 +397,7 @@ func TestP4SearchLifecycleCorrectionAndRollback(t *testing.T) {
 		Operation: memory.OperationAddEvidence,
 	})
 	result := f.run(t, retrieval.Request{Query: "新"})
-	item := p4Item(t, result, created.ID)
+	item := searchItem(t, result, created.ID)
 	if len(item.EvidenceRefs) != 1 || item.EvidenceRefs[0].ID != addedEvidence.ID {
 		t.Fatalf("evidence refs after add_evidence = %+v", item.EvidenceRefs)
 	}
@@ -408,17 +408,17 @@ func TestP4SearchLifecycleCorrectionAndRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result := f.run(t, retrieval.Request{Query: "新"}); len(result.Items) != 0 {
-		t.Fatalf("archived memory returned by default: %+v", p4IDs(result))
+		t.Fatalf("archived memory returned by default: %+v", searchIDs(result))
 	}
 	if result := f.run(t, retrieval.Request{Query: "新", Filters: retrieval.Filters{
 		States: []memory.State{memory.StateArchived},
-	}}); !slices.Equal(p4IDs(result), p4Set(created.ID)) {
-		t.Fatalf("explicit archived search = %+v", p4IDs(result))
+	}}); !slices.Equal(searchIDs(result), searchSet(created.ID)) {
+		t.Fatalf("explicit archived search = %+v", searchIDs(result))
 	}
 	if result := f.run(t, retrieval.Request{Query: "新", Filters: retrieval.Filters{
 		States: []memory.State{memory.StateActive, memory.StateArchived},
-	}}); !slices.Equal(p4IDs(result), p4Set(created.ID)) {
-		t.Fatalf("active+archived search = %+v", p4IDs(result))
+	}}); !slices.Equal(searchIDs(result), searchSet(created.ID)) {
+		t.Fatalf("active+archived search = %+v", searchIDs(result))
 	}
 
 	f.advance(time.Minute)
@@ -437,7 +437,7 @@ func TestP4SearchLifecycleCorrectionAndRollback(t *testing.T) {
 		{memory.StateActive, memory.StateDeleted},
 	} {
 		if result := f.run(t, retrieval.Request{Query: "新", Filters: retrieval.Filters{States: states}}); len(result.Items) != 0 {
-			t.Fatalf("deleted memory returned for states %v: %+v", states, p4IDs(result))
+			t.Fatalf("deleted memory returned for states %v: %+v", states, searchIDs(result))
 		}
 	}
 
@@ -449,11 +449,11 @@ func TestP4SearchLifecycleCorrectionAndRollback(t *testing.T) {
 	if restored.Version != archived.Version+2 {
 		t.Fatalf("restored version = %d", restored.Version)
 	}
-	if result := f.run(t, retrieval.Request{Query: "旧"}); !slices.Equal(p4IDs(result), p4Set(created.ID)) {
-		t.Fatalf("restored memory not searchable: %+v", p4IDs(result))
+	if result := f.run(t, retrieval.Request{Query: "旧"}); !slices.Equal(searchIDs(result), searchSet(created.ID)) {
+		t.Fatalf("restored memory not searchable: %+v", searchIDs(result))
 	}
 	if result := f.run(t, retrieval.Request{Query: "新"}); len(result.Items) != 0 {
-		t.Fatalf("current text should be the restored old content: %+v", p4IDs(result))
+		t.Fatalf("current text should be the restored old content: %+v", searchIDs(result))
 	}
 
 	if err := f.memories.Purge(ctx, created.ID); err != nil {
@@ -461,7 +461,7 @@ func TestP4SearchLifecycleCorrectionAndRollback(t *testing.T) {
 	}
 	for _, states := range [][]memory.State{{memory.StateActive}, {memory.StateArchived}} {
 		if result := f.run(t, retrieval.Request{Query: "旧", Filters: retrieval.Filters{States: states}}); len(result.Items) != 0 {
-			t.Fatalf("purged memory searchable: %+v", p4IDs(result))
+			t.Fatalf("purged memory searchable: %+v", searchIDs(result))
 		}
 	}
 	if _, err := f.memories.Get(ctx, created.ID); !errors.Is(err, memory.ErrNotFound) {
@@ -481,12 +481,12 @@ func TestP4SearchLifecycleCorrectionAndRollback(t *testing.T) {
 		t.Fatalf("rollback error = %v", err)
 	}
 	if result := f.run(t, retrieval.Request{Query: "幽灵"}); len(result.Items) != 0 {
-		t.Fatalf("rolled-back memory left a search hit: %+v", p4IDs(result))
+		t.Fatalf("rolled-back memory left a search hit: %+v", searchIDs(result))
 	}
 }
 
-func TestP4IndexRebuildMatchesSearchResults(t *testing.T) {
-	f := newP4Fixture(t)
+func TestIndexRebuildMatchesSearchResults(t *testing.T) {
+	f := newSearchFixture(t)
 	ctx := context.Background()
 	active := f.create(t, memory.CreateInput{
 		Kind: memory.KindPreference, Title: "重建回答", Content: "重建后的回答仍可搜索。",
@@ -513,7 +513,7 @@ func TestP4IndexRebuildMatchesSearchResults(t *testing.T) {
 	}
 	before := make([][]string, len(requests))
 	for i, request := range requests {
-		before[i] = p4IDs(f.run(t, request))
+		before[i] = searchIDs(f.run(t, request))
 	}
 	if before[0] == nil || len(before[0]) != 1 || before[0][0] != active.ID {
 		t.Fatalf("before rebuild active = %+v", before[0])
@@ -530,7 +530,7 @@ func TestP4IndexRebuildMatchesSearchResults(t *testing.T) {
 		t.Fatalf("indexed = %d, want active+archived", result.Indexed)
 	}
 	for i, request := range requests {
-		after := p4IDs(f.run(t, request))
+		after := searchIDs(f.run(t, request))
 		if strings.Join(after, ",") != strings.Join(before[i], ",") {
 			t.Fatalf("request %d changed after rebuild: before=%v after=%v", i, before[i], after)
 		}
@@ -558,8 +558,8 @@ func TestP4IndexRebuildMatchesSearchResults(t *testing.T) {
 	}
 }
 
-func TestP4RelatedActiveContext(t *testing.T) {
-	f := newP4Fixture(t)
+func TestRelatedContext(t *testing.T) {
+	f := newSearchFixture(t)
 	ctx := context.Background()
 	answer := f.create(t, memory.CreateInput{
 		Kind: memory.KindPreference, Title: "回答语言", Content: "用户希望默认使用中文回答。",
@@ -589,42 +589,48 @@ func TestP4RelatedActiveContext(t *testing.T) {
 		Kind: memory.KindFact, Title: "疑问词", Content: "什么",
 	})
 
-	related, err := f.search.RelatedActive(ctx, "回答 记忆", 0)
+	first, err := f.search.RelatedContext(ctx, "回答 记忆", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !p4SameMembers(p4MemoryIDs(related), answer.ID, notes.ID) {
-		t.Fatalf("related active = %+v", p4MemoryIDs(related))
+	if !sameMembers(searchMemoryIDs(first.Memories), answer.ID, notes.ID, archived.ID) {
+		t.Fatalf("related context = %+v", searchMemoryIDs(first.Memories))
 	}
-	for _, item := range related {
-		if item.ID == archived.ID || item.ID == deleted.ID || item.ID == unrelated.ID {
+	if !first.Complete {
+		t.Fatalf("related context unexpectedly truncated: %+v", first)
+	}
+	for _, item := range first.Memories {
+		if item.ID == deleted.ID || item.ID == unrelated.ID {
 			t.Fatalf("ineligible memory entered context: %+v", item)
 		}
 	}
 
-	related, err = f.search.RelatedActive(ctx, "回答", 1)
+	limited, err := f.search.RelatedContext(ctx, "回答", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(related) != 1 || related[0].ID != answer.ID {
-		t.Fatalf("limited related = %+v", p4MemoryIDs(related))
+	if len(limited.Memories) != 1 || limited.Complete {
+		t.Fatalf("limited related = %+v complete=%v", searchMemoryIDs(limited.Memories), limited.Complete)
 	}
-	related, err = f.search.RelatedActive(ctx, "回答 什么", 0)
+	if limited.Memories[0].ID == deleted.ID || limited.Memories[0].ID == unrelated.ID {
+		t.Fatalf("ineligible memory entered limited context: %+v", limited.Memories)
+	}
+	related, err := f.search.RelatedContext(ctx, "回答 什么", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !p4SameMembers(p4MemoryIDs(related), answer.ID, stopwordOnly.ID) {
-		t.Fatalf("related active kept original terms = %+v", p4MemoryIDs(related))
+	if !sameMembers(searchMemoryIDs(related.Memories), answer.ID, archived.ID, stopwordOnly.ID) {
+		t.Fatalf("related context kept original terms = %+v", searchMemoryIDs(related.Memories))
 	}
-	if result := f.run(t, retrieval.Request{Query: "回答 什么"}); !slices.Equal(p4IDs(result), p4Set(answer.ID)) {
-		t.Fatalf("public any term selection = %+v", p4IDs(result))
+	if result := f.run(t, retrieval.Request{Query: "回答 什么"}); !slices.Equal(searchIDs(result), searchSet(answer.ID)) {
+		t.Fatalf("public any term selection = %+v", searchIDs(result))
 	}
-	related, err = f.search.RelatedActive(ctx, "火星殖民地", 0)
+	empty, err := f.search.RelatedContext(ctx, "火星殖民地", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if related == nil || len(related) != 0 {
-		t.Fatalf("missing related context = %#v", related)
+	if empty.Memories == nil || len(empty.Memories) != 0 {
+		t.Fatalf("missing related context = %#v", empty)
 	}
 }
 
@@ -638,7 +644,7 @@ func (f failingIndexBackend) RebuildSearchDocuments(context.Context, memory.Docu
 	return 0, errP4IndexFailure
 }
 
-func p4IDs(result retrieval.Result) []string {
+func searchIDs(result retrieval.Result) []string {
 	ids := make([]string, 0, len(result.Items))
 	for _, item := range result.Items {
 		ids = append(ids, item.Memory.ID)
@@ -646,7 +652,7 @@ func p4IDs(result retrieval.Result) []string {
 	return ids
 }
 
-func p4SameMembers(ids []string, want ...string) bool {
+func sameMembers(ids []string, want ...string) bool {
 	if len(ids) != len(want) {
 		return false
 	}
@@ -662,7 +668,7 @@ func p4SameMembers(ids []string, want ...string) bool {
 	return true
 }
 
-func p4Set(ids ...string) []string {
+func searchSet(ids ...string) []string {
 	seen := make(map[string]struct{}, len(ids))
 	result := make([]string, 0, len(ids))
 	for _, id := range ids {
@@ -675,18 +681,18 @@ func p4Set(ids ...string) []string {
 	return result
 }
 
-func p4Item(t *testing.T, result retrieval.Result, id string) retrieval.Item {
+func searchItem(t *testing.T, result retrieval.Result, id string) retrieval.Item {
 	t.Helper()
 	for _, item := range result.Items {
 		if item.Memory.ID == id {
 			return item
 		}
 	}
-	t.Fatalf("memory %s missing from result %+v", id, p4IDs(result))
+	t.Fatalf("memory %s missing from result %+v", id, searchIDs(result))
 	return retrieval.Item{}
 }
 
-func p4MemoryIDs(items []memory.Memory) []string {
+func searchMemoryIDs(items []memory.Memory) []string {
 	ids := make([]string, 0, len(items))
 	for _, item := range items {
 		ids = append(ids, item.ID)

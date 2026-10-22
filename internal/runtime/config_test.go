@@ -21,10 +21,18 @@ func TestDefaultConfigMeetsArchitectureDefaults(t *testing.T) {
 	if cfg.Worker.Workers != 1 || cfg.Worker.MaxAttempts != 3 {
 		t.Fatalf("worker defaults = %+v", cfg.Worker)
 	}
-	if len(cfg.Worker.RetryDelays) != 2 ||
-		cfg.Worker.RetryDelays[0].Std() != time.Second ||
-		cfg.Worker.RetryDelays[1].Std() != 5*time.Second {
+	if len(cfg.Worker.RetryDelays) != 3 ||
+		cfg.Worker.RetryDelays[0].Std() != 5*time.Second ||
+		cfg.Worker.RetryDelays[1].Std() != 30*time.Second ||
+		cfg.Worker.RetryDelays[2].Std() != 2*time.Minute {
 		t.Fatalf("retry delays = %v", cfg.Worker.RetryDelays)
+	}
+	if !cfg.Governance.IsEnabled() ||
+		cfg.Governance.Debounce.Std() != 30*time.Second ||
+		cfg.Governance.ReconcileInterval.Std() != 15*time.Minute ||
+		cfg.Governance.MinCallInterval.Std() != 2*time.Minute ||
+		cfg.Governance.MaxInputs != 64 {
+		t.Fatalf("governance defaults = %+v", cfg.Governance)
 	}
 	if cfg.Database.BusyTimeout.Std() != 5*time.Second || cfg.Database.MaxReadConnections != 4 {
 		t.Fatalf("database defaults = %+v", cfg.Database)
@@ -95,6 +103,29 @@ func TestLoadConfigPartialFileUsesDefaults(t *testing.T) {
 	if loaded.Config.Worker.MaxAttempts != 3 {
 		t.Fatalf("max attempts = %d", loaded.Config.Worker.MaxAttempts)
 	}
+	if !loaded.Config.Governance.IsEnabled() || loaded.Config.Governance.MaxInputs != 64 {
+		t.Fatalf("governance defaults = %+v", loaded.Config.Governance)
+	}
+}
+
+func TestLoadConfigGovernanceDisabledExplicitly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	writeConfigFile(t, path, `{
+		"listen": "127.0.0.1:0",
+		"data_dir": "`+filepath.Join(dir, "data")+`",
+		"governance": {"enabled": false}
+	}`)
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if loaded.Config.Governance.IsEnabled() {
+		t.Fatal("explicit governance.enabled=false was ignored")
+	}
+	if loaded.Config.Governance.MaxInputs != 64 {
+		t.Fatalf("max inputs = %d", loaded.Config.Governance.MaxInputs)
+	}
 }
 
 func TestLoadConfigRejectsPublicPermissionsAndMissingExplicitFile(t *testing.T) {
@@ -144,6 +175,7 @@ func TestConfigValidateRejectsArchitectureViolations(t *testing.T) {
 		"bad model URL":       func(cfg *Config) { cfg.Model.BaseURL = "not-a-url" },
 		"bad log level":       func(cfg *Config) { cfg.Log.Level = "verbose" },
 		"no data directory":   func(cfg *Config) { cfg.DataDir = ""; cfg.Database.Path = "x" },
+		"zero max inputs":     func(cfg *Config) { cfg.Governance.MaxInputs = 0 },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

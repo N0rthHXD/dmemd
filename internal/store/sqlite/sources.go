@@ -11,7 +11,7 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/source"
 )
 
-const sourceColumns = `id, app_id, external_id, content, redacted, redacted_at, created_at`
+const sourceColumns = `id, app_id, external_id, scope_key, content, redacted, redacted_at, created_at`
 
 // GetSource reads a source directly from the read pool.
 func (s *Store) GetSource(ctx context.Context, id string) (source.Source, error) {
@@ -42,7 +42,7 @@ func scanSource(row rowScanner) (source.Source, error) {
 	var redactedAt sql.NullString
 	var createdAt string
 	if err := row.Scan(
-		&item.ID, &item.AppID, &item.ExternalID, &content, &redacted, &redactedAt, &createdAt,
+		&item.ID, &item.AppID, &item.ExternalID, &item.ScopeKey, &content, &redacted, &redactedAt, &createdAt,
 	); err != nil {
 		return source.Source{}, err
 	}
@@ -65,8 +65,8 @@ func (t *Tx) InsertSource(ctx context.Context, item source.Source) error {
 	if !item.Redacted && item.Content != nil {
 		content = []byte(item.Content)
 	}
-	_, err := t.tx.ExecContext(ctx, `INSERT INTO sources(`+sourceColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		item.ID, item.AppID, item.ExternalID, content, boolInt(item.Redacted),
+	_, err := t.tx.ExecContext(ctx, `INSERT INTO sources(`+sourceColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		item.ID, item.AppID, item.ExternalID, item.ScopeKey, content, boolInt(item.Redacted),
 		timeValue(item.RedactedAt), formatTime(item.CreatedAt),
 	)
 	if err != nil {
@@ -233,14 +233,15 @@ func (t *Tx) ScrubJobErrorsBySource(ctx context.Context, sourceID, reason string
 	return scrubbed, nil
 }
 
-// CancelJobsBySource moves queued/running jobs for a source to cancelled while
-// preserving attempts. Terminal fields other than a scrubbed error are untouched.
+// CancelJobsBySource moves queued/running/waiting jobs for a source to cancelled
+// while preserving attempts. Terminal fields other than a scrubbed error are
+// untouched.
 func (t *Tx) CancelJobsBySource(ctx context.Context, sourceID, reason string, at time.Time) (int64, error) {
 	result, err := t.tx.ExecContext(ctx, `UPDATE ingest_jobs SET
 		status = ?, error = ?, next_attempt_at = NULL, updated_at = ?, finished_at = ?
-		WHERE source_id = ? AND status IN (?, ?)`,
+		WHERE source_id = ? AND status IN (?, ?, ?)`,
 		string(ingest.JobCancelled), reason, formatTime(at), formatTime(at),
-		sourceID, string(ingest.JobQueued), string(ingest.JobRunning),
+		sourceID, string(ingest.JobQueued), string(ingest.JobRunning), string(ingest.JobWaiting),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("取消来源 %s 的任务: %w", sourceID, err)

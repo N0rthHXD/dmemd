@@ -246,7 +246,7 @@ func TestCancelJobsBySourceOnlyCancelsPendingWork(t *testing.T) {
 	}
 }
 
-func TestRecoveryRequeuesRunningAndFailsExhaustedBudget(t *testing.T) {
+func TestRecoveryRequeuesRunningAndConfigurationWaits(t *testing.T) {
 	store := newTestStore(t)
 	sourceID := "source-recovery"
 	seedSource(t, store, sourceID)
@@ -254,32 +254,37 @@ func TestRecoveryRequeuesRunningAndFailsExhaustedBudget(t *testing.T) {
 	base := testTime(0)
 	insertTestJob(t, store, ingest.Job{ID: "running-three", SourceID: sourceID, Status: ingest.JobRunning, Attempts: 3, CreatedAt: base, UpdatedAt: base})
 	insertTestJob(t, store, ingest.Job{ID: "queued-three", SourceID: sourceID, Status: ingest.JobQueued, Attempts: 3, CreatedAt: base, UpdatedAt: base})
+	insertTestJob(t, store, ingest.Job{ID: "waiting-config", SourceID: sourceID, Status: ingest.JobWaiting,
+		Attempts: 1, WaitReason: ingest.WaitReasonConfiguration, CreatedAt: base, UpdatedAt: base})
 	insertTestJob(t, store, ingest.Job{ID: "queued-two", SourceID: sourceID, Status: ingest.JobQueued, Attempts: 2, CreatedAt: base, UpdatedAt: base})
 	insertTestJob(t, store, ingest.Job{ID: "succeeded-three", SourceID: sourceID, Status: ingest.JobSucceeded, Attempts: 3, CreatedAt: base, UpdatedAt: base})
 
-	var requeued, failed int64
+	var requeuedRunning, requeuedConfiguration int64
 	if err := store.WithTx(ctx, func(ctx context.Context, tx *Tx) error {
 		var err error
-		requeued, err = tx.RequeueRunningJobs(ctx, base)
+		requeuedRunning, err = tx.RequeueRunningJobs(ctx, base)
 		if err != nil {
 			return err
 		}
-		failed, err = tx.FailExhaustedJobs(ctx, 3, "retry attempts exhausted", base)
+		requeuedConfiguration, err = tx.RequeueWaitingConfigurationJobs(ctx, base)
 		return err
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if requeued != 1 || failed != 2 {
-		t.Fatalf("requeued=%d failed=%d", requeued, failed)
+	if requeuedRunning != 1 || requeuedConfiguration != 1 {
+		t.Fatalf("requeued running=%d configuration=%d", requeuedRunning, requeuedConfiguration)
 	}
-	for _, id := range []string{"running-three", "queued-three"} {
+	for _, id := range []string{"running-three", "waiting-config"} {
 		job, err := store.GetJob(ctx, id)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if job.Status != ingest.JobFailed || job.Attempts != 3 || job.Error == "" || job.FinishedAt == nil {
+		if job.Status != ingest.JobQueued || job.NextAttemptAt == nil {
 			t.Fatalf("%s = %+v", id, job)
 		}
+	}
+	if job, err := store.GetJob(ctx, "queued-three"); err != nil || job.Status != ingest.JobQueued {
+		t.Fatalf("queued-three = %+v err=%v", job, err)
 	}
 	if job, err := store.GetJob(ctx, "queued-two"); err != nil || job.Status != ingest.JobQueued || job.Attempts != 2 {
 		t.Fatalf("queued-two = %+v err=%v", job, err)

@@ -25,7 +25,8 @@ const (
 	// release.
 	DefaultWorkerCount = 1
 
-	// DefaultMaxAttempts is the total attempt budget, including the first try.
+	// DefaultMaxAttempts is the consecutive protocol-failure limit. Transient
+	// failures wait and resume instead of consuming this budget.
 	DefaultMaxAttempts = 3
 
 	// DefaultModelTimeout is the per-call remote model timeout.
@@ -36,9 +37,21 @@ const (
 
 	// DefaultMaxReadConnections is the initialized small read pool size.
 	DefaultMaxReadConnections = 4
+
+	// DefaultGovernanceDebounce converges a burst of writes before classifying.
+	DefaultGovernanceDebounce = 30 * time.Second
+	// DefaultReconcileInterval is the periodic missing-work scan cadence.
+	DefaultReconcileInterval = 15 * time.Minute
+	// DefaultGovernanceMinCallInterval spaces governance model calls.
+	DefaultGovernanceMinCallInterval = 2 * time.Minute
+	// DefaultGovernanceMaxInputs bounds one derived-generation input set.
+	DefaultGovernanceMaxInputs = 64
+	// defaultGovernanceMaxCallsPerHour is a soft in-process budget. It is a
+	// fixed operational bound rather than a per-installation setting.
+	defaultGovernanceMaxCallsPerHour = 30
 )
 
-var defaultRetryDelays = []time.Duration{time.Second, 5 * time.Second}
+var defaultRetryDelays = []time.Duration{5 * time.Second, 30 * time.Second, 2 * time.Minute}
 
 // Duration is a JSON string duration such as "60s".
 type Duration time.Duration
@@ -97,11 +110,29 @@ type EmbeddingConfig struct {
 	MinSimilarity float64  `json:"min_similarity"`
 }
 
-// WorkerConfig fixes the single-worker and three-attempt runtime policy.
+// WorkerConfig fixes the single-worker policy, protocol-failure limit and
+// transient retry schedule.
 type WorkerConfig struct {
 	Workers     int        `json:"workers"`
 	MaxAttempts int        `json:"max_attempts"`
 	RetryDelays []Duration `json:"retry_delays"`
+}
+
+// GovernanceConfig controls the single persistent governance worker. It keeps
+// only the fixed first-release knobs; call spacing and the soft hourly budget
+// remain internal operational bounds. Enabled defaults to true when omitted.
+type GovernanceConfig struct {
+	Enabled           *bool    `json:"enabled,omitempty"`
+	Debounce          Duration `json:"debounce"`
+	ReconcileInterval Duration `json:"reconcile_interval"`
+	MinCallInterval   Duration `json:"min_call_interval"`
+	MaxInputs         int      `json:"max_inputs"`
+}
+
+// IsEnabled reports whether background governance should run. A nil pointer is
+// the default-enabled state for a config file that omits the field.
+func (g GovernanceConfig) IsEnabled() bool {
+	return g.Enabled == nil || *g.Enabled
 }
 
 // LogConfig controls structured logging.
@@ -111,13 +142,14 @@ type LogConfig struct {
 
 // Config is the complete local configuration file shape.
 type Config struct {
-	Listen    string          `json:"listen"`
-	DataDir   string          `json:"data_dir"`
-	Database  DatabaseConfig  `json:"database"`
-	Model     ModelConfig     `json:"model"`
-	Embedding EmbeddingConfig `json:"embedding"`
-	Worker    WorkerConfig    `json:"worker"`
-	Log       LogConfig       `json:"log"`
+	Listen     string           `json:"listen"`
+	DataDir    string           `json:"data_dir"`
+	Database   DatabaseConfig   `json:"database"`
+	Model      ModelConfig      `json:"model"`
+	Embedding  EmbeddingConfig  `json:"embedding"`
+	Worker     WorkerConfig     `json:"worker"`
+	Governance GovernanceConfig `json:"governance"`
+	Log        LogConfig        `json:"log"`
 }
 
 // LoadedConfig records the effective config and the file it came from. Path is
@@ -171,6 +203,13 @@ func DefaultConfig() Config {
 			MaxAttempts: DefaultMaxAttempts,
 			RetryDelays: durations(defaultRetryDelays),
 		},
+		Governance: GovernanceConfig{
+			Enabled:           boolPointer(true),
+			Debounce:          Duration(DefaultGovernanceDebounce),
+			ReconcileInterval: Duration(DefaultReconcileInterval),
+			MinCallInterval:   Duration(DefaultGovernanceMinCallInterval),
+			MaxInputs:         DefaultGovernanceMaxInputs,
+		},
 		Log: LogConfig{Level: "info"},
 	}
 }
@@ -181,6 +220,10 @@ func durations(values []time.Duration) []Duration {
 		result[i] = Duration(value)
 	}
 	return result
+}
+
+func boolPointer(value bool) *bool {
+	return &value
 }
 
 func defaultDatabasePath(dataDir string) string {
@@ -277,6 +320,15 @@ func (cfg *Config) applyDefaults() {
 	if cfg.Worker.RetryDelays == nil {
 		cfg.Worker.RetryDelays = defaults.Worker.RetryDelays
 	}
+	// Governance values come from DefaultConfig(), so an explicit zero in a
+	// loaded file remains meaningful: debounce 0 means immediate classification
+	// and min_call_interval 0 disables call spacing in local tests.
+	if cfg.Governance.Enabled == nil {
+		cfg.Governance.Enabled = boolPointer(true)
+	}
+	if cfg.Governance.MaxInputs == 0 {
+		cfg.Governance.MaxInputs = defaults.Governance.MaxInputs
+	}
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = defaults.Log.Level
 	}
@@ -320,13 +372,25 @@ func (cfg Config) Validate() error {
 	if cfg.Worker.MaxAttempts != DefaultMaxAttempts {
 		return fmt.Errorf("worker.max_attempts 首版必须为 %d", DefaultMaxAttempts)
 	}
-	if len(cfg.Worker.RetryDelays) != 2 {
-		return errors.New("worker.retry_delays 必须包含两个间隔")
+	if len(cfg.Worker.RetryDelays) != 3 {
+		return errors.New("worker.retry_delays 必须包含三个递增间隔")
 	}
 	for _, delay := range cfg.Worker.RetryDelays {
 		if time.Duration(delay) < 0 {
 			return errors.New("worker.retry_delays 不能为负数")
 		}
+	}
+	if time.Duration(cfg.Governance.Debounce) < 0 {
+		return errors.New("governance.debounce 不能为负数")
+	}
+	if time.Duration(cfg.Governance.ReconcileInterval) <= 0 {
+		return errors.New("governance.reconcile_interval 必须大于 0")
+	}
+	if time.Duration(cfg.Governance.MinCallInterval) < 0 {
+		return errors.New("governance.min_call_interval 不能为负数")
+	}
+	if cfg.Governance.MaxInputs <= 0 {
+		return errors.New("governance.max_inputs 必须大于 0")
 	}
 	if time.Duration(cfg.Model.Timeout) <= 0 {
 		return errors.New("model.timeout 必须大于 0")
@@ -444,5 +508,6 @@ func (cfg Config) String() string {
 		"database=" + cfg.Database.Path,
 		"model=" + cfg.Model.Name,
 		"embedding=" + embeddingState,
+		"governance_debounce=" + cfg.Governance.Debounce.String(),
 	}, " ")
 }

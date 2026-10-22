@@ -2,7 +2,10 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"time"
+
+	"github.com/N0rthHXD/dmemd/internal/governance/task"
 )
 
 // UpdateState changes lifecycle state as a new revision. Unknown or unchanged
@@ -19,8 +22,9 @@ func (s *Service) UpdateState(ctx context.Context, id string, state State) (Memo
 }
 
 // ChangeState applies a lifecycle transition in an existing transaction. A
-// state-only change keeps the complete current evidence set, because archiving
-// or reactivating a memory does not invalidate its supporting sources.
+// state-only change keeps the complete current evidence set, the validity
+// interval and the assertion status. Archiving or reactivating never resolves a
+// conflict or silently promotes a pending assertion.
 func (s *Service) ChangeState(ctx context.Context, tx Tx, input StateChangeInput) (Memory, error) {
 	current, err := tx.GetMemory(ctx, input.MemoryID)
 	if err != nil {
@@ -56,11 +60,18 @@ func (s *Service) ChangeState(ctx context.Context, tx Tx, input StateChangeInput
 	if err := s.syncSearchDocument(ctx, tx, candidate); err != nil {
 		return Memory{}, err
 	}
+	if err := s.syncMemoryChanged(ctx, tx, &current, &candidate, true); err != nil {
+		return Memory{}, err
+	}
+	if err := s.syncConflictReviews(ctx, tx, []string{candidate.ID}); err != nil {
+		return Memory{}, err
+	}
 	return candidate, nil
 }
 
 // Delete creates a deleted tombstone revision and removes the derived search
-// document while retaining history and evidence. Repeating a delete is a no-op.
+// document while retaining history and evidence. Deleting one side of a
+// conflict never promotes the remaining assertion.
 func (s *Service) Delete(ctx context.Context, id string) (Memory, error) {
 	var result Memory
 	err := s.store.WithTx(ctx, func(ctx context.Context, tx Tx) error {
@@ -95,6 +106,15 @@ func (s *Service) deleteInTx(ctx context.Context, tx Tx, current Memory, reason 
 	if err := s.syncSearchDocument(ctx, tx, candidate); err != nil {
 		return Memory{}, err
 	}
+	if err := s.syncMemoryChanged(ctx, tx, &current, &candidate, true); err != nil {
+		return Memory{}, err
+	}
+	if err := s.syncConflictReviews(ctx, tx, []string{candidate.ID}); err != nil {
+		return Memory{}, err
+	}
+	if _, err := tx.CancelJob(ctx, task.KindClassify, task.MemoryKey(candidate.ID), now); err != nil {
+		return Memory{}, err
+	}
 	return candidate, nil
 }
 
@@ -109,11 +129,43 @@ func (s *Service) Purge(ctx context.Context, id string) error {
 // PurgeInTx is the transaction-scoped purge used by lifecycle and maintenance
 // callers.
 func (s *Service) PurgeInTx(ctx context.Context, tx Tx, id string) error {
-	return tx.PurgeMemory(ctx, id)
+	current, err := tx.GetMemory(ctx, id)
+	if err != nil {
+		return err
+	}
+	conflicts, err := tx.ListOpenConflictsForMemories(ctx, []string{id})
+	if err != nil {
+		return err
+	}
+	if err := s.syncMemoryPurged(ctx, tx, current); err != nil {
+		return err
+	}
+	if _, err := tx.CancelJob(ctx, task.KindClassify, task.MemoryKey(id), s.timestamp()); err != nil {
+		return err
+	}
+	if err := tx.PurgeMemory(ctx, id); err != nil {
+		return err
+	}
+	// A surviving conflict lost one member and must be reviewed against the new
+	// set. Conflicts pruned by PurgeMemory simply have no target left.
+	now := s.timestamp()
+	for _, previous := range conflicts {
+		conflict, err := tx.GetConflict(ctx, previous.ID)
+		if err != nil {
+			continue
+		}
+		if err := QueueConflictReview(ctx, tx, conflict, 0, now); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Restore copies a historical revision into a new active current version. The
 // selected revision is never modified and redacted evidence stays redacted.
+// Before committing, the restored assertion is checked against the current
+// members of its fact group. A new unmarked accepted contradiction aborts the
+// whole restore with ErrRestoreConflict instead of being silently accepted.
 func (s *Service) Restore(ctx context.Context, input RestoreInput) (Memory, error) {
 	var result Memory
 	err := s.store.WithTx(ctx, func(ctx context.Context, tx Tx) error {
@@ -142,6 +194,14 @@ func (s *Service) RestoreVersion(ctx context.Context, tx Tx, input RestoreInput)
 	if candidate.CreatedAt.IsZero() {
 		candidate.CreatedAt = current.CreatedAt
 	}
+	// Restoring never invents an acceptance decision. A historical pending or
+	// rejected assertion stays pending or rejected.
+	if candidate.AssertionStatus == "" {
+		candidate.AssertionStatus = current.AssertionStatus
+	}
+	if err := s.checkRestoreTimeline(ctx, tx, candidate); err != nil {
+		return Memory{}, err
+	}
 	if err := tx.UpdateMemory(ctx, candidate); err != nil {
 		return Memory{}, err
 	}
@@ -151,7 +211,38 @@ func (s *Service) RestoreVersion(ctx context.Context, tx Tx, input RestoreInput)
 	if err := s.syncSearchDocument(ctx, tx, candidate); err != nil {
 		return Memory{}, err
 	}
+	if err := s.enqueueClassify(ctx, tx, candidate); err != nil {
+		return Memory{}, err
+	}
+	if err := s.syncMemoryChanged(ctx, tx, &current, &candidate, true); err != nil {
+		return Memory{}, err
+	}
+	if err := s.syncConflictReviews(ctx, tx, []string{candidate.ID}); err != nil {
+		return Memory{}, err
+	}
 	return candidate, nil
+}
+
+func (s *Service) checkRestoreTimeline(ctx context.Context, tx Tx, candidate Memory) error {
+	if candidate.AssertionStatus != AssertionAccepted || candidate.FactGroupID == "" {
+		return nil
+	}
+	members, err := tx.ListFactGroupMemories(ctx, candidate.FactGroupID)
+	if err != nil {
+		return err
+	}
+	for _, member := range members {
+		if member.ID == candidate.ID || member.State != StateActive || member.AssertionStatus != AssertionAccepted {
+			continue
+		}
+		if !Overlaps(candidate.ValidFrom, candidate.ValidTo, member.ValidFrom, member.ValidTo) {
+			continue
+		}
+		if normalizeComparable(candidate.Content) != normalizeComparable(member.Content) {
+			return errors.Join(ErrRestoreConflict, ErrConflictStale)
+		}
+	}
+	return nil
 }
 
 func knownState(state State) bool {

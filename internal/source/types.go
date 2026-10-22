@@ -15,6 +15,7 @@ type Source struct {
 	ID         string          `json:"id"`
 	AppID      string          `json:"app_id,omitempty"`
 	ExternalID string          `json:"external_id,omitempty"`
+	ScopeKey   string          `json:"scope_key,omitempty"`
 	Content    json.RawMessage `json:"content"`
 	Redacted   bool            `json:"redacted"`
 	RedactedAt *time.Time      `json:"redacted_at,omitempty"`

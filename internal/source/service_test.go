@@ -40,6 +40,8 @@ func TestRedactClearsSourceEvidenceAndCancelsOnlyPendingJobs(t *testing.T) {
 	jobs := []ingest.Job{
 		{ID: "job-queued", SourceID: src.ID, Status: ingest.JobQueued, CreatedAt: serviceTime, UpdatedAt: serviceTime},
 		{ID: "job-running", SourceID: src.ID, Status: ingest.JobRunning, Attempts: 1, CreatedAt: serviceTime, UpdatedAt: serviceTime},
+		{ID: "job-waiting", SourceID: src.ID, Status: ingest.JobWaiting, Attempts: 2,
+			WaitReason: ingest.WaitReasonTransient, CreatedAt: serviceTime, UpdatedAt: serviceTime},
 		{ID: "job-succeeded", SourceID: src.ID, Status: ingest.JobSucceeded, Attempts: 1, MemoryIDs: []string{"m-1"}, CreatedAt: serviceTime, UpdatedAt: serviceTime},
 		{ID: "job-failed", SourceID: src.ID, Status: ingest.JobFailed, Attempts: 3, Error: "model echoed sensitive quote", CreatedAt: serviceTime, UpdatedAt: serviceTime},
 		{ID: "job-other-source", SourceID: "other-source", Status: ingest.JobQueued, CreatedAt: serviceTime, UpdatedAt: serviceTime},
@@ -70,7 +72,7 @@ func TestRedactClearsSourceEvidenceAndCancelsOnlyPendingJobs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.SourceID != src.ID || !result.Redacted || result.CancelledJobs != 2 {
+	if result.SourceID != src.ID || !result.Redacted || result.CancelledJobs != 3 {
 		t.Fatalf("result = %+v", result)
 	}
 
@@ -88,13 +90,16 @@ func TestRedactClearsSourceEvidenceAndCancelsOnlyPendingJobs(t *testing.T) {
 
 	queued := loadJob(t, store, "job-queued")
 	running := loadJob(t, store, "job-running")
-	if queued.Status != ingest.JobCancelled || running.Status != ingest.JobCancelled {
-		t.Fatalf("pending jobs = %+v %+v", queued, running)
+	waiting := loadJob(t, store, "job-waiting")
+	if queued.Status != ingest.JobCancelled || running.Status != ingest.JobCancelled ||
+		waiting.Status != ingest.JobCancelled {
+		t.Fatalf("pending jobs = %+v %+v %+v", queued, running, waiting)
 	}
-	if queued.Error != source.RedactedJobReason || running.Error != source.RedactedJobReason {
-		t.Fatalf("cancellation reason = %q %q", queued.Error, running.Error)
+	if queued.Error != source.RedactedJobReason || running.Error != source.RedactedJobReason ||
+		waiting.Error != source.RedactedJobReason {
+		t.Fatalf("cancellation reason = %q %q %q", queued.Error, running.Error, waiting.Error)
 	}
-	if queued.FinishedAt == nil || running.FinishedAt == nil {
+	if queued.FinishedAt == nil || running.FinishedAt == nil || waiting.FinishedAt == nil {
 		t.Fatal("cancelled jobs did not record finished_at")
 	}
 	succeeded := loadJob(t, store, "job-succeeded")

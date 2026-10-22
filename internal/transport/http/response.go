@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/N0rthHXD/dmemd/internal/artifact"
+	"github.com/N0rthHXD/dmemd/internal/governance"
 	"github.com/N0rthHXD/dmemd/internal/ingest"
 	"github.com/N0rthHXD/dmemd/internal/memory"
 	"github.com/N0rthHXD/dmemd/internal/retrieval"
@@ -18,10 +20,19 @@ const (
 	notFoundMessage    = "资源不存在。"
 	internalMessage    = "内部执行失败。"
 	unavailableMessage = "服务暂不可用。"
+	conflictMessage    = "冲突或版本已变化，请重新读取。"
+)
+
+// Stable conflict error codes for the management adjudication contract.
+const (
+	codeInvalidResolution = "invalid_resolution"
+	codeConflictStale     = "conflict_stale"
+	codeRestoreConflict   = "restore_conflict"
 )
 
 type errorResponse struct {
 	Error string `json:"error"`
+	Code  string `json:"code,omitempty"`
 }
 
 // writeJSON writes one JSON response and sets the contract content type. It
@@ -34,6 +45,10 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, errorResponse{Error: message})
+}
+
+func writeErrorCode(w http.ResponseWriter, status int, message, code string) {
+	writeJSON(w, status, errorResponse{Error: message, Code: code})
 }
 
 func (h *handler) writeBadRequest(w http.ResponseWriter) {
@@ -53,9 +68,21 @@ func (h *handler) writeUnavailable(w http.ResponseWriter) {
 // ingest job and returned by the job query endpoint.
 func (h *handler) writeServiceError(w http.ResponseWriter, request *http.Request, err error) {
 	switch {
-	case errors.Is(err, retrieval.ErrInvalidRequest):
+	case errors.Is(err, retrieval.ErrInvalidRequest),
+		errors.Is(err, governance.ErrInvalidExperience),
+		errors.Is(err, governance.ErrInvalidForget):
 		h.writeBadRequest(w)
+	case errors.Is(err, memory.ErrInvalidResolution),
+		errors.Is(err, memory.ErrInvalidTemporal):
+		writeErrorCode(w, http.StatusBadRequest, badRequestMessage, codeInvalidResolution)
+	case errors.Is(err, memory.ErrRestoreConflict):
+		writeErrorCode(w, http.StatusConflict, conflictMessage, codeRestoreConflict)
+	case errors.Is(err, memory.ErrConflictStale):
+		writeErrorCode(w, http.StatusConflict, conflictMessage, codeConflictStale)
 	case errors.Is(err, memory.ErrNotFound),
+		errors.Is(err, memory.ErrConflictNotFound),
+		errors.Is(err, artifact.ErrNotFound),
+		errors.Is(err, governance.ErrExperienceNotFound),
 		errors.Is(err, source.ErrNotFound),
 		errors.Is(err, ingest.ErrNotFound):
 		h.writeNotFound(w)

@@ -1,0 +1,379 @@
+{
+  "classification": [
+    {
+      "name": "lowercase-dedupe-and-sort",
+      "scope_key": "project:dmemd",
+      "title": "项目数据库",
+      "content": "项目使用 SQLite 保存记忆。",
+      "existing_topics": [],
+      "model_topics": ["Go", "SQLite", "go", " "],
+      "expected_topics": ["go", "sqlite"],
+      "expected_version": 2,
+      "expect_model": true
+    },
+    {
+      "name": "existing-labels-avoid-model",
+      "scope_key": "project:dmemd",
+      "title": "验证步骤",
+      "content": "修改后运行 go test。",
+      "existing_topics": ["go", "testing"],
+      "model_topics": ["wrong"],
+      "expected_topics": ["go", "testing"],
+      "expected_version": 1,
+      "expect_model": false
+    },
+    {
+      "name": "empty-labels",
+      "scope_key": "project:dmemd",
+      "title": "随手记录",
+      "content": "这条内容没有稳定主题。",
+      "existing_topics": [],
+      "model_topics": [],
+      "expected_topics": [],
+      "expected_version": 1,
+      "expect_model": true
+    },
+    {
+      "name": "scope-is-preserved",
+      "scope_key": "project:other",
+      "title": "部署方式",
+      "content": "项目使用容器部署。",
+      "existing_topics": [],
+      "model_topics": ["Deployment"],
+      "expected_topics": ["deployment"],
+      "expected_version": 2,
+      "expect_model": true
+    },
+    {
+      "name": "flat-label-normalization",
+      "scope_key": "project:dmemd",
+      "title": "检索",
+      "content": "检索使用 SQLite FTS5。",
+      "existing_topics": [],
+      "model_topics": ["  SQLite  ", "Go", "sqlite"],
+      "expected_topics": ["go", "sqlite"],
+      "expected_version": 2,
+      "expect_model": true
+    }
+  ],
+  "summaries": [
+    {
+      "name": "preserve-negation-and-condition",
+      "kind": "topic_summary",
+      "scope_key": "project:dmemd",
+      "topic": "sqlite",
+      "memories": [
+        {
+          "kind": "fact",
+          "title": "项目数据库",
+          "content": "项目使用 SQLite 保存记忆。"
+        },
+        {
+          "kind": "fact",
+          "title": "数据库限制",
+          "content": "项目不使用 PostgreSQL。"
+        },
+        {
+          "kind": "fact",
+          "title": "环境条件",
+          "content": "上述选择只在测试环境成立。"
+        }
+      ],
+      "replay": {
+        "title": "SQLite 使用条件",
+        "content": "该摘要只针对 project:dmemd：项目使用 SQLite 保存记忆，不使用 PostgreSQL；该选择只在测试环境成立。"
+      },
+      "required_terms": ["project:dmemd", "SQLite", "PostgreSQL", "测试环境", "不"],
+      "forbidden_terms": ["生产环境", "所有项目", "用户全局"]
+    },
+    {
+      "name": "keep-scope-boundary",
+      "kind": "topic_summary",
+      "scope_key": "project:alpha",
+      "topic": "deployment",
+      "memories": [
+        {
+          "kind": "fact",
+          "title": "部署范围",
+          "content": "项目 alpha 的部署建议只适用于测试环境。"
+        }
+      ],
+      "replay": {
+        "title": "部署范围",
+        "content": "该建议仅适用于 project:alpha 的测试环境，不应提升为其他项目的结论。"
+      },
+      "required_terms": ["project:alpha", "测试环境"],
+      "forbidden_terms": ["所有项目", "生产环境"]
+    },
+    {
+      "name": "mark-truncated-coverage",
+      "kind": "topic_summary",
+      "scope_key": "project:beta",
+      "topic": "import",
+      "max_inputs": 2,
+      "memories": [
+        {
+          "kind": "fact",
+          "title": "导入一",
+          "content": "导入任务先校验编码。"
+        },
+        {
+          "kind": "fact",
+          "title": "导入二",
+          "content": "导入任务再校验外键。"
+        },
+        {
+          "kind": "fact",
+          "title": "导入三",
+          "content": "导入任务最后写入磁盘。"
+        }
+      ],
+      "replay": {
+        "title": "导入检查（局部）",
+        "content": "该摘要只覆盖提供的 2 条依据：导入任务先校验编码，再校验外键；没有声称覆盖全部导入流程。"
+      },
+      "required_terms": ["只覆盖", "2 条", "校验编码", "校验外键"],
+      "forbidden_terms": ["完整覆盖", "全部流程均"]
+    },
+    {
+      "name": "profile-omits-one-off-event",
+      "kind": "profile",
+      "scope_key": "project:gamma",
+      "topic": "",
+      "memories": [
+        {
+          "kind": "preference",
+          "title": "回答语言",
+          "content": "用户默认使用中文回答。"
+        },
+        {
+          "kind": "procedure",
+          "title": "修改后验证",
+          "content": "修改后运行 go test。"
+        },
+        {
+          "kind": "event",
+          "title": "一次失败",
+          "content": "2026 年 10 月某次验证失败。"
+        }
+      ],
+      "replay": {
+        "title": "project:gamma 画像",
+        "content": "稳定偏好：默认使用中文回答。稳定程序：修改后运行 go test。一次性的失败事件不作为长期画像。"
+      },
+      "required_terms": ["默认使用中文回答", "运行 go test", "不作为长期画像"],
+      "forbidden_terms": ["2026 年 10 月", "验证失败是长期结论"]
+    }
+  ],
+  "conflicts": [
+    {
+      "name": "single-active-accepted",
+      "expected_status": "resolved",
+      "expected_action": "choose",
+      "members": [
+        {
+          "content": "用户常住北京。",
+          "state": "active",
+          "assertion": "accepted"
+        },
+        {
+          "content": "用户常住上海。",
+          "state": "archived",
+          "assertion": "accepted"
+        }
+      ]
+    },
+    {
+      "name": "converged-content",
+      "expected_status": "resolved",
+      "expected_action": "choose",
+      "members": [
+        {
+          "content": "项目使用 SQLite。",
+          "state": "active",
+          "assertion": "accepted"
+        },
+        {
+          "content": "项目  使用 sqlite。",
+          "state": "active",
+          "assertion": "accepted"
+        }
+      ]
+    },
+    {
+      "name": "known-disjoint-timeline",
+      "expected_status": "resolved",
+      "expected_action": "timeline",
+      "members": [
+        {
+          "content": "用户常住上海。",
+          "state": "active",
+          "assertion": "accepted",
+          "valid_from": "2026-01-01T00:00:00Z",
+          "valid_to": "2026-06-01T00:00:00Z"
+        },
+        {
+          "content": "用户常住北京。",
+          "state": "active",
+          "assertion": "accepted",
+          "valid_from": "2026-06-01T00:00:00Z",
+          "valid_to": "2027-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "name": "overlapping-contradiction-stays-open",
+      "expected_status": "open",
+      "members": [
+        {
+          "content": "用户常住北京。",
+          "state": "active",
+          "assertion": "accepted"
+        },
+        {
+          "content": "用户常住上海。",
+          "state": "active",
+          "assertion": "accepted"
+        }
+      ]
+    },
+    {
+      "name": "pending-alternative-stays-open",
+      "expected_status": "open",
+      "members": [
+        {
+          "content": "用户常住北京。",
+          "state": "active",
+          "assertion": "accepted"
+        },
+        {
+          "content": "用户常住上海。",
+          "state": "active",
+          "assertion": "pending"
+        }
+      ]
+    },
+    {
+      "name": "three-way-overlap-stays-open",
+      "expected_status": "open",
+      "members": [
+        {
+          "content": "项目使用 SQLite。",
+          "state": "active",
+          "assertion": "accepted"
+        },
+        {
+          "content": "项目使用 SQLite。",
+          "state": "active",
+          "assertion": "accepted"
+        },
+        {
+          "content": "项目使用 PostgreSQL。",
+          "state": "active",
+          "assertion": "accepted"
+        }
+      ]
+    },
+    {
+      "name": "unknown-boundary-stays-open",
+      "expected_status": "open",
+      "members": [
+        {
+          "content": "用户常住上海。",
+          "state": "active",
+          "assertion": "accepted",
+          "valid_from": "2026-01-01T00:00:00Z",
+          "valid_to": "2026-06-01T00:00:00Z"
+        },
+        {
+          "content": "用户常住北京。",
+          "state": "active",
+          "assertion": "accepted",
+          "valid_from": "2026-06-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "name": "single-active-with-rejected-peer",
+      "expected_status": "resolved",
+      "expected_action": "choose",
+      "members": [
+        {
+          "content": "用户默认使用中文回答。",
+          "state": "active",
+          "assertion": "accepted"
+        },
+        {
+          "content": "用户默认使用英文回答。",
+          "state": "active",
+          "assertion": "rejected"
+        }
+      ]
+    }
+  ],
+  "skills": [
+    {
+      "name": "testing-guidance-boundary",
+      "scope_key": "project:dmemd",
+      "topic": "testing",
+      "procedures": [
+        {
+          "kind": "procedure",
+          "title": "修改后验证",
+          "content": "修改 dmemd 后运行 go test。"
+        }
+      ],
+      "experiences": [
+        {
+          "goal": "验证 dmemd 修改",
+          "conditions": ["依赖已安装"],
+          "actions": ["运行 go test"],
+          "outcome": "failure"
+        }
+      ],
+      "replay": {
+        "name": "dmemd 修改验证",
+        "description": "仅适用于 project:dmemd 的指导型验证流程",
+        "content": "## 适用范围\n仅用于 project:dmemd；不适用于其他项目。\n\n## 前置条件\n- 依赖已安装\n\n## 步骤\n1. 运行 go test\n\n## 停止条件\n- 测试失败时停止并检查失败原因\n\n## 完成检查\n- 测试命令通过\n- 没有跳过构建检查\n\n## 反例\n- 未安装依赖时不要执行\n- 一次失败报告不能证明流程永远无效",
+        "preconditions": ["依赖已安装"],
+        "steps": ["运行 go test"],
+        "stop_conditions": ["测试失败时停止并检查失败原因"],
+        "completion_checks": ["测试命令通过", "没有跳过构建检查"],
+        "counterexamples": ["未安装依赖时不要执行", "一次失败报告不能证明流程永远无效"]
+      },
+      "required_terms": ["project:dmemd", "前置条件", "步骤", "停止条件", "完成检查", "反例", "go test"],
+      "forbidden_terms": ["已验证成功", "安全认证", "自动执行", "保证成功"],
+      "forbid_code_fence": true
+    },
+    {
+      "name": "truncated-subset-boundary",
+      "scope_key": "project:beta",
+      "topic": "import",
+      "max_inputs": 1,
+      "procedures": [
+        {
+          "kind": "procedure",
+          "title": "导入前检查",
+          "content": "导入前检查编码。"
+        },
+        {
+          "kind": "procedure",
+          "title": "导入后检查",
+          "content": "导入后检查外键。"
+        }
+      ],
+      "experiences": [],
+      "replay": {
+        "name": "局部导入检查",
+        "description": "只覆盖提供的子集，不声称覆盖完整导入流程",
+        "content": "## 适用范围\n仅覆盖提供的子集，不声称覆盖完整导入流程。\n\n## 步骤\n1. 导入前检查编码。\n\n## 停止条件\n- 输入范围不清楚时停止并请求补充。\n\n## 反例\n- 不要根据局部子集推断未提供的步骤。",
+        "steps": ["导入前检查编码"],
+        "stop_conditions": ["输入范围不清楚时停止并请求补充"],
+        "counterexamples": ["不要根据局部子集推断未提供的步骤"]
+      },
+      "required_terms": ["子集", "停止条件", "反例", "导入前检查编码"],
+      "forbidden_terms": ["完整覆盖", "已验证成功", "安全认证"],
+      "forbid_code_fence": true
+    }
+  ]
+}

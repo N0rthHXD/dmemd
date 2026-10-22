@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/N0rthHXD/dmemd/internal/artifact"
 	"github.com/N0rthHXD/dmemd/internal/memory"
 	"github.com/N0rthHXD/dmemd/internal/source"
 )
@@ -53,9 +54,35 @@ const (
 
 // Warning codes are stable, deduplicated and contain no provider data.
 const (
-	WarningSemanticUnavailable = "semantic_unavailable"
-	WarningSemanticTimeout     = "semantic_timeout"
+	WarningSemanticUnavailable      = "semantic_unavailable"
+	WarningSemanticTimeout          = "semantic_timeout"
+	WarningFactConflict             = "fact_conflict"
+	WarningConflictResultsTruncated = "conflict_results_truncated"
+	WarningDerivedAsOfUnsupported   = "derived_as_of_unsupported"
+	WarningDerivedUnavailable       = "derived_unavailable"
+	WarningContextBudgetTruncated   = "context_budget_truncated"
 )
+
+// Layer selects one knowledge level in the unified recall entry point. Layers
+// are independent from filters.kinds, which only narrows atomic memories.
+type Layer string
+
+const (
+	LayerAtomic     Layer = "atomic"
+	LayerSummary    Layer = "summary"
+	LayerExperience Layer = "experience"
+	LayerSkill      Layer = "skill"
+)
+
+// Known reports whether layer is part of the first-release vocabulary.
+func (l Layer) Known() bool {
+	switch l {
+	case LayerAtomic, LayerSummary, LayerExperience, LayerSkill:
+		return true
+	default:
+		return false
+	}
+}
 
 // Match controls how dictionary terms in a query are combined. The zero value
 // and unknown values mean MatchAny; only MatchAll requests strict conjunction.
@@ -70,11 +97,14 @@ const (
 // active memories only; archived must be requested explicitly and deleted is
 // never returned by keyword or semantic retrieval.
 type Filters struct {
-	Kinds         []memory.Kind
-	States        []memory.State
-	CreatedByApp  string
-	UpdatedAfter  *time.Time
-	UpdatedBefore *time.Time
+	Kinds           []memory.Kind
+	States          []memory.State
+	AssertionStatus []memory.AssertionStatus
+	AsOf            *time.Time
+	ScopeKey        string
+	CreatedByApp    string
+	UpdatedAfter    *time.Time
+	UpdatedBefore   *time.Time
 }
 
 // Request is one Top-K search. Mode defaults to keyword and only controls
@@ -205,12 +235,13 @@ func (e Explanation) MarshalJSON() ([]byte, error) {
 
 // Item is one search result.
 type Item struct {
-	Memory       memory.Memory `json:"memory"`
-	Score        float64       `json:"score"`
-	Snippet      string        `json:"snippet"`
-	MatchedTerms []string      `json:"matched_terms"`
-	EvidenceRefs []EvidenceRef `json:"evidence_refs"`
-	Explanation  *Explanation  `json:"explanation,omitempty"`
+	Memory       memory.Memory        `json:"memory"`
+	Score        float64              `json:"score"`
+	Snippet      string               `json:"snippet"`
+	MatchedTerms []string             `json:"matched_terms"`
+	EvidenceRefs []EvidenceRef        `json:"evidence_refs"`
+	Explanation  *Explanation         `json:"explanation,omitempty"`
+	ConflictRefs []memory.ConflictRef `json:"conflict_refs"`
 }
 
 // Retrieval reports the strategy actually executed, independent of whether a
@@ -221,9 +252,38 @@ type Retrieval struct {
 
 // Result is a single Top-K response. It has no cursor or next-page metadata.
 type Result struct {
-	Items     []Item    `json:"items"`
-	Retrieval Retrieval `json:"retrieval"`
-	Warnings  []string  `json:"warnings,omitempty"`
+	Items     []Item                   `json:"items"`
+	Retrieval Retrieval                `json:"retrieval"`
+	Warnings  []string                 `json:"warnings,omitempty"`
+	Conflicts []memory.ConflictSummary `json:"conflicts"`
+}
+
+// RecallRequest is the single unified recall entry. Layers default to every
+// layer when omitted; filters.kinds only narrows the atomic partition.
+type RecallRequest struct {
+	Query    string
+	ScopeKey string
+	Layers   []Layer
+	// LayersSpecified distinguishes an omitted layers field (all layers) from
+	// an explicit empty list (no layers).
+	LayersSpecified  bool
+	Mode             Mode
+	Match            Match
+	Filters          Filters
+	TopK             int
+	Explain          bool
+	MaxContextTokens int
+}
+
+// RecallResult preserves the knowledge partitions instead of forcing atomic
+// memories and derived artifacts into one item shape.
+type RecallResult struct {
+	Memories    []Item
+	Summaries   []artifact.SearchHit
+	Experiences []artifact.SearchHit
+	Skills      []artifact.SearchHit
+	Conflicts   []memory.ConflictSummary
+	Warnings    []string
 }
 
 // RebuildResult reports a successful, committed index rebuild.
@@ -232,15 +292,32 @@ type RebuildResult struct {
 	Duration time.Duration `json:"duration"`
 }
 
-// SearchService is the public search capability.
+// SearchService is the internal atomic search capability.
 type SearchService interface {
 	Search(ctx context.Context, request Request) (Result, error)
+}
+
+// RecallService is the single public recall capability.
+type RecallService interface {
+	Recall(ctx context.Context, request RecallRequest) (RecallResult, error)
 }
 
 // RelatedService exposes keyword-based context selection to ingest without
 // changing the public search request/response contract.
 type RelatedService interface {
-	RelatedActive(ctx context.Context, text string, limit int) ([]memory.Memory, error)
+	RelatedContext(ctx context.Context, text string, limit int) (ContextResult, error)
+	FactTimeline(ctx context.Context, groupID string, limit int) (ContextResult, error)
+	OpenConflictsForMemories(ctx context.Context, memoryIDs []string) ([]memory.Conflict, error)
+	MemoriesByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
+	CatalogGeneration(ctx context.Context) (int64, error)
+}
+
+// ContextResult is a bounded consistency-context load. Complete is false when
+// the fixed cap was reached; callers must then avoid destructive rewrites.
+type ContextResult struct {
+	Memories []memory.Memory
+	Complete bool
+	Warnings []string
 }
 
 // IndexMaintainer rebuilds derived search documents and FTS from current

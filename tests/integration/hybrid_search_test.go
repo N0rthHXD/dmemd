@@ -15,9 +15,9 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/testutil"
 )
 
-const p8Profile = "p8-profile"
+const hybridProfile = "hybrid-profile"
 
-type p8Encoder struct {
+type hybridEncoder struct {
 	profileID     string
 	dimensions    int
 	minSimilarity float64
@@ -28,10 +28,10 @@ type p8Encoder struct {
 	calls         int
 }
 
-func (e *p8Encoder) ProfileID() string      { return e.profileID }
-func (e *p8Encoder) Dimensions() int        { return e.dimensions }
-func (e *p8Encoder) MinSimilarity() float64 { return e.minSimilarity }
-func (e *p8Encoder) EmbedQuery(ctx context.Context, _ string) ([]float32, error) {
+func (e *hybridEncoder) ProfileID() string      { return e.profileID }
+func (e *hybridEncoder) Dimensions() int        { return e.dimensions }
+func (e *hybridEncoder) MinSimilarity() float64 { return e.minSimilarity }
+func (e *hybridEncoder) EmbedQuery(ctx context.Context, _ string) ([]float32, error) {
 	e.mu.Lock()
 	e.calls++
 	e.mu.Unlock()
@@ -44,13 +44,13 @@ func (e *p8Encoder) EmbedQuery(ctx context.Context, _ string) ([]float32, error)
 	}
 	return e.vector, nil
 }
-func (e *p8Encoder) callCount() int {
+func (e *hybridEncoder) callCount() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.calls
 }
 
-type p8Fixture struct {
+type hybridFixture struct {
 	store    *sqlite.Store
 	profile  string
 	clock    time.Time
@@ -58,7 +58,7 @@ type p8Fixture struct {
 	search   *retrieval.Service
 }
 
-func newP8Fixture(t *testing.T, encoder retrieval.QueryEncoder, profileID string, enabled bool) *p8Fixture {
+func newHybridFixture(t *testing.T, encoder retrieval.QueryEncoder, profileID string, enabled bool) *hybridFixture {
 	t.Helper()
 	store := testutil.NewStore(t)
 	store.ConfigureEmbedding(enabled, profileID)
@@ -71,12 +71,12 @@ func newP8Fixture(t *testing.T, encoder retrieval.QueryEncoder, profileID string
 		options = append(options, retrieval.WithSemantic(encoder))
 	}
 	search := retrieval.NewService(store, builder, options...)
-	return &p8Fixture{store: store, profile: profileID, clock: clock, memories: memories, search: search}
+	return &hybridFixture{store: store, profile: profileID, clock: clock, memories: memories, search: search}
 }
 
-func (f *p8Fixture) advance(delta time.Duration) { f.clock = f.clock.Add(delta) }
+func (f *hybridFixture) advance(delta time.Duration) { f.clock = f.clock.Add(delta) }
 
-func (f *p8Fixture) create(t *testing.T, input memory.CreateInput) memory.Memory {
+func (f *hybridFixture) create(t *testing.T, input memory.CreateInput) memory.Memory {
 	t.Helper()
 	if input.ObservedAt.IsZero() {
 		input.ObservedAt = f.clock
@@ -94,7 +94,7 @@ func (f *p8Fixture) create(t *testing.T, input memory.CreateInput) memory.Memory
 
 // seedVectors commits one three-dimensional vector for every queued job. The
 // vector map is keyed by memory ID; every current job must be present.
-func (f *p8Fixture) seedVectors(t *testing.T, vectors map[string][]float32) {
+func (f *hybridFixture) seedVectors(t *testing.T, vectors map[string][]float32) {
 	t.Helper()
 	ctx := context.Background()
 	for {
@@ -123,12 +123,12 @@ func (f *p8Fixture) seedVectors(t *testing.T, vectors map[string][]float32) {
 	}
 }
 
-func TestP8HybridRRFFusionAndExplanations(t *testing.T) {
-	encoder := &p8Encoder{
-		profileID: p8Profile, dimensions: 3, minSimilarity: 0.5,
+func TestHybridRRFFusionAndExplanations(t *testing.T) {
+	encoder := &hybridEncoder{
+		profileID: hybridProfile, dimensions: 3, minSimilarity: 0.5,
 		vector: []float32{1, 0, 0},
 	}
-	f := newP8Fixture(t, encoder, p8Profile, true)
+	f := newHybridFixture(t, encoder, hybridProfile, true)
 	keywordOnly := f.create(t, memory.CreateInput{
 		Kind: memory.KindFact, Title: "格式", Content: "回答应简洁并且不要展开。",
 	})
@@ -158,7 +158,7 @@ func TestP8HybridRRFFusionAndExplanations(t *testing.T) {
 	if len(result.Warnings) != 0 {
 		t.Fatalf("warnings = %v", result.Warnings)
 	}
-	if got := p8IDs(result); len(got) != 3 || got[0] != both.ID || got[1] != semanticOnly.ID || got[2] != keywordOnly.ID {
+	if got := hybridIDs(result); len(got) != 3 || got[0] != both.ID || got[1] != semanticOnly.ID || got[2] != keywordOnly.ID {
 		t.Fatalf("hybrid order = %v", got)
 	}
 	wantBoth := 1/61.0 + 1/62.0
@@ -209,7 +209,7 @@ func TestP8HybridRRFFusionAndExplanations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := p8IDs(filtered); len(got) != 1 || got[0] != both.ID {
+	if got := hybridIDs(filtered); len(got) != 1 || got[0] != both.ID {
 		t.Fatalf("filtered hybrid = %v", got)
 	}
 
@@ -220,7 +220,7 @@ func TestP8HybridRRFFusionAndExplanations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range p8IDs(defaultResult) {
+	for _, id := range hybridIDs(defaultResult) {
 		if id == both.ID {
 			t.Fatal("archived memory returned by default hybrid search")
 		}
@@ -232,7 +232,7 @@ func TestP8HybridRRFFusionAndExplanations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := p8IDs(archivedResult); len(got) != 1 || got[0] != both.ID {
+	if got := hybridIDs(archivedResult); len(got) != 1 || got[0] != both.ID {
 		t.Fatalf("archived hybrid = %v", got)
 	}
 
@@ -250,17 +250,17 @@ func TestP8HybridRRFFusionAndExplanations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range p8IDs(afterRevision) {
+	for _, id := range hybridIDs(afterRevision) {
 		if id == semanticOnly.ID {
 			t.Fatal("stale vector returned after content revision")
 		}
 	}
 }
 
-func TestP8HybridDegradation(t *testing.T) {
+func TestHybridDegradation(t *testing.T) {
 	t.Run("empty vector index", func(t *testing.T) {
-		encoder := &p8Encoder{profileID: p8Profile, dimensions: 3, minSimilarity: 0.5, vector: []float32{1, 0, 0}}
-		f := newP8Fixture(t, encoder, p8Profile, true)
+		encoder := &hybridEncoder{profileID: hybridProfile, dimensions: 3, minSimilarity: 0.5, vector: []float32{1, 0, 0}}
+		f := newHybridFixture(t, encoder, hybridProfile, true)
 		created := f.create(t, memory.CreateInput{Title: "回答", Content: "回答应简洁。"})
 		result, err := f.search.Search(context.Background(), retrieval.Request{Query: "回答", Mode: retrieval.ModeHybrid})
 		if err != nil {
@@ -269,7 +269,7 @@ func TestP8HybridDegradation(t *testing.T) {
 		if result.Retrieval.Mode != retrieval.ModeHybrid || len(result.Warnings) != 0 {
 			t.Fatalf("empty-index result = %+v", result)
 		}
-		if got := p8IDs(result); len(got) != 1 || got[0] != created.ID {
+		if got := hybridIDs(result); len(got) != 1 || got[0] != created.ID {
 			t.Fatalf("keyword candidates = %v", got)
 		}
 		if encoder.callCount() != 1 {
@@ -278,8 +278,8 @@ func TestP8HybridDegradation(t *testing.T) {
 	})
 
 	t.Run("semantic unavailable", func(t *testing.T) {
-		encoder := &p8Encoder{profileID: p8Profile, dimensions: 3, minSimilarity: 0.5, vector: []float32{1, 0, 0}}
-		f := newP8Fixture(t, encoder, p8Profile, true)
+		encoder := &hybridEncoder{profileID: hybridProfile, dimensions: 3, minSimilarity: 0.5, vector: []float32{1, 0, 0}}
+		f := newHybridFixture(t, encoder, hybridProfile, true)
 		created := f.create(t, memory.CreateInput{Title: "回答", Content: "回答应简洁。"})
 		f.seedVectors(t, map[string][]float32{created.ID: {1, 0, 0}})
 		encoder.err = errors.New("provider down")
@@ -291,7 +291,7 @@ func TestP8HybridDegradation(t *testing.T) {
 			t.Fatalf("unavailable result = %+v", result)
 		}
 		if len(result.Items) != 1 || result.Items[0].Memory.ID != created.ID {
-			t.Fatalf("unavailable fallback = %v", p8IDs(result))
+			t.Fatalf("unavailable fallback = %v", hybridIDs(result))
 		}
 		if result.Items[0].Explanation != nil {
 			t.Fatal("explanation returned without explain=true")
@@ -299,8 +299,8 @@ func TestP8HybridDegradation(t *testing.T) {
 	})
 
 	t.Run("semantic timeout", func(t *testing.T) {
-		encoder := &p8Encoder{profileID: p8Profile, dimensions: 3, minSimilarity: 0.5, vector: []float32{1, 0, 0}, block: true}
-		f := newP8Fixture(t, encoder, p8Profile, true)
+		encoder := &hybridEncoder{profileID: hybridProfile, dimensions: 3, minSimilarity: 0.5, vector: []float32{1, 0, 0}, block: true}
+		f := newHybridFixture(t, encoder, hybridProfile, true)
 		created := f.create(t, memory.CreateInput{Title: "回答", Content: "回答应简洁。"})
 		f.seedVectors(t, map[string][]float32{created.ID: {1, 0, 0}})
 		started := time.Now()
@@ -317,7 +317,7 @@ func TestP8HybridDegradation(t *testing.T) {
 	})
 
 	t.Run("disabled", func(t *testing.T) {
-		f := newP8Fixture(t, nil, "", false)
+		f := newHybridFixture(t, nil, "", false)
 		created := f.create(t, memory.CreateInput{Title: "回答", Content: "回答应简洁。"})
 		result, err := f.search.Search(context.Background(), retrieval.Request{Query: "回答", Mode: retrieval.ModeHybrid})
 		if err != nil {
@@ -326,13 +326,13 @@ func TestP8HybridDegradation(t *testing.T) {
 		if result.Retrieval.Mode != retrieval.ModeKeyword || len(result.Warnings) != 1 || result.Warnings[0] != retrieval.WarningSemanticUnavailable {
 			t.Fatalf("disabled result = %+v", result)
 		}
-		if got := p8IDs(result); len(got) != 1 || got[0] != created.ID {
+		if got := hybridIDs(result); len(got) != 1 || got[0] != created.ID {
 			t.Fatalf("disabled fallback = %v", got)
 		}
 	})
 
 	t.Run("sqlite error is not hidden", func(t *testing.T) {
-		f := newP8Fixture(t, nil, "", false)
+		f := newHybridFixture(t, nil, "", false)
 		f.store.Close()
 		if _, err := f.search.Search(context.Background(), retrieval.Request{Query: "回答"}); err == nil {
 			t.Fatal("search on a closed database succeeded")
@@ -340,9 +340,9 @@ func TestP8HybridDegradation(t *testing.T) {
 	})
 }
 
-func TestP8HybridValidationBlankAndCancellation(t *testing.T) {
-	encoder := &p8Encoder{profileID: p8Profile, dimensions: 3, minSimilarity: 0.5, vector: []float32{1, 0, 0}, block: true}
-	f := newP8Fixture(t, encoder, p8Profile, true)
+func TestHybridValidationBlankAndCancellation(t *testing.T) {
+	encoder := &hybridEncoder{profileID: hybridProfile, dimensions: 3, minSimilarity: 0.5, vector: []float32{1, 0, 0}, block: true}
+	f := newHybridFixture(t, encoder, hybridProfile, true)
 	f.create(t, memory.CreateInput{Title: "回答", Content: "回答应简洁。"})
 
 	if _, err := f.search.Search(context.Background(), retrieval.Request{Query: "回答", Mode: "unknown"}); !errors.Is(err, retrieval.ErrInvalidRequest) {
@@ -371,7 +371,7 @@ func TestP8HybridValidationBlankAndCancellation(t *testing.T) {
 	}
 }
 
-func p8IDs(result retrieval.Result) []string {
+func hybridIDs(result retrieval.Result) []string {
 	ids := make([]string, 0, len(result.Items))
 	for _, item := range result.Items {
 		ids = append(ids, item.Memory.ID)

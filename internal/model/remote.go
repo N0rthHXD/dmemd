@@ -12,7 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/N0rthHXD/dmemd/internal/artifact"
 	"github.com/N0rthHXD/dmemd/internal/ingest"
+	"github.com/N0rthHXD/dmemd/internal/skill"
 )
 
 const (
@@ -32,7 +34,9 @@ type Config struct {
 	HTTPClient *http.Client
 }
 
-// Provider is the OpenAI-compatible Chat Completions ExtractionProvider.
+// Provider is the OpenAI-compatible Chat Completions adapter. It implements both
+// the extraction and decision capabilities over the same endpoint and
+// credential.
 type Provider struct {
 	modelName string
 	endpoint  string
@@ -72,28 +76,133 @@ func NewProvider(cfg Config) (*Provider, error) {
 // NewRemote is an alias for NewProvider used by runtime assembly code.
 func NewRemote(cfg Config) (*Provider, error) { return NewProvider(cfg) }
 
-var _ ingest.ExtractionProvider = (*Provider)(nil)
+var (
+	_ ingest.ExtractionProvider = (*Provider)(nil)
+	_ ingest.DecisionProvider   = (*Provider)(nil)
+)
 
-// Extract sends only the current source and the related active memories chosen
-// by the service. The provider performs no internal retries and stores nothing.
+// Extract sends only the current source. The provider performs no internal
+// retries and stores nothing.
 func (p *Provider) Extract(ctx context.Context, request ingest.ExtractionRequest) (ingest.ExtractionResult, error) {
+	payload, err := buildExtractionRequest(p.modelName, request)
+	if err != nil {
+		return ingest.ExtractionResult{}, &ingest.ProviderError{Operation: "request", Retryable: false, Err: err}
+	}
+	content, err := p.complete(ctx, payload)
+	if err != nil {
+		return ingest.ExtractionResult{}, err
+	}
+	candidates, err := ParseCandidates(content)
+	if err != nil {
+		return ingest.ExtractionResult{}, &ingest.ProviderError{Operation: "protocol", Retryable: false, Err: ErrUnparseable}
+	}
+	return ingest.ExtractionResult{Candidates: candidates}, nil
+}
+
+// Decide sends one bounded decision batch. It never writes storage.
+func (p *Provider) Decide(ctx context.Context, request ingest.DecisionRequest) (ingest.DecisionResult, error) {
+	payload, err := buildDecisionRequest(p.modelName, request)
+	if err != nil {
+		return ingest.DecisionResult{}, &ingest.ProviderError{Operation: "request", Retryable: false, Err: err}
+	}
+	content, err := p.complete(ctx, payload)
+	if err != nil {
+		return ingest.DecisionResult{}, err
+	}
+	decisions, err := ParseDecisions(content)
+	if err != nil {
+		return ingest.DecisionResult{}, &ingest.ProviderError{Operation: "protocol", Retryable: false, Err: ErrUnparseable}
+	}
+	return ingest.DecisionResult{Decisions: decisions}, nil
+}
+
+// SuggestTopics asks for flat topic labels for one already-stored atomic
+// memory. It performs no writes and receives only the selected snapshot.
+func (p *Provider) SuggestTopics(ctx context.Context, title, content, scopeKey string) ([]string, error) {
+	payload, err := buildClassificationRequest(p.modelName, title, content, scopeKey)
+	if err != nil {
+		return nil, &ingest.ProviderError{Operation: "protocol", Retryable: false, Err: err}
+	}
+	reply, err := p.complete(ctx, payload)
+	if err != nil {
+		return nil, err
+	}
+	topics, err := ParseTopics(reply)
+	if err != nil {
+		return nil, &ingest.ProviderError{Operation: "protocol", Retryable: false, Err: ErrUnparseable}
+	}
+	return topics, nil
+}
+
+// Summarize asks for one bounded topic summary or scope profile. It performs no
+// writes and never receives source payloads.
+func (p *Provider) Summarize(ctx context.Context, request artifact.AggregateRequest) (artifact.AggregateResult, error) {
+	payload, err := buildAggregateRequest(p.modelName, request)
+	if err != nil {
+		return artifact.AggregateResult{}, &ingest.ProviderError{Operation: "protocol", Retryable: false, Err: err}
+	}
+	reply, err := p.complete(ctx, payload)
+	if err != nil {
+		return artifact.AggregateResult{}, err
+	}
+	result, err := ParseAggregate(reply)
+	if err != nil {
+		return artifact.AggregateResult{}, &ingest.ProviderError{Operation: "protocol", Retryable: false, Err: ErrUnparseable}
+	}
+	return result, nil
+}
+
+// ComposeExperience asks for one structured experience case. It performs no
+// writes and never receives source payloads; the caller attaches real sources
+// and preserves the application-reported outcome.
+func (p *Provider) ComposeExperience(ctx context.Context, request artifact.ExperienceRequest) (artifact.ExperienceResult, error) {
+	payload, err := buildExperienceRequest(p.modelName, request)
+	if err != nil {
+		return artifact.ExperienceResult{}, &ingest.ProviderError{Operation: "protocol", Retryable: false, Err: err}
+	}
+	reply, err := p.complete(ctx, payload)
+	if err != nil {
+		return artifact.ExperienceResult{}, err
+	}
+	result, err := ParseExperience(reply)
+	if err != nil {
+		return artifact.ExperienceResult{}, &ingest.ProviderError{Operation: "protocol", Retryable: false, Err: ErrUnparseable}
+	}
+	return result, nil
+}
+
+// ComposeSkill asks for one guidance-only workflow. It performs no writes and
+// cannot grant tools or change service configuration.
+func (p *Provider) ComposeSkill(ctx context.Context, request skill.Request) (skill.Draft, error) {
+	payload, err := buildSkillRequest(p.modelName, request)
+	if err != nil {
+		return skill.Draft{}, &ingest.ProviderError{Operation: "protocol", Retryable: false, Err: err}
+	}
+	reply, err := p.complete(ctx, payload)
+	if err != nil {
+		return skill.Draft{}, err
+	}
+	result, err := ParseSkill(reply)
+	if err != nil {
+		return skill.Draft{}, &ingest.ProviderError{Operation: "protocol", Retryable: false, Err: ErrUnparseable}
+	}
+	return result, nil
+}
+
+func (p *Provider) complete(ctx context.Context, payload chatRequest) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	payload, err := buildChatRequest(p.modelName, request)
-	if err != nil {
-		return ingest.ExtractionResult{}, &ingest.ProviderError{Operation: "request", Retryable: false, Err: err}
-	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return ingest.ExtractionResult{}, &ingest.ProviderError{Operation: "request", Retryable: false, Err: err}
+		return "", &ingest.ProviderError{Operation: "request", Retryable: false, Err: err}
 	}
 
 	callCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 	httpRequest, err := http.NewRequestWithContext(callCtx, http.MethodPost, p.endpoint, bytes.NewReader(body))
 	if err != nil {
-		return ingest.ExtractionResult{}, &ingest.ProviderError{Operation: "request", Retryable: false, Err: err}
+		return "", &ingest.ProviderError{Operation: "request", Retryable: false, Err: err}
 	}
 	httpRequest.Header.Set("Content-Type", "application/json")
 	if p.apiKey != "" {
@@ -103,20 +212,20 @@ func (p *Provider) Extract(ctx context.Context, request ingest.ExtractionRequest
 	response, err := p.client.Do(httpRequest)
 	if err != nil {
 		if ctx.Err() != nil {
-			return ingest.ExtractionResult{}, &ingest.ProviderError{
+			return "", &ingest.ProviderError{
 				Operation: "request",
 				Retryable: true,
 				Err:       ctx.Err(),
 			}
 		}
 		if callCtx.Err() != nil {
-			return ingest.ExtractionResult{}, &ingest.ProviderError{
+			return "", &ingest.ProviderError{
 				Operation: "timeout",
 				Retryable: true,
 				Err:       fmt.Errorf("模型调用在 %s 后超时", p.timeout),
 			}
 		}
-		return ingest.ExtractionResult{}, &ingest.ProviderError{
+		return "", &ingest.ProviderError{
 			Operation: "request",
 			Retryable: true,
 			Err:       errors.New("模型服务连接失败"),
@@ -127,22 +236,28 @@ func (p *Provider) Extract(ctx context.Context, request ingest.ExtractionRequest
 	limited := io.LimitReader(response.Body, maxResponseBytes+1)
 	responseBody, readErr := io.ReadAll(limited)
 	if readErr != nil {
-		return ingest.ExtractionResult{}, &ingest.ProviderError{
+		return "", &ingest.ProviderError{
 			Operation: "response",
 			Retryable: true,
 			Err:       errors.New("读取模型响应失败"),
 		}
 	}
 	if len(responseBody) > maxResponseBytes {
-		return ingest.ExtractionResult{}, &ingest.ProviderError{
+		return "", &ingest.ProviderError{
 			Operation: "response",
 			Retryable: true,
 			Err:       errors.New("模型响应超过大小上限"),
 		}
 	}
 	if response.StatusCode != http.StatusOK {
-		return ingest.ExtractionResult{}, &ingest.ProviderError{
-			Operation: "response",
+		operation := "response"
+		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+			operation = "credentials"
+		} else if !retryableStatus(response.StatusCode) {
+			operation = "configuration"
+		}
+		return "", &ingest.ProviderError{
+			Operation: operation,
 			Retryable: retryableStatus(response.StatusCode),
 			Err:       fmt.Errorf("HTTP %d", response.StatusCode),
 		}
@@ -150,13 +265,9 @@ func (p *Provider) Extract(ctx context.Context, request ingest.ExtractionRequest
 
 	content, err := completionContent(responseBody)
 	if err != nil {
-		return ingest.ExtractionResult{}, &ingest.ProviderError{Operation: "response", Retryable: true, Err: ErrUnparseable}
+		return "", &ingest.ProviderError{Operation: "protocol", Retryable: false, Err: ErrUnparseable}
 	}
-	candidates, err := ParseCandidates(content)
-	if err != nil {
-		return ingest.ExtractionResult{}, &ingest.ProviderError{Operation: "response", Retryable: true, Err: ErrUnparseable}
-	}
-	return ingest.ExtractionResult{Candidates: candidates}, nil
+	return content, nil
 }
 
 func completionContent(body []byte) (string, error) {

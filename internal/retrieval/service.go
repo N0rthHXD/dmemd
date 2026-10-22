@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"reflect"
 	"sort"
 	"time"
 
@@ -20,6 +21,7 @@ type Service struct {
 	documents    memory.DocumentBuilder
 	logger       *slog.Logger
 	encoder      QueryEncoder
+	artifacts    ArtifactSearcher
 	queryTimeout time.Duration
 }
 
@@ -41,7 +43,27 @@ func WithLogger(logger *slog.Logger) Option {
 // service keyword-only while preserving the hybrid degradation path.
 func WithSemantic(encoder QueryEncoder) Option {
 	return func(service *Service) {
+		if encoder == nil {
+			service.encoder = nil
+			return
+		}
+		value := reflect.ValueOf(encoder)
+		if value.Kind() == reflect.Ptr && value.IsNil() {
+			service.encoder = nil
+			return
+		}
 		service.encoder = encoder
+	}
+}
+
+// WithArtifacts installs the derived-layer search capability. A nil value
+// preserves atomic-only assembly, while the unified recall still returns empty
+// derived partitions as required by the contract.
+func WithArtifacts(searcher ArtifactSearcher) Option {
+	return func(service *Service) {
+		if searcher != nil {
+			service.artifacts = searcher
+		}
 	}
 }
 
@@ -83,47 +105,271 @@ func (s *Service) Search(ctx context.Context, request Request) (Result, error) {
 	}
 	groups := dedupeGroups(Groups(request.Query))
 	filters, filtersOK := sanitizeFilters(request.Filters)
+	if filters.AsOf == nil {
+		asOf := time.Now().UTC()
+		filters.AsOf = &asOf
+	}
 	if len(groups) == 0 || !filtersOK {
 		return Result{
 			Items:     []Item{},
 			Retrieval: Retrieval{Mode: mode},
+			Conflicts: []memory.ConflictSummary{},
 		}, nil
 	}
 	match := normalizeMatch(request.Match)
 	if mode == ModeKeyword && match == MatchAny {
 		groups = selectQueryTerms(groups)
 	}
+	var result Result
 	if mode == ModeHybrid {
-		return s.searchHybrid(ctx, groups, request, filters, topK)
+		result, err = s.searchHybrid(ctx, groups, request, filters, topK)
+	} else {
+		result, err = s.searchKeyword(ctx, groups, request, filters, topK, nil, true)
 	}
-	return s.searchKeyword(ctx, groups, request, filters, topK, nil, true)
+	if err != nil {
+		return Result{}, err
+	}
+	return s.decorateConflicts(ctx, result, groups, request, filters)
 }
 
-// RelatedActive selects at most ten active memories for background extraction.
-// It always uses the keyword path, match=any, and never returns archived or
-// deleted memories.
-func (s *Service) RelatedActive(ctx context.Context, text string, limit int) ([]memory.Memory, error) {
+// RelatedContext selects bounded consistency context for one candidate fact.
+// It deliberately bypasses the public accepted-only filter so historical,
+// pending and archived assertions can be judged.
+func (s *Service) RelatedContext(ctx context.Context, text string, limit int) (ContextResult, error) {
+	if limit <= 0 {
+		limit = DefaultRelatedLimit
+	}
 	groups := dedupeGroups(Groups(text))
 	if len(groups) > MaxRelatedQueryGroups {
 		groups = groups[:MaxRelatedQueryGroups]
 	}
-	if limit <= 0 || limit > DefaultRelatedLimit {
-		limit = DefaultRelatedLimit
-	}
 	if len(groups) == 0 {
-		return []memory.Memory{}, nil
+		return ContextResult{Memories: []memory.Memory{}, Complete: true}, nil
 	}
-	result, err := s.searchKeyword(ctx, groups, Request{Match: MatchAny}, Filters{
-		States: []memory.State{memory.StateActive},
-	}, limit, []string{}, false)
+	contextFilters := Filters{
+		States:          []memory.State{memory.StateActive, memory.StateArchived},
+		AssertionStatus: []memory.AssertionStatus{memory.AssertionAccepted, memory.AssertionPending},
+	}
+	result, err := s.searchKeyword(ctx, groups, Request{Match: MatchAny}, contextFilters, limit+1, nil, false)
+	if err != nil {
+		return ContextResult{}, err
+	}
+	items := make([]memory.Memory, 0, len(result.Items))
+	seen := make(map[string]struct{}, len(result.Items))
+	for _, item := range result.Items {
+		items = append(items, item.Memory)
+		seen[item.Memory.ID] = struct{}{}
+	}
+	warnings := []string{}
+	if s.encoder != nil {
+		// Semantic recall only supplements keyword context. A failure keeps the
+		// keyword context and records a stable degradation warning.
+		hits, warning, err := s.semanticCandidates(ctx, text, contextFilters, limit)
+		if err != nil {
+			return ContextResult{}, err
+		}
+		if warning != "" {
+			warnings = append(warnings, warning)
+		}
+		if len(hits) > 0 {
+			ids := make([]string, 0, len(hits))
+			for _, hit := range hits {
+				ids = append(ids, hit.MemoryID)
+			}
+			candidates, err := s.backend.LoadSearchCandidates(ctx, ids)
+			if err != nil {
+				return ContextResult{}, err
+			}
+			for _, hit := range hits {
+				candidate, ok := candidates[hit.MemoryID]
+				if !ok || candidate.Memory.State == memory.StateDeleted {
+					continue
+				}
+				if _, duplicate := seen[candidate.Memory.ID]; duplicate {
+					continue
+				}
+				seen[candidate.Memory.ID] = struct{}{}
+				items = append(items, candidate.Memory)
+			}
+		}
+	}
+	complete := len(items) <= limit
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return ContextResult{Memories: items, Complete: complete, Warnings: warnings}, nil
+}
+
+// FactTimeline returns the bounded timeline of one fact group.
+func (s *Service) FactTimeline(ctx context.Context, groupID string, limit int) (ContextResult, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	items, err := s.backend.FactTimeline(ctx, groupID, limit)
+	if err != nil {
+		return ContextResult{}, err
+	}
+	complete := len(items) <= limit
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return ContextResult{Memories: items, Complete: complete}, nil
+}
+
+// OpenConflictsForMemories exposes read-pool conflict discovery to ingest.
+func (s *Service) OpenConflictsForMemories(ctx context.Context, memoryIDs []string) ([]memory.Conflict, error) {
+	return s.backend.OpenConflictsForMemories(ctx, memoryIDs)
+}
+
+// MemoriesByIDs loads exact current snapshots for conflict-member context.
+func (s *Service) MemoriesByIDs(ctx context.Context, ids []string) ([]memory.Memory, error) {
+	candidates, err := s.backend.LoadSearchCandidates(ctx, ids)
 	if err != nil {
 		return nil, err
 	}
-	items := make([]memory.Memory, 0, len(result.Items))
-	for _, item := range result.Items {
-		items = append(items, item.Memory)
+	result := make([]memory.Memory, 0, len(candidates))
+	for _, candidate := range candidates {
+		result = append(result, candidate.Memory)
 	}
-	return items, nil
+	return result, nil
+}
+
+// CatalogGeneration returns the semantic catalog version used for optimistic
+// checks around a model call.
+func (s *Service) CatalogGeneration(ctx context.Context) (int64, error) {
+	return s.backend.CatalogGeneration(ctx)
+}
+
+// decorateConflicts runs an independent conflict discovery path over accepted
+// and pending members, attaches conflict references to returned items and emits
+// stable warnings. It never mixes pending text into ordinary items.
+func (s *Service) decorateConflicts(ctx context.Context, result Result, groups []Group, request Request, filters Filters) (Result, error) {
+	if result.Conflicts == nil {
+		result.Conflicts = []memory.ConflictSummary{}
+	}
+	for index := range result.Items {
+		if result.Items[index].ConflictRefs == nil {
+			result.Items[index].ConflictRefs = []memory.ConflictRef{}
+		}
+	}
+	if filters.AsOf == nil {
+		return result, nil
+	}
+	asOf := *filters.AsOf
+	expression, err := Compile(groups, normalizeMatch(request.Match))
+	if err != nil {
+		return Result{}, err
+	}
+	discoveryFilters := filters
+	discoveryFilters.AssertionStatus = []memory.AssertionStatus{
+		memory.AssertionAccepted,
+		memory.AssertionPending,
+	}
+	hits, err := s.backend.Search(ctx, Query{
+		Match:      normalizeMatch(request.Match),
+		Groups:     groups,
+		Expression: expression,
+		Filters:    discoveryFilters,
+		TopK:       CandidateLimitMax,
+	})
+	if err != nil {
+		return Result{}, err
+	}
+	ids := make([]string, 0, len(hits)+len(result.Items))
+	for _, hit := range hits {
+		ids = append(ids, hit.MemoryID)
+	}
+	for _, item := range result.Items {
+		ids = append(ids, item.Memory.ID)
+	}
+	conflicts, err := s.backend.OpenConflictsForMemories(ctx, ids)
+	if err != nil {
+		return Result{}, err
+	}
+	relevant, candidateByID, truncated, err := s.relevantConflicts(ctx, conflicts, asOf)
+	if err != nil {
+		return Result{}, err
+	}
+	if len(relevant) == 0 {
+		return result, nil
+	}
+	byMemory := make(map[string][]memory.ConflictRef)
+	summaries := make([]memory.ConflictSummary, 0, len(relevant))
+	for _, conflict := range relevant {
+		hasAccepted := false
+		memberIDs := make([]string, 0, len(conflict.Members))
+		for _, member := range conflict.Members {
+			memberIDs = append(memberIDs, member.MemoryID)
+			if candidate, ok := candidateByID[member.MemoryID]; ok && candidate.Memory.AssertionStatus == memory.AssertionAccepted {
+				hasAccepted = true
+			}
+			byMemory[member.MemoryID] = append(byMemory[member.MemoryID], memory.ConflictRef{
+				ID:         conflict.ID,
+				ReasonCode: conflict.ReasonCode,
+			})
+		}
+		summaries = append(summaries, memory.ConflictSummary{
+			ID:          conflict.ID,
+			ReasonCode:  conflict.ReasonCode,
+			MemberIDs:   memberIDs,
+			HasAccepted: hasAccepted,
+			FactGroupID: conflict.FactGroupID,
+		})
+	}
+	for index := range result.Items {
+		if refs, ok := byMemory[result.Items[index].Memory.ID]; ok {
+			result.Items[index].ConflictRefs = refs
+		}
+	}
+	result.Conflicts = summaries
+	result.Warnings = dedupeWarnings(append(result.Warnings, WarningFactConflict))
+	if truncated {
+		result.Warnings = dedupeWarnings(append(result.Warnings, WarningConflictResultsTruncated))
+	}
+	return result, nil
+}
+
+func (s *Service) relevantConflicts(ctx context.Context, conflicts []memory.Conflict, asOf time.Time) ([]memory.Conflict, map[string]Candidate, bool, error) {
+	if len(conflicts) == 0 {
+		return nil, nil, false, nil
+	}
+	ids := make([]string, 0, len(conflicts)*2)
+	for _, conflict := range conflicts {
+		for _, member := range conflict.Members {
+			ids = append(ids, member.MemoryID)
+		}
+	}
+	candidates, err := s.backend.LoadSearchCandidates(ctx, ids)
+	if err != nil {
+		return nil, nil, false, err
+	}
+
+	relevant := make([]memory.Conflict, 0, len(conflicts))
+	for _, conflict := range conflicts {
+		relates := false
+		for _, member := range conflict.Members {
+			candidate, ok := candidates[member.MemoryID]
+			if !ok {
+				continue
+			}
+			item := candidate.Memory
+			if item.AssertionStatus != memory.AssertionAccepted && item.AssertionStatus != memory.AssertionPending {
+				continue
+			}
+			if item.ValidFrom == nil || item.ValidTo == nil || memory.Contains(item.ValidFrom, item.ValidTo, asOf) {
+				relates = true
+				break
+			}
+		}
+		if relates {
+			relevant = append(relevant, conflict)
+		}
+	}
+	truncated := len(relevant) > 20
+	if truncated {
+		relevant = relevant[:20]
+	}
+	return relevant, candidates, truncated, nil
 }
 
 // RebuildIndex regenerates search documents from current business snapshots and
@@ -392,6 +638,9 @@ func sanitizeFilters(input Filters) (Filters, bool) {
 	output := input
 	output.Kinds = nil
 	output.States = nil
+	// Public recall is accepted-only. Pending and rejected text is available
+	// through conflict and management APIs, never through ordinary items.
+	output.AssertionStatus = []memory.AssertionStatus{memory.AssertionAccepted}
 
 	if len(input.Kinds) > 0 {
 		seen := make(map[memory.Kind]struct{}, len(input.Kinds))
@@ -447,7 +696,25 @@ func matchesFilters(item memory.Memory, filters Filters) bool {
 	if filters.UpdatedBefore != nil && item.UpdatedAt.After(*filters.UpdatedBefore) {
 		return false
 	}
+	if len(filters.AssertionStatus) > 0 && !containsAssertion(filters.AssertionStatus, item.AssertionStatus) {
+		return false
+	}
+	if filters.ScopeKey != "" && item.ScopeKey != filters.ScopeKey && item.ScopeKey != "user" {
+		return false
+	}
+	if filters.AsOf != nil && !memory.Contains(item.ValidFrom, item.ValidTo, *filters.AsOf) {
+		return false
+	}
 	return true
+}
+
+func containsAssertion(statuses []memory.AssertionStatus, status memory.AssertionStatus) bool {
+	for _, candidate := range statuses {
+		if candidate == status {
+			return true
+		}
+	}
+	return false
 }
 
 func validKind(kind memory.Kind) bool {

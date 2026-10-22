@@ -170,3 +170,66 @@ func queryTime(value string) *time.Time {
 	utc := parsed.UTC()
 	return &utc
 }
+
+// rawTimeStrict distinguishes a missing filter from an explicitly malformed
+// RFC3339 value. Invalid explicit times must become 400, never silently become
+// "now".
+func rawTimeStrict(object map[string]json.RawMessage, key string) (*time.Time, bool) {
+	raw, exists := object[key]
+	if !exists {
+		return nil, true
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, false
+	}
+	if strings.TrimSpace(value) == "" {
+		return nil, true
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return nil, false
+	}
+	utc := parsed.UTC()
+	return &utc, true
+}
+
+// queryTimeStrict is the query-string variant for management filters.
+func queryTimeStrict(value string) (*time.Time, bool) {
+	if strings.TrimSpace(value) == "" {
+		return nil, true
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return nil, false
+	}
+	utc := parsed.UTC()
+	return &utc, true
+}
+
+// parseAssertionStatuses validates management assertion filters.
+func parseAssertionStatuses(values []string) ([]memory.AssertionStatus, bool) {
+	raw := splitQueryValues(values)
+	if len(raw) == 0 {
+		return nil, false
+	}
+	result := make([]memory.AssertionStatus, 0, len(raw))
+	seen := make(map[memory.AssertionStatus]struct{}, len(raw))
+	for _, value := range raw {
+		status := memory.AssertionStatus(value)
+		switch status {
+		case memory.AssertionAccepted, memory.AssertionPending, memory.AssertionRejected:
+		default:
+			continue
+		}
+		if _, duplicate := seen[status]; duplicate {
+			continue
+		}
+		seen[status] = struct{}{}
+		result = append(result, status)
+	}
+	if len(result) == 0 {
+		return nil, true
+	}
+	return result, false
+}

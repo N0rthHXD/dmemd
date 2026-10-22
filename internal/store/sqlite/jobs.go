@@ -11,7 +11,8 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/ingest"
 )
 
-const jobColumns = `id, source_id, status, attempts, next_attempt_at, error, memory_ids,
+const jobColumns = `id, source_id, status, attempts, protocol_failures, wait_reason,
+	next_attempt_at, error, memory_ids, conflict_ids, pending_memory_ids, warnings,
 	created_at, updated_at, started_at, finished_at`
 
 // GetJob reads a job directly from the read pool.
@@ -38,11 +39,13 @@ func getJob(ctx context.Context, q interface {
 
 func scanJob(row rowScanner) (ingest.Job, error) {
 	var item ingest.Job
-	var status, memoryIDs, createdAt, updatedAt string
+	var status, memoryIDs, conflictIDs, pendingIDs, warnings, createdAt, updatedAt string
 	var nextAttempt, startedAt, finishedAt sql.NullString
 	if err := row.Scan(
-		&item.ID, &item.SourceID, &status, &item.Attempts, &nextAttempt, &item.Error,
-		&memoryIDs, &createdAt, &updatedAt, &startedAt, &finishedAt,
+		&item.ID, &item.SourceID, &status, &item.Attempts, &item.ProtocolFailures, &item.WaitReason,
+		&nextAttempt, &item.Error,
+		&memoryIDs, &conflictIDs, &pendingIDs, &warnings,
+		&createdAt, &updatedAt, &startedAt, &finishedAt,
 	); err != nil {
 		return ingest.Job{}, err
 	}
@@ -55,6 +58,33 @@ func scanJob(row rowScanner) (ingest.Job, error) {
 	}
 	if item.MemoryIDs == nil {
 		item.MemoryIDs = []string{}
+	}
+	if conflictIDs == "" {
+		conflictIDs = "[]"
+	}
+	if err := json.Unmarshal([]byte(conflictIDs), &item.ConflictIDs); err != nil {
+		return ingest.Job{}, fmt.Errorf("解析任务 %s 的冲突结果: %w", item.ID, err)
+	}
+	if item.ConflictIDs == nil {
+		item.ConflictIDs = []string{}
+	}
+	if pendingIDs == "" {
+		pendingIDs = "[]"
+	}
+	if err := json.Unmarshal([]byte(pendingIDs), &item.PendingMemoryIDs); err != nil {
+		return ingest.Job{}, fmt.Errorf("解析任务 %s 的待确认结果: %w", item.ID, err)
+	}
+	if item.PendingMemoryIDs == nil {
+		item.PendingMemoryIDs = []string{}
+	}
+	if warnings == "" {
+		warnings = "[]"
+	}
+	if err := json.Unmarshal([]byte(warnings), &item.Warnings); err != nil {
+		return ingest.Job{}, fmt.Errorf("解析任务 %s 的警告: %w", item.ID, err)
+	}
+	if item.Warnings == nil {
+		item.Warnings = []string{}
 	}
 	var err error
 	if item.NextAttemptAt, err = nullableTime(nextAttempt); err != nil {
@@ -76,14 +106,16 @@ func scanJob(row rowScanner) (ingest.Job, error) {
 }
 
 func (t *Tx) InsertJob(ctx context.Context, item ingest.Job) error {
-	memoryIDs, err := encodeMemoryIDs(item.MemoryIDs)
+	memoryIDs, conflictIDs, pendingIDs, warnings, err := encodeJobResults(item)
 	if err != nil {
 		return err
 	}
 	_, err = t.tx.ExecContext(ctx, `INSERT INTO ingest_jobs(`+jobColumns+`) VALUES
-		(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		item.ID, item.SourceID, string(item.Status), item.Attempts, timeValue(item.NextAttemptAt),
-		item.Error, memoryIDs, formatTime(item.CreatedAt), formatTime(item.UpdatedAt),
+		(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		item.ID, item.SourceID, string(item.Status), item.Attempts, item.ProtocolFailures,
+		item.WaitReason, timeValue(item.NextAttemptAt),
+		item.Error, memoryIDs, conflictIDs, pendingIDs, warnings,
+		formatTime(item.CreatedAt), formatTime(item.UpdatedAt),
 		timeValue(item.StartedAt), timeValue(item.FinishedAt),
 	)
 	if err != nil {
@@ -95,16 +127,19 @@ func (t *Tx) InsertJob(ctx context.Context, item ingest.Job) error {
 // UpdateJob persists the complete mutable job state, including terminal status,
 // attempt count, sanitized error and result summary.
 func (t *Tx) UpdateJob(ctx context.Context, item ingest.Job) error {
-	memoryIDs, err := encodeMemoryIDs(item.MemoryIDs)
+	memoryIDs, conflictIDs, pendingIDs, warnings, err := encodeJobResults(item)
 	if err != nil {
 		return err
 	}
 	result, err := t.tx.ExecContext(ctx, `UPDATE ingest_jobs SET
-		source_id = ?, status = ?, attempts = ?, next_attempt_at = ?, error = ?,
-		memory_ids = ?, updated_at = ?, started_at = ?, finished_at = ?
+		source_id = ?, status = ?, attempts = ?, protocol_failures = ?, wait_reason = ?,
+		next_attempt_at = ?, error = ?,
+		memory_ids = ?, conflict_ids = ?, pending_memory_ids = ?, warnings = ?,
+		updated_at = ?, started_at = ?, finished_at = ?
 		WHERE id = ?`,
-		item.SourceID, string(item.Status), item.Attempts, timeValue(item.NextAttemptAt),
-		item.Error, memoryIDs, formatTime(item.UpdatedAt), timeValue(item.StartedAt),
+		item.SourceID, string(item.Status), item.Attempts, item.ProtocolFailures, item.WaitReason,
+		timeValue(item.NextAttemptAt), item.Error, memoryIDs, conflictIDs, pendingIDs, warnings,
+		formatTime(item.UpdatedAt), timeValue(item.StartedAt),
 		timeValue(item.FinishedAt), item.ID,
 	)
 	if err != nil {
@@ -125,9 +160,11 @@ func (t *Tx) UpdateJob(ctx context.Context, item ingest.Job) error {
 // holds the short write transaction.
 func (t *Tx) ClaimNextJob(ctx context.Context, now time.Time) (ingest.Job, bool, error) {
 	row := t.tx.QueryRowContext(ctx, `SELECT `+jobColumns+` FROM ingest_jobs
-		WHERE status = ? AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+		WHERE (status = ? OR (status = ? AND wait_reason <> ?))
+		AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
 		ORDER BY created_at ASC, id ASC
-		LIMIT 1`, string(ingest.JobQueued), formatTime(now))
+		LIMIT 1`, string(ingest.JobQueued), string(ingest.JobWaiting),
+		ingest.WaitReasonConfiguration, formatTime(now))
 	item, err := scanJob(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ingest.Job{}, false, nil
@@ -137,11 +174,12 @@ func (t *Tx) ClaimNextJob(ctx context.Context, now time.Time) (ingest.Job, bool,
 	}
 
 	result, err := t.tx.ExecContext(ctx, `UPDATE ingest_jobs SET
-		status = ?, attempts = attempts + 1, next_attempt_at = NULL,
+		status = ?, attempts = attempts + 1, next_attempt_at = NULL, wait_reason = '',
 		updated_at = ?, started_at = COALESCE(started_at, ?), finished_at = NULL
-		WHERE id = ? AND status = ?`,
+		WHERE id = ? AND (status = ? OR (status = ? AND wait_reason <> ?))`,
 		string(ingest.JobRunning), formatTime(now), formatTime(now),
-		item.ID, string(ingest.JobQueued),
+		item.ID, string(ingest.JobQueued), string(ingest.JobWaiting),
+		ingest.WaitReasonConfiguration,
 	)
 	if err != nil {
 		return ingest.Job{}, false, fmt.Errorf("领取任务 %s: %w", item.ID, err)
@@ -165,7 +203,7 @@ func (t *Tx) ClaimNextJob(ctx context.Context, now time.Time) (ingest.Job, bool,
 // is reset.
 func (t *Tx) RequeueRunningJobs(ctx context.Context, now time.Time) (int64, error) {
 	result, err := t.tx.ExecContext(ctx, `UPDATE ingest_jobs SET
-		status = ?, next_attempt_at = ?, updated_at = ?, finished_at = NULL
+		status = ?, next_attempt_at = ?, wait_reason = '', updated_at = ?, finished_at = NULL
 		WHERE status = ?`,
 		string(ingest.JobQueued), formatTime(now), formatTime(now), string(ingest.JobRunning),
 	)
@@ -179,35 +217,71 @@ func (t *Tx) RequeueRunningJobs(ctx context.Context, now time.Time) (int64, erro
 	return count, nil
 }
 
-// FailExhaustedJobs marks queued jobs whose persisted attempt count already
-// reached the retry budget as failed. Startup recovery calls this after
-// RequeueRunningJobs so an interrupted final attempt is never retried a fourth
-// time.
-func (t *Tx) FailExhaustedJobs(ctx context.Context, maxAttempts int, reason string, now time.Time) (int64, error) {
-	if maxAttempts <= 0 {
-		return 0, nil
-	}
+// RequeueWaitingConfigurationJobs retries jobs parked on configuration or
+// credential errors after a restart, when the process may have loaded a
+// different configuration. Transient backoff and terminal states are untouched.
+func (t *Tx) RequeueWaitingConfigurationJobs(ctx context.Context, now time.Time) (int64, error) {
 	result, err := t.tx.ExecContext(ctx, `UPDATE ingest_jobs SET
-		status = ?, error = ?, next_attempt_at = NULL, updated_at = ?, finished_at = ?
-		WHERE status = ? AND attempts >= ?`,
-		string(ingest.JobFailed), reason, formatTime(now), formatTime(now),
-		string(ingest.JobQueued), maxAttempts,
+		status = ?, next_attempt_at = ?, wait_reason = '', updated_at = ?, finished_at = NULL
+		WHERE status = ? AND wait_reason = ?`,
+		string(ingest.JobQueued), formatTime(now), formatTime(now),
+		string(ingest.JobWaiting), ingest.WaitReasonConfiguration,
 	)
 	if err != nil {
-		return 0, fmt.Errorf("标记耗尽重试预算的任务: %w", err)
+		return 0, fmt.Errorf("恢复配置等待任务: %w", err)
 	}
 	count, err := result.RowsAffected()
 	if err != nil {
-		return 0, fmt.Errorf("标记耗尽重试预算的任务: %w", err)
+		return 0, fmt.Errorf("恢复配置等待任务: %w", err)
 	}
 	return count, nil
 }
 
-func encodeMemoryIDs(ids []string) (string, error) {
-	if ids == nil {
+// RequeueProtocolFailedJobs gives jobs isolated after repeated protocol errors
+// one fresh evaluation after a restart, when the model or protocol version may
+// have changed. Transient waiting jobs keep their own schedule.
+func (t *Tx) RequeueProtocolFailedJobs(ctx context.Context, now time.Time) (int64, error) {
+	result, err := t.tx.ExecContext(ctx, `UPDATE ingest_jobs SET
+		status = ?, protocol_failures = 0, next_attempt_at = ?, wait_reason = '',
+		updated_at = ?, finished_at = NULL
+		WHERE status = ?`,
+		string(ingest.JobQueued), formatTime(now), formatTime(now), string(ingest.JobFailed),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("恢复协议失败任务: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("恢复协议失败任务: %w", err)
+	}
+	return count, nil
+}
+
+func encodeJobResults(item ingest.Job) (string, string, string, string, error) {
+	memoryIDs, err := encodeStringList(item.MemoryIDs)
+	if err != nil {
+		return "", "", "", "", err
+	}
+	conflictIDs, err := encodeStringList(item.ConflictIDs)
+	if err != nil {
+		return "", "", "", "", err
+	}
+	pendingIDs, err := encodeStringList(item.PendingMemoryIDs)
+	if err != nil {
+		return "", "", "", "", err
+	}
+	warnings, err := encodeStringList(item.Warnings)
+	if err != nil {
+		return "", "", "", "", err
+	}
+	return memoryIDs, conflictIDs, pendingIDs, warnings, nil
+}
+
+func encodeStringList(values []string) (string, error) {
+	if values == nil {
 		return "[]", nil
 	}
-	data, err := json.Marshal(ids)
+	data, err := json.Marshal(values)
 	if err != nil {
 		return "", fmt.Errorf("序列化任务结果: %w", err)
 	}

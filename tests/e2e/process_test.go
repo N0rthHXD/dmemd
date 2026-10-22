@@ -159,7 +159,7 @@ func writeConfig(t *testing.T, path, dataDir, databasePath, listen, modelURL str
 		"worker": map[string]any{
 			"workers":      1,
 			"max_attempts": 3,
-			"retry_delays": []string{"10ms", "20ms"},
+			"retry_delays": []string{"10ms", "20ms", "30ms"},
 		},
 		"log": map[string]any{"level": "info"},
 	}
@@ -246,7 +246,7 @@ func waitJob(t *testing.T, client *http.Client, baseURL, jobID string) map[strin
 	return nil
 }
 
-func TestP6ProcessSingleInstanceShutdownAndRestart(t *testing.T) {
+func TestProcessSingleInstanceShutdownAndRestart(t *testing.T) {
 	binary := buildBinary(t)
 	root := t.TempDir()
 	dataDir := filepath.Join(root, "data")

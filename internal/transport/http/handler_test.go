@@ -49,12 +49,12 @@ func (s stubMemory) Restore(ctx context.Context, input memory.RestoreInput) (mem
 }
 
 type stubSearch struct {
-	retrieval.SearchService
-	search func(context.Context, retrieval.Request) (retrieval.Result, error)
+	retrieval.RecallService
+	recall func(context.Context, retrieval.RecallRequest) (retrieval.RecallResult, error)
 }
 
-func (s stubSearch) Search(ctx context.Context, request retrieval.Request) (retrieval.Result, error) {
-	return s.search(ctx, request)
+func (s stubSearch) Recall(ctx context.Context, request retrieval.RecallRequest) (retrieval.RecallResult, error) {
+	return s.recall(ctx, request)
 }
 
 func serve(t *testing.T, services Services, ready func(context.Context) error, request *http.Request) *httptest.ResponseRecorder {
@@ -191,14 +191,14 @@ func TestSetStateIgnoresContentAndRecallParsing(t *testing.T) {
 			state = gotState
 			return memory.Memory{ID: id, State: gotState, Version: 2}, nil
 		}},
-		Search: stubSearch{search: func(_ context.Context, request retrieval.Request) (retrieval.Result, error) {
+		Search: stubSearch{recall: func(_ context.Context, request retrieval.RecallRequest) (retrieval.RecallResult, error) {
 			if request.Query != "回答 语言" || request.Match != retrieval.MatchAny || request.TopK != 5 || !request.Explain {
 				t.Fatalf("search request = %+v", request)
 			}
 			if len(request.Filters.Kinds) != 1 || request.Filters.Kinds[0] != memory.KindPreference {
 				t.Fatalf("filters = %+v", request.Filters)
 			}
-			return retrieval.Result{Items: []retrieval.Item{}}, nil
+			return retrieval.RecallResult{Memories: []retrieval.Item{}}, nil
 		}},
 	}
 	response := serve(t, services, nil, httptest.NewRequest(http.MethodPatch, "/v1/memories/"+id+"/state",
@@ -209,7 +209,7 @@ func TestSetStateIgnoresContentAndRecallParsing(t *testing.T) {
 
 	response = serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/recall",
 		strings.NewReader(`{"query":"回答 语言","match":"any","filters":{"kinds":["preference"]},"top_k":5,"explain":true}`)))
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"items":[]`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"memories":[]`) {
 		t.Fatalf("recall = %d %q", response.Code, response.Body.String())
 	}
 }

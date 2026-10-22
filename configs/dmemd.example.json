@@ -25,9 +25,17 @@
     "workers": 1,
     "max_attempts": 3,
     "retry_delays": [
-      "1s",
-      "5s"
+      "5s",
+      "30s",
+      "2m"
     ]
+  },
+  "governance": {
+    "enabled": true,
+    "debounce": "30s",
+    "reconcile_interval": "15m",
+    "min_call_interval": "2m",
+    "max_inputs": 64
   },
   "log": {
     "level": "info"

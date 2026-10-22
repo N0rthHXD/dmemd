@@ -118,6 +118,55 @@ func (s *Store) LoadSearchAssemblies(ctx context.Context, keys []retrieval.Versi
 	return result, nil
 }
 
+// ListRelationsForMemory is the read-pool relation lookup used by memory
+// details.
+func (s *Store) ListRelationsForMemory(ctx context.Context, memoryID string) ([]memory.Relation, error) {
+	return listRelationsForMemory(ctx, s.reader, memoryID)
+}
+
+// OpenConflictsForMemories is the read-pool conflict discovery capability used
+// by recall. It deliberately has no as-of filter; the retrieval layer decides
+// whether a conflict's known time range touches the query instant.
+func (s *Store) OpenConflictsForMemories(ctx context.Context, memoryIDs []string) ([]memory.Conflict, error) {
+	return listOpenConflictsForMemories(ctx, s.reader, memoryIDs)
+}
+
+// CatalogGeneration is the read-pool semantic catalog version.
+func (s *Store) CatalogGeneration(ctx context.Context) (int64, error) {
+	return s.GetCatalogGeneration(ctx)
+}
+
+// FactTimeline reads all non-deleted members of a group, bounded by limit+1 so
+// callers can detect truncation.
+func (s *Store) FactTimeline(ctx context.Context, groupID string, limit int) ([]memory.Memory, error) {
+	if groupID == "" {
+		return []memory.Memory{}, nil
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.reader.QueryContext(ctx, `SELECT `+memoryColumns+` FROM memories
+		WHERE fact_group_id = ? AND state <> ?
+		ORDER BY valid_from ASC, updated_at ASC, id ASC LIMIT ?`,
+		groupID, string(memory.StateDeleted), limit+1)
+	if err != nil {
+		return nil, fmt.Errorf("读取事实组时间线 %s: %w", groupID, err)
+	}
+	defer rows.Close()
+	items := []memory.Memory{}
+	for rows.Next() {
+		item, err := scanMemory(rows)
+		if err != nil {
+			return nil, fmt.Errorf("读取事实组时间线 %s: %w", groupID, err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("读取事实组时间线 %s: %w", groupID, err)
+	}
+	return items, nil
+}
+
 func uniqueIDs(ids []string) []string {
 	seen := make(map[string]struct{}, len(ids))
 	result := make([]string, 0, len(ids))

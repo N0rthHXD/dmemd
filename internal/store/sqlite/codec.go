@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -46,4 +47,29 @@ func boolInt(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+func encodeTopics(values []string) (string, error) {
+	if values == nil {
+		return "[]", nil
+	}
+	data, err := json.Marshal(values)
+	if err != nil {
+		return "", fmt.Errorf("序列化主题标签: %w", err)
+	}
+	return string(data), nil
+}
+
+func decodeTopics(value string) ([]string, error) {
+	if value == "" {
+		return []string{}, nil
+	}
+	var topics []string
+	if err := json.Unmarshal([]byte(value), &topics); err != nil {
+		return nil, fmt.Errorf("解析主题标签: %w", err)
+	}
+	if topics == nil {
+		topics = []string{}
+	}
+	return topics, nil
 }

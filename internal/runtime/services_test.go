@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/N0rthHXD/dmemd/internal/artifact"
+	"github.com/N0rthHXD/dmemd/internal/governance"
+	"github.com/N0rthHXD/dmemd/internal/governance/task"
 	"github.com/N0rthHXD/dmemd/internal/ingest"
 	"github.com/N0rthHXD/dmemd/internal/memory"
 	"github.com/N0rthHXD/dmemd/internal/retrieval"
@@ -84,6 +87,56 @@ func TestProductionIngestAssembly(t *testing.T) {
 	}
 }
 
+func TestProductionIngestAndGovernanceClassifyAssembly(t *testing.T) {
+	store := testutil.NewStore(t)
+	fake := testutil.NewFakeModel(t)
+	fake.EnqueueCandidates([]any{map[string]any{"content": "项目使用 SQLite 保存记忆。"}})
+	fake.EnqueueContent(`{"topics":["Go","sqlite"]}`)
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Database.Path = store.Path()
+	cfg.Listen = "127.0.0.1:0"
+	cfg.Model.Name = "test-model"
+	cfg.Model.BaseURL = fake.URL()
+	cfg.Model.Timeout = Duration(5 * time.Second)
+	cfg.Governance.Debounce = 0
+	cfg.Governance.MinCallInterval = 0
+	stack, err := NewStack(cfg, discardLogger(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stack.GovernanceWorker == nil {
+		t.Fatal("governance worker missing from stack")
+	}
+	receipt, err := stack.Services.Ingest.Submit(context.Background(), ingest.Submission{
+		ScopeKey: "project:dmemd",
+		Content:  []byte(`"项目使用 SQLite 保存记忆。"`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := stack.Worker.ProcessOne(context.Background()); err != nil || !processed {
+		t.Fatalf("ingest processed=%v err=%v", processed, err)
+	}
+	job, err := stack.Services.Ingest.GetJob(context.Background(), receipt.JobID)
+	if err != nil || job.Status != ingest.JobSucceeded || len(job.MemoryIDs) != 1 {
+		t.Fatalf("ingest job = %+v err=%v", job, err)
+	}
+	if processed, err := stack.GovernanceWorker.ProcessOne(context.Background()); err != nil || !processed {
+		t.Fatalf("governance processed=%v err=%v", processed, err)
+	}
+	item, err := stack.Services.Memories.Get(context.Background(), job.MemoryIDs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.ScopeKey != "project:dmemd" || len(item.Topics) != 2 || item.Topics[0] != "go" || item.Topics[1] != "sqlite" {
+		t.Fatalf("classified item = %+v", item)
+	}
+	if item.Version != 2 {
+		t.Fatalf("classified version = %d, want 2", item.Version)
+	}
+}
+
 func TestIngestWorkerRejectsMultipleWorkers(t *testing.T) {
 	store := testutil.NewStore(t)
 	processor := NewIngestProcessor(store, NewMemoryService(store), NewSearchService(store, discardLogger()), nil, "test", discardLogger())
@@ -141,7 +194,11 @@ func TestEmbeddingAssemblyIndexesAndSearchesSemantically(t *testing.T) {
 		t.Fatalf("embedding processed = %v, err = %v", processed, err)
 	}
 
-	result, err := stack.Services.Search.Search(context.Background(), retrieval.Request{
+	searchService, ok := stack.Services.Search.(*retrieval.Service)
+	if !ok {
+		t.Fatalf("search service type = %T", stack.Services.Search)
+	}
+	result, err := searchService.Search(context.Background(), retrieval.Request{
 		Query: "吃饭有什么忌口", Mode: retrieval.ModeHybrid, TopK: 5,
 	})
 	if err != nil {
@@ -163,6 +220,145 @@ func TestEmbeddingAssemblyIndexesAndSearchesSemantically(t *testing.T) {
 	}
 	if documents != 1 {
 		t.Fatalf("embedding rows = %d", documents)
+	}
+}
+
+func TestProductionExperienceAndSkillAssembly(t *testing.T) {
+	store := testutil.NewStore(t)
+	fake := testutil.NewFakeModel(t)
+	fake.EnqueueContent(`{"problem":"验证修改","actions":["运行 go test"],"lessons":["先测试"],"content":"问题：验证修改。\n行动：运行 go test。"}`)
+	fake.EnqueueContent(`{"name":"验证工作流","description":"修改后的验证","content":"## 步骤\n1. 运行 go test。","steps":["运行 go test"]}`)
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Database.Path = store.Path()
+	cfg.Listen = "127.0.0.1:0"
+	cfg.Model.Name = "test-model"
+	cfg.Model.BaseURL = fake.URL()
+	cfg.Model.Timeout = Duration(5 * time.Second)
+	cfg.Governance.Debounce = 0
+	cfg.Governance.MinCallInterval = 0
+	stack, err := NewStack(cfg, discardLogger(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		processed, err := stack.GovernanceWorker.ProcessOne(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !processed {
+			break
+		}
+	}
+
+	receipt, err := stack.Services.Experiences.Submit(context.Background(), governance.ExperienceSubmission{
+		RunID:    "run-1",
+		ScopeKey: "project:dmemd",
+		Goal:     "验证修改",
+		Actions:  []string{"运行 go test"},
+		Outcome:  governance.OutcomeSuccess,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		processed, err := stack.GovernanceWorker.ProcessOne(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !processed {
+			break
+		}
+	}
+	caseArtifact, err := store.GetArtifactByTarget(context.Background(), artifact.KindExperienceCase,
+		task.ExperienceKey(receipt.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if caseArtifact.State != artifact.StateActive || caseArtifact.CurrentVersion != 1 {
+		t.Fatalf("experience case = %+v", caseArtifact)
+	}
+	skillArtifact, err := store.GetArtifactByTarget(context.Background(), artifact.KindSkill,
+		task.SkillKey("project:dmemd", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skillArtifact.State != artifact.StateActive || skillArtifact.CurrentVersion != 1 {
+		t.Fatalf("skill = %+v", skillArtifact)
+	}
+	content, err := stack.Services.Skills.Get(context.Background(), skillArtifact.ID, 0)
+	if err != nil || !strings.Contains(content.Content, "name:") {
+		t.Fatalf("skill content = %+v err=%v", content, err)
+	}
+	if fake.RequestCount() != 2 {
+		t.Fatalf("model calls = %d, want 2", fake.RequestCount())
+	}
+	requests := fake.Requests()
+	if !strings.Contains(string(requests[0].Body), "application-reported result") ||
+		!strings.Contains(string(requests[1].Body), "guidance-only skill") {
+		t.Fatalf("model prompts = %s / %s", requests[0].Body, requests[1].Body)
+	}
+
+	recall, err := stack.Services.Search.Recall(context.Background(), retrieval.RecallRequest{
+		Query: "验证", ScopeKey: "project:dmemd",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recall.Experiences) != 1 || len(recall.Skills) != 1 {
+		t.Fatalf("recall = %+v", recall)
+	}
+	if _, err := stack.Services.Experiences.Retract(context.Background(), receipt.ID); err != nil {
+		t.Fatal(err)
+	}
+	if skill, err := store.GetArtifactByTarget(context.Background(), artifact.KindSkill,
+		task.SkillKey("project:dmemd", "")); err != nil || skill.State != artifact.StateStale {
+		t.Fatalf("skill after retract = %+v err=%v", skill, err)
+	}
+	for i := 0; i < 10; i++ {
+		processed, err := stack.GovernanceWorker.ProcessOne(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !processed {
+			break
+		}
+	}
+	after, err := stack.Services.Search.Recall(context.Background(), retrieval.RecallRequest{
+		Query: "验证", ScopeKey: "project:dmemd",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Experiences) != 0 || len(after.Skills) != 0 {
+		t.Fatalf("revoked experience remained recallable: %+v", after)
+	}
+}
+
+func TestGovernanceDisabledKeepsAtomicServicesAvailable(t *testing.T) {
+	store := testutil.NewStore(t)
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Database.Path = store.Path()
+	cfg.Listen = "127.0.0.1:0"
+	disabled := false
+	cfg.Governance.Enabled = &disabled
+	stack, err := NewStack(cfg, discardLogger(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stack.GovernanceWorker != nil {
+		t.Fatal("governance worker started while disabled")
+	}
+	if stack.Services.Search == nil || stack.Services.Memories == nil || stack.Services.Forget == nil {
+		t.Fatal("atomic or management services missing while governance is disabled")
+	}
+	result, err := stack.Services.Search.Recall(context.Background(), retrieval.RecallRequest{Query: "任意内容"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Memories) != 0 || len(result.Summaries) != 0 || len(result.Skills) != 0 {
+		t.Fatalf("empty recall = %+v", result)
 	}
 }
 

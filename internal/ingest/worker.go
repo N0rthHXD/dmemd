@@ -13,10 +13,10 @@ import (
 const (
 	defaultWorkerMaxAttempts  = 3
 	defaultWorkerPollInterval = 100 * time.Millisecond
-	retryExhaustedSummary     = "retry attempts exhausted"
+	defaultMaxRetryDelay      = 30 * time.Minute
 )
 
-var defaultWorkerRetryDelays = []time.Duration{time.Second, 5 * time.Second}
+var defaultWorkerRetryDelays = []time.Duration{5 * time.Second, 30 * time.Second, 2 * time.Minute}
 
 // JobProcessor executes one claimed job. Processor implements this interface.
 type JobProcessor interface {
@@ -59,8 +59,8 @@ func WithWorkerLogger(logger *slog.Logger) WorkerOption {
 	}
 }
 
-// WithMaxAttempts overrides the total attempt budget. Production runtime keeps
-// the architecture-fixed value of three.
+// WithMaxAttempts overrides the consecutive protocol-failure limit. Transient
+// network failures are never capped by this value; they wait and resume.
 func WithMaxAttempts(maxAttempts int) WorkerOption {
 	return func(worker *Worker) {
 		if maxAttempts > 0 {
@@ -105,31 +105,37 @@ func NewWorker(store Store, jobs JobReader, processor JobProcessor, options ...W
 	return worker
 }
 
-// Recover requeues leftover running jobs with their attempt counts intact and
-// fails queued jobs whose budget is already exhausted. It is safe to call more
-// than once and does not touch succeeded or cancelled jobs.
+// Recover requeues leftover running jobs, re-evaluates configuration-blocked
+// jobs, and gives protocol-isolated jobs one fresh evaluation after a restart.
+// It is safe to call more than once and does not touch succeeded or cancelled
+// jobs.
 func (w *Worker) Recover(ctx context.Context) error {
 	if w.store == nil {
 		return errors.New("ingest: worker store not configured")
 	}
 	now := w.now().UTC()
-	var requeued, failed int64
+	var requeued, configuration, protocolFailed int64
 	err := w.store.WithTx(ctx, func(ctx context.Context, tx Tx) error {
 		var err error
 		requeued, err = tx.RequeueRunningJobs(ctx, now)
 		if err != nil {
 			return err
 		}
-		failed, err = tx.FailExhaustedJobs(ctx, w.maxAttempts, retryExhaustedSummary, now)
+		configuration, err = tx.RequeueWaitingConfigurationJobs(ctx, now)
+		if err != nil {
+			return err
+		}
+		protocolFailed, err = tx.RequeueProtocolFailedJobs(ctx, now)
 		return err
 	})
 	if err != nil {
 		return fmt.Errorf("恢复遗留任务: %w", err)
 	}
-	if requeued > 0 || failed > 0 {
+	if requeued > 0 || configuration > 0 || protocolFailed > 0 {
 		w.logger.Info("ingest recovery completed",
 			"requeued", requeued,
-			"failed_exhausted", failed,
+			"configuration_retry", configuration,
+			"protocol_retry", protocolFailed,
 		)
 	}
 	return nil
@@ -188,10 +194,10 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 	if !found {
 		return false, nil
 	}
-	if claimed.Attempts > w.maxAttempts {
-		// Defensive path for an externally queued job that already exceeded the
-		// budget. It must never reach the model a fourth time.
-		return true, w.failExhausted(claimed)
+	if claimed.ProtocolFailures >= w.maxAttempts {
+		// Defensive path for a job that somehow stayed queued after reaching the
+		// protocol-failure limit. It must not reach the model again.
+		return true, w.failProtocol(claimed)
 	}
 
 	started := time.Now()
@@ -225,7 +231,7 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 func (w *Worker) handleFailure(ctx context.Context, claimed Job, cause error) error {
 	now := w.now().UTC()
 	summary := safeErrorSummary(cause)
-	retryable := isRetryable(cause)
+	kind := failureKind(cause)
 	return w.store.WithTx(ctx, func(ctx context.Context, tx Tx) error {
 		current, err := tx.GetJob(ctx, claimed.ID)
 		if err != nil {
@@ -238,20 +244,36 @@ func (w *Worker) handleFailure(ctx context.Context, claimed Job, cause error) er
 		current.UpdatedAt = now
 		current.Error = summary
 		current.NextAttemptAt = nil
-		if !retryable || current.Attempts >= w.maxAttempts {
-			current.Status = JobFailed
-			current.FinishedAt = &now
-		} else {
-			current.Status = JobQueued
-			next := now.Add(w.retryDelay(current.Attempts))
+		current.WaitReason = ""
+		current.FinishedAt = nil
+		switch kind {
+		case "configuration":
+			// Credentials and request configuration are not probed at high
+			// frequency. The job is parked and reevaluated after a restart.
+			current.Status = JobWaiting
+			current.WaitReason = WaitReasonConfiguration
+		case "protocol":
+			current.ProtocolFailures++
+			if current.ProtocolFailures >= w.maxAttempts {
+				current.Status = JobFailed
+				current.FinishedAt = &now
+				break
+			}
+			next := now.Add(w.failureDelay(current.ProtocolFailures))
+			current.Status = JobWaiting
+			current.WaitReason = WaitReasonProtocol
 			current.NextAttemptAt = &next
-			current.FinishedAt = nil
+		default:
+			next := now.Add(w.failureDelay(current.Attempts))
+			current.Status = JobWaiting
+			current.WaitReason = WaitReasonTransient
+			current.NextAttemptAt = &next
 		}
 		return tx.UpdateJob(ctx, current)
 	})
 }
 
-func (w *Worker) failExhausted(claimed Job) error {
+func (w *Worker) failProtocol(claimed Job) error {
 	now := w.now().UTC()
 	return w.store.WithTx(context.Background(), func(ctx context.Context, tx Tx) error {
 		current, err := tx.GetJob(ctx, claimed.ID)
@@ -263,8 +285,9 @@ func (w *Worker) failExhausted(claimed Job) error {
 			return nil
 		}
 		current.Status = JobFailed
-		current.Error = retryExhaustedSummary
+		current.Error = safeErrorSummary(&ProviderError{Operation: "protocol"})
 		current.NextAttemptAt = nil
+		current.WaitReason = ""
 		current.UpdatedAt = now
 		current.FinishedAt = &now
 		return tx.UpdateJob(ctx, current)
@@ -286,6 +309,7 @@ func (w *Worker) requeueAfterStop(claimed Job) {
 		}
 		current.Status = JobQueued
 		current.NextAttemptAt = &now
+		current.WaitReason = ""
 		current.UpdatedAt = now
 		current.FinishedAt = nil
 		return tx.UpdateJob(ctx, current)
@@ -295,16 +319,16 @@ func (w *Worker) requeueAfterStop(claimed Job) {
 	}
 }
 
-func (w *Worker) retryDelay(attempt int) time.Duration {
+func (w *Worker) failureDelay(failures int) time.Duration {
 	if len(w.retryDelays) == 0 {
-		return 0
+		return defaultMaxRetryDelay
 	}
-	index := attempt - 1
+	index := failures - 1
 	if index < 0 {
 		index = 0
 	}
 	if index >= len(w.retryDelays) {
-		index = len(w.retryDelays) - 1
+		return defaultMaxRetryDelay
 	}
 	delay := w.retryDelays[index]
 	if delay < 0 {
@@ -328,12 +352,15 @@ func (w *Worker) wait(ctx context.Context) bool {
 	}
 }
 
-func isRetryable(err error) bool {
-	var provider *ProviderError
-	if errors.As(err, &provider) {
-		return provider.Retryable
+func failureKind(err error) string {
+	var classified interface{ FailureKind() string }
+	if errors.As(err, &classified) {
+		return classified.FailureKind()
 	}
-	return true
+	if errors.Is(err, ErrProtocol) {
+		return "protocol"
+	}
+	return "transient"
 }
 
 func safeErrorSummary(err error) string {

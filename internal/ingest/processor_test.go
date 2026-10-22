@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/N0rthHXD/dmemd/internal/governance/task"
 	"github.com/N0rthHXD/dmemd/internal/ingest"
 	"github.com/N0rthHXD/dmemd/internal/memory"
 	"github.com/N0rthHXD/dmemd/internal/model"
@@ -16,7 +17,7 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/testutil"
 )
 
-type p5Fixture struct {
+type processorFixture struct {
 	store     *sqlite.Store
 	clock     time.Time
 	memories  *memory.Service
@@ -26,12 +27,12 @@ type p5Fixture struct {
 	fake      *testutil.FakeModel
 }
 
-func newP5Fixture(t *testing.T) *p5Fixture {
+func newProcessorFixture(t *testing.T) *processorFixture {
 	t.Helper()
 	store := testutil.NewStore(t)
 	fake := testutil.NewFakeModel(t)
 	clock := time.Date(2026, 10, 20, 2, 0, 0, 0, time.UTC)
-	f := &p5Fixture{store: store, clock: clock, fake: fake}
+	f := &processorFixture{store: store, clock: clock, fake: fake}
 	now := func() time.Time { return f.clock }
 	f.memories = memory.NewService(store, sqlite.MemoryStore{Store: store}, retrieval.NewDocumentBuilder(), memory.WithClock(now))
 	f.search = retrieval.NewService(store, retrieval.NewDocumentBuilder())
@@ -52,9 +53,48 @@ func newP5Fixture(t *testing.T) *p5Fixture {
 	return f
 }
 
-func (f *p5Fixture) advance(delta time.Duration) { f.clock = f.clock.Add(delta) }
+func TestProcessorPersistsScopeTopicsAndClassifyTask(t *testing.T) {
+	f := newProcessorFixture(t)
+	f.fake.EnqueueCandidates([]any{map[string]any{
+		"content": "项目使用 SQLite 保存记忆。",
+		"topics":  []string{"Go", "sqlite", "go"},
+	}})
+	f.fake.EnqueueContent(`{"decisions":[{"candidate_id":"c1","action":"add"}]}`)
+	_, err := f.service.Submit(context.Background(), ingest.Submission{
+		AppID:    "desktop",
+		ScopeKey: " project:dmemd ",
+		Content:  json.RawMessage(`"项目使用 SQLite 保存记忆。"`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := f.claim(t)
+	result := f.process(t, job)
+	if len(result.MemoryIDs) != 1 {
+		t.Fatalf("result = %+v", result)
+	}
+	item, err := f.memories.Get(context.Background(), result.MemoryIDs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.ScopeKey != "project:dmemd" {
+		t.Fatalf("scope_key = %q", item.ScopeKey)
+	}
+	if len(item.Topics) != 2 || item.Topics[0] != "go" || item.Topics[1] != "sqlite" {
+		t.Fatalf("topics = %#v", item.Topics)
+	}
+	governanceJob, err := f.store.GetGovernanceJobByTarget(context.Background(), task.KindClassify, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if governanceJob.Status != task.StatusQueued || governanceJob.Revision != 1 {
+		t.Fatalf("classify job = %+v", governanceJob)
+	}
+}
 
-func (f *p5Fixture) submit(t *testing.T, content string) ingest.Receipt {
+func (f *processorFixture) advance(delta time.Duration) { f.clock = f.clock.Add(delta) }
+
+func (f *processorFixture) submit(t *testing.T, content string) ingest.Receipt {
 	t.Helper()
 	receipt, err := f.service.Submit(context.Background(), ingest.Submission{AppID: "desktop", Content: json.RawMessage(content)})
 	if err != nil {
@@ -63,7 +103,7 @@ func (f *p5Fixture) submit(t *testing.T, content string) ingest.Receipt {
 	return receipt
 }
 
-func (f *p5Fixture) claim(t *testing.T) ingest.Job {
+func (f *processorFixture) claim(t *testing.T) ingest.Job {
 	t.Helper()
 	var job ingest.Job
 	var found bool
@@ -80,7 +120,7 @@ func (f *p5Fixture) claim(t *testing.T) ingest.Job {
 	return job
 }
 
-func (f *p5Fixture) process(t *testing.T, job ingest.Job) ingest.ProcessResult {
+func (f *processorFixture) process(t *testing.T, job ingest.Job) ingest.ProcessResult {
 	t.Helper()
 	result, err := f.processor.Process(context.Background(), job)
 	if err != nil {
@@ -89,7 +129,7 @@ func (f *p5Fixture) process(t *testing.T, job ingest.Job) ingest.ProcessResult {
 	return result
 }
 
-func (f *p5Fixture) job(t *testing.T, id string) ingest.Job {
+func (f *processorFixture) job(t *testing.T, id string) ingest.Job {
 	t.Helper()
 	job, err := f.service.GetJob(context.Background(), id)
 	if err != nil {
@@ -98,7 +138,7 @@ func (f *p5Fixture) job(t *testing.T, id string) ingest.Job {
 	return job
 }
 
-func (f *p5Fixture) memory(t *testing.T, id string) memory.Memory {
+func (f *processorFixture) memory(t *testing.T, id string) memory.Memory {
 	t.Helper()
 	item, err := f.memories.Get(context.Background(), id)
 	if err != nil {
@@ -107,7 +147,7 @@ func (f *p5Fixture) memory(t *testing.T, id string) memory.Memory {
 	return item
 }
 
-func (f *p5Fixture) countMemories(t *testing.T, states ...memory.State) int {
+func (f *processorFixture) countMemories(t *testing.T, states ...memory.State) int {
 	t.Helper()
 	items, err := f.memories.List(context.Background(), memory.ListOptions{States: states, Limit: 100})
 	if err != nil {
@@ -116,7 +156,7 @@ func (f *p5Fixture) countMemories(t *testing.T, states ...memory.State) int {
 	return len(items)
 }
 
-func (f *p5Fixture) createMemory(t *testing.T, input memory.CreateInput) memory.Memory {
+func (f *processorFixture) createMemory(t *testing.T, input memory.CreateInput) memory.Memory {
 	t.Helper()
 	if input.ObservedAt.IsZero() {
 		input.ObservedAt = f.clock
@@ -132,8 +172,8 @@ func (f *p5Fixture) createMemory(t *testing.T, input memory.CreateInput) memory.
 	return created
 }
 
-func TestP5AddUpdateMergeDuplicateAndZeroCandidates(t *testing.T) {
-	f := newP5Fixture(t)
+func TestAddUpdateMergeDuplicateAndZeroCandidates(t *testing.T) {
+	f := newProcessorFixture(t)
 	ctx := context.Background()
 
 	f.fake.EnqueueCandidates([]any{map[string]any{
@@ -175,10 +215,11 @@ func TestP5AddUpdateMergeDuplicateAndZeroCandidates(t *testing.T) {
 	}
 	f.advance(time.Minute)
 	f.fake.EnqueueCandidates([]any{map[string]any{
-		"action": "update", "target_memory_id": firstID, "kind": "preference", "title": "回答语言",
-		"content": "用户希望默认使用英文回答。", "reason": "用户明确更正",
+		"kind": "preference", "title": "回答语言",
+		"content":  "用户希望默认使用英文回答。",
 		"evidence": []any{map[string]any{"message_id": "m2", "quote": "默认使用英文回答"}},
 	}})
+	f.fake.EnqueueContent(`{"decisions":[{"candidate_id":"c1","action":"correct","target_memory_ids":["` + firstID + `"],"content":"用户希望默认使用英文回答。","evidence_refs":[{"candidate_id":"c1","evidence_index":0}],"reason_code":"explicit_correction"}]}`)
 	secondReceipt := f.submit(t, `{"messages":[{"id":"m2","content":"回答 语言 英文 以后请默认使用英文回答。"}]}`)
 	secondJob := f.claim(t)
 	result = f.process(t, secondJob)
@@ -199,18 +240,21 @@ func TestP5AddUpdateMergeDuplicateAndZeroCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if versions[0].Reason != "用户明确更正" {
+	if versions[0].Reason != "ingest:correct" {
 		t.Fatalf("update reason = %q", versions[0].Reason)
 	}
 
 	requests := f.fake.Requests()
-	if len(requests) != 2 {
+	if len(requests) != 3 {
 		t.Fatalf("model requests = %d", len(requests))
 	}
 	var payload struct {
 		CurrentSource struct {
 			ID string `json:"id"`
 		} `json:"current_source"`
+		Candidates []struct {
+			CandidateID string `json:"candidate_id"`
+		} `json:"candidates"`
 		RelatedMemories []struct {
 			ID string `json:"id"`
 		} `json:"related_memories"`
@@ -220,7 +264,7 @@ func TestP5AddUpdateMergeDuplicateAndZeroCandidates(t *testing.T) {
 			Content string `json:"content"`
 		} `json:"messages"`
 	}
-	if err := json.Unmarshal(requests[1].Body, &message); err != nil {
+	if err := json.Unmarshal(requests[2].Body, &message); err != nil {
 		t.Fatal(err)
 	}
 	if err := json.Unmarshal([]byte(message.Messages[1].Content), &payload); err != nil {
@@ -229,14 +273,26 @@ func TestP5AddUpdateMergeDuplicateAndZeroCandidates(t *testing.T) {
 	if payload.CurrentSource.ID != secondReceipt.SourceID {
 		t.Fatalf("current source = %+v", payload.CurrentSource)
 	}
-	if len(payload.RelatedMemories) != 1 || payload.RelatedMemories[0].ID != firstID {
-		t.Fatalf("related memories = %+v; unrelated=%s archived=%s", payload.RelatedMemories, unrelated.ID, archived.ID)
+	foundTarget := false
+	for _, relatedMemory := range payload.RelatedMemories {
+		if relatedMemory.ID == firstID {
+			foundTarget = true
+		}
+		if relatedMemory.ID == unrelated.ID {
+			t.Fatalf("unrelated memory entered decision context: %+v", payload.RelatedMemories)
+		}
+	}
+	if !foundTarget {
+		t.Fatalf("target missing from decision context: %+v", payload.RelatedMemories)
+	}
+	if len(payload.Candidates) != 1 || payload.Candidates[0].CandidateID != "c1" {
+		t.Fatalf("decision candidates = %+v", payload.Candidates)
 	}
 
 	f.advance(time.Minute)
 	f.fake.EnqueueCandidates([]any{map[string]any{
-		"action": "merge_evidence", "target_memory_id": firstID, "title": "ignored",
-		"content": "ignored", "evidence": []any{map[string]any{"message_id": "m3", "quote": "英文回答"}},
+		"title": "回答语言", "content": "用户希望默认使用英文回答。",
+		"evidence": []any{map[string]any{"message_id": "m3", "quote": "英文回答"}},
 	}})
 	f.submit(t, `{"messages":[{"id":"m3","content":"回答 语言 英文 再次确认默认英文回答。"}]}`)
 	thirdJob := f.claim(t)
@@ -284,7 +340,9 @@ func TestP5AddUpdateMergeDuplicateAndZeroCandidates(t *testing.T) {
 	}
 
 	f.advance(time.Minute)
-	f.fake.EnqueueCandidates([]any{map[string]any{"action": "skip"}})
+	f.createMemory(t, memory.CreateInput{Kind: memory.KindFact, Title: "旧说明", Content: "不需要记忆的旧说明"})
+	f.fake.EnqueueCandidates([]any{map[string]any{"content": "不需要记忆"}})
+	f.fake.EnqueueContent(`{"decisions":[{"candidate_id":"c1","action":"skip","reason_code":"not_durable"}]}`)
 	f.submit(t, `"不需要记忆"`)
 	skipJob := f.claim(t)
 	result = f.process(t, skipJob)
@@ -293,8 +351,8 @@ func TestP5AddUpdateMergeDuplicateAndZeroCandidates(t *testing.T) {
 	}
 }
 
-func TestP5OlderContentAndIndependentEvents(t *testing.T) {
-	f := newP5Fixture(t)
+func TestOlderContentAndIndependentEvents(t *testing.T) {
+	f := newProcessorFixture(t)
 	f.fake.EnqueueCandidates([]any{map[string]any{
 		"content": "当前偏好是中文。", "kind": "preference", "observed_at": "2026-10-20T02:00:00Z",
 	}})
@@ -305,9 +363,9 @@ func TestP5OlderContentAndIndependentEvents(t *testing.T) {
 
 	f.advance(time.Minute)
 	f.fake.EnqueueCandidates([]any{map[string]any{
-		"action": "update", "target_memory_id": targetID, "kind": "preference",
-		"content": "很久以前偏好是英文。", "observed_at": "2020-01-01T00:00:00Z",
+		"kind": "preference", "content": "很久以前偏好是英文。", "observed_at": "2020-01-01T00:00:00Z",
 	}})
+	f.fake.EnqueueContent(`{"decisions":[{"candidate_id":"c1","action":"separate","content":"很久以前偏好是英文。"}]}`)
 	f.submit(t, `"很久以前偏好是英文。"`)
 	job = f.claim(t)
 	result = f.process(t, job)
@@ -327,8 +385,8 @@ func TestP5OlderContentAndIndependentEvents(t *testing.T) {
 	}
 }
 
-func TestP5ModelRunsOutsideWriteTransaction(t *testing.T) {
-	f := newP5Fixture(t)
+func TestModelRunsOutsideWriteTransaction(t *testing.T) {
+	f := newProcessorFixture(t)
 	f.fake.Enqueue(ingestFakeBlockedCandidate("用户正在等待模型。"))
 	receipt := f.submit(t, `"用户正在等待模型。"`)
 	job := f.claim(t)
@@ -373,8 +431,8 @@ func TestP5ModelRunsOutsideWriteTransaction(t *testing.T) {
 	}
 }
 
-func TestP5ResultTransactionRollbackLeavesNoHalfMemory(t *testing.T) {
-	f := newP5Fixture(t)
+func TestResultTransactionRollbackLeavesNoHalfMemory(t *testing.T) {
+	f := newProcessorFixture(t)
 	f.fake.EnqueueCandidates([]any{map[string]any{"content": "事务失败时不应落库。"}})
 	f.submit(t, `"事务失败时不应落库。"`)
 	job := f.claim(t)
@@ -410,16 +468,17 @@ func TestP5ResultTransactionRollbackLeavesNoHalfMemory(t *testing.T) {
 	}
 }
 
-func TestP5ArchivedAndPurgedTargetsAfterContextSelection(t *testing.T) {
+func TestArchivedAndPurgedTargetsAfterContextSelection(t *testing.T) {
 	t.Run("archived target is skipped", func(t *testing.T) {
-		f := newP5Fixture(t)
+		f := newProcessorFixture(t)
 		f.fake.EnqueueCandidates([]any{map[string]any{"content": "原始事实", "kind": "fact"}})
 		f.submit(t, `"原始事实"`)
 		result := f.process(t, f.claim(t))
 		targetID := result.MemoryIDs[0]
 
 		f.advance(time.Minute)
-		f.fake.Enqueue(blockedResponse(`{"candidates":[{"action":"update","target_memory_id":"` + targetID + `","content":"候选计算后的更新"}]}`))
+		f.fake.Enqueue(blockedResponse(`{"candidates":[{"content":"原始事实 候选计算后的更新"}]}`))
+		f.fake.EnqueueContent(`{"decisions":[{"candidate_id":"c1","action":"merge_evidence","target_memory_ids":["` + targetID + `"]}]}`)
 		f.submit(t, `"原始事实 更新"`)
 		job := f.claim(t)
 		done := make(chan error, 1)
@@ -448,14 +507,14 @@ func TestP5ArchivedAndPurgedTargetsAfterContextSelection(t *testing.T) {
 	})
 
 	t.Run("purged target update adds a new memory", func(t *testing.T) {
-		f := newP5Fixture(t)
+		f := newProcessorFixture(t)
 		f.fake.EnqueueCandidates([]any{map[string]any{"content": "将被清除的事实"}})
 		f.submit(t, `"将被清除的事实"`)
 		result := f.process(t, f.claim(t))
 		targetID := result.MemoryIDs[0]
 
 		f.advance(time.Minute)
-		f.fake.Enqueue(blockedResponse(`{"candidates":[{"action":"update","target_memory_id":"` + targetID + `","content":"清除后重新形成的事实"}]}`))
+		f.fake.Enqueue(blockedResponse(`{"candidates":[{"content":"清除后重新形成的事实"}]}`))
 		f.submit(t, `"将被清除的事实 重新形成"`)
 		job := f.claim(t)
 		done := make(chan error, 1)
@@ -482,8 +541,8 @@ func TestP5ArchivedAndPurgedTargetsAfterContextSelection(t *testing.T) {
 	})
 }
 
-func TestP5ContextExcludesIrrelevantSourcesAndMemories(t *testing.T) {
-	f := newP5Fixture(t)
+func TestContextExcludesIrrelevantSourcesAndMemories(t *testing.T) {
+	f := newProcessorFixture(t)
 	f.createMemory(t, memory.CreateInput{Kind: memory.KindFact, Title: "回答语言", Content: "用户希望默认使用中文回答。"})
 	f.createMemory(t, memory.CreateInput{Kind: memory.KindFact, Title: "部署步骤", Content: "打开终端运行服务。"})
 	f.fake.EnqueueContent(`{"candidates":[]}`)
@@ -519,8 +578,8 @@ func TestP5ContextExcludesIrrelevantSourcesAndMemories(t *testing.T) {
 	if payload.CurrentSource.ID != receipt.SourceID || !strings.Contains(string(payload.CurrentSource.Content), "用户希望默认使用中文回答") {
 		t.Fatalf("current source = %+v", payload.CurrentSource)
 	}
-	if len(payload.Related) != 1 || payload.Related[0].Title != "回答语言" {
-		t.Fatalf("related = %+v", payload.Related)
+	if len(payload.Related) != 0 {
+		t.Fatalf("zero-candidate extraction should not receive related context: %+v", payload.Related)
 	}
 }
 
@@ -555,8 +614,8 @@ func blockedResponse(content string) testutil.FakeResponse {
 	return testutil.FakeResponse{Block: true, Content: content}
 }
 
-func TestP5UpdateWithUnchangedContentMergesEvidence(t *testing.T) {
-	f := newP5Fixture(t)
+func TestUpdateWithUnchangedContentMergesEvidence(t *testing.T) {
+	f := newProcessorFixture(t)
 	f.fake.EnqueueCandidates([]any{map[string]any{
 		"content": "保持不变的正文。", "kind": "fact",
 		"evidence": []any{map[string]any{"message_id": "m1", "quote": "保持不变的正文"}},

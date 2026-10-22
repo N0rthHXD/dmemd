@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -123,5 +125,57 @@ func TestServeStopsOnContextCancellation(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Serve did not stop after cancellation")
+	}
+}
+
+func TestSuperviseWorkerNeverOverlapsRestart(t *testing.T) {
+	app, err := New(testConfig(t), discardLogger(), ReadinessFunc(func(context.Context) error { return nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var active, maxActive, starts int32
+	release := make(chan struct{})
+	var once sync.Once
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go app.superviseWorker(ctx, &wg, "test", func(ctx context.Context) error {
+		once.Do(func() { close(release) })
+		current := atomic.AddInt32(&active, 1)
+		for {
+			observed := atomic.LoadInt32(&maxActive)
+			if current <= observed || atomic.CompareAndSwapInt32(&maxActive, observed, current) {
+				break
+			}
+		}
+		// Keep the first run alive long enough to observe a replacement if one
+		// were started concurrently, then exit and let the supervisor back off.
+		select {
+		case <-ctx.Done():
+		case <-time.After(30 * time.Millisecond):
+		}
+		atomic.AddInt32(&active, -1)
+		atomic.AddInt32(&starts, 1)
+		return errors.New("scripted worker failure")
+	})
+	select {
+	case <-release:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not start")
+	}
+	// Wait for one supervised restart (initial delay is one second).
+	deadline := time.Now().Add(3 * time.Second)
+	for atomic.LoadInt32(&starts) < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	wg.Wait()
+	if atomic.LoadInt32(&starts) < 2 {
+		t.Fatalf("worker was not restarted: starts=%d", atomic.LoadInt32(&starts))
+	}
+	if got := atomic.LoadInt32(&maxActive); got > 1 {
+		t.Fatalf("worker executions overlapped: max active = %d", got)
 	}
 }

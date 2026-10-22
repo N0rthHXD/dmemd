@@ -102,6 +102,25 @@ func TestSubmitRejectsInvalidJSONWithoutPartialRows(t *testing.T) {
 	}
 }
 
+func TestSubmitNormalizesScopeKey(t *testing.T) {
+	store := testutil.NewStore(t)
+	service := ingest.NewService(sqlite.IngestStore{Store: store}, store)
+	receipt, err := service.Submit(context.Background(), ingest.Submission{
+		ScopeKey: " project:dmemd ",
+		Content:  json.RawMessage(`"带作用域的内容"`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, err := store.GetSource(context.Background(), receipt.SourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if src.ScopeKey != "project:dmemd" {
+		t.Fatalf("scope_key = %q", src.ScopeKey)
+	}
+}
+
 func TestSubmitRollsBackSourceWhenJobOrCommitFails(t *testing.T) {
 	store := testutil.NewStore(t)
 	ctx := context.Background()

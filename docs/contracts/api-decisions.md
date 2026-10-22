@@ -26,7 +26,7 @@ JSON 解码失败才返回 `400`，资源不存在返回 `404`，执行失败返
 
 ## 2. 统一提交
 
-### `POST /v1/memories`
+### `POST /v1/ingestions`
 
 请求体是 JSON 对象：
 
@@ -82,7 +82,7 @@ JSON 解码失败才返回 `400`，资源不存在返回 `404`，执行失败返
 返回当前快照，包括 `state=deleted` 的墓碑。不存在返回 `404`。删除后仍可按 ID 读取墓碑，
 但任何全文检索都不返回删除记录。
 
-### `PATCH /v1/memories/{id}`
+### `PATCH /v1/memories/{id}/state`
 
 只修改生命周期状态，请求体：
 
@@ -93,21 +93,24 @@ JSON 解码失败才返回 `400`，资源不存在返回 `404`，执行失败返
 - 只接受 `active`、`archived`。删除使用 `DELETE`；`deleted` 不作为 PATCH 值。
 - 请求体中的 `content`、`title`、`kind`、`version` 等字段一律忽略，不形成内容直接写入捷径。
 - `state` 缺失、未知或与当前状态相同：不产生新版本，返回当前记忆（`200`）。
-- 内容更正仍只能通过 `POST /v1/memories` 提交。
+- 内容更正仍只能通过 `POST /v1/ingestions` 提交。
 - 响应为更新后的完整记忆对象。
 
 ### `DELETE /v1/memories/{id}`
 
-- 默认逻辑删除：`state=deleted`，生成新版本，保留历史、证据和墓碑。
-- `?purge=true`（大小写不敏感，或 `1`）执行永久清除：删除当前记录、全部历史、版本证据
-  关联、专属证据和索引；共享来源保留。其他取值按逻辑删除处理。
-- 逻辑删除响应：`{"id":"memory-uuid","state":"deleted"}`。
-- 永久清除响应：`{"id":"memory-uuid","purged":true}`。
-- 已删除记忆再次逻辑删除按状态未变化处理；永久清除不存在的 ID 返回 `404`。
+- 逻辑删除：`state=deleted`，生成新版本，保留历史、证据和墓碑。
+- 响应：`{"id":"memory-uuid","state":"deleted"}`。
+- 已删除记忆再次逻辑删除按状态未变化处理。
+
+### `POST /v1/memories/{id}/purge`
+
+- 永久清除：删除当前记录、全部历史、版本证据关联、专属证据和索引；共享来源保留。
+- 无请求体。永久清除不存在的 ID 返回 `404`。
+- 响应：`{"id":"memory-uuid","purged":true}`。
 
 ## 4. 版本、恢复与证据
 
-### `GET /v1/memories/{id}/versions`
+### `GET /v1/memories/{id}/history`
 
 返回完整版本快照，按 `version DESC` 排序。可选 `limit`：缺失、非正整数或无法解析时使用
 50；没有分页。响应：
@@ -118,20 +121,15 @@ JSON 解码失败才返回 `400`，资源不存在返回 `404`，执行失败返
 
 记忆不存在返回 `404`。历史只读；恢复旧版本不会覆盖或删除旧版本。
 
-### `GET /v1/memories/{id}/versions/{version}`
+### `GET /v1/memories/{id}/history/{version}`
 
 返回指定版本的完整快照与证据集合。`version` 非整数、非正数或不存在时返回 `404`。
 记忆不存在同样返回 `404`。
 
-### `POST /v1/memories/{id}/restorations`
+### `POST /v1/memories/{id}/history/{version}/restore`
 
-请求体：
-
-```json
-{"version":2}
-```
-
-- `version` 指向历史版本；缺失、非正数、非整数或不存在时返回 `404`。
+- `version` 位于路径中并指向历史版本；缺失、非正数、非整数或不存在时返回 `404`。
+- 无请求体。
 - 恢复复制该版本内容为新的当前版本，状态恢复为 `active`，版本号高于恢复前的当前版本；
   历史版本本身保持不变。
 - 已清除原文的来源不会因恢复重新出现片段；证据只保留来源关联与 `redacted` 状态。
@@ -149,9 +147,9 @@ JSON 解码失败才返回 `400`，资源不存在返回 `404`，执行失败返
 证据按 `created_at ASC, id ASC` 返回，不分页。来源清除后，`quote`、`location` 和原文副本
 不再返回，条目保留 `redacted=true` 与来源 ID。响应 `{"items":[...]}`。
 
-## 5. 检索
+## 5. 召回
 
-### `POST /v1/memories/search`
+### `POST /v1/memories/recall`
 
 ```json
 {
@@ -216,7 +214,7 @@ JSON 解码失败才返回 `400`，资源不存在返回 `404`，执行失败返
 词典词项，不再保证任意单字都是更长词项的子串命中。
 `evidence_refs` 对应当前版本，来源清除后仍保留 ID/source_id 关联但不含片段副本。`explanation` 仅在 `explain=true` 时出现；关键词模式为 `bm25`，混合模式为 `rrf`，并按参与路径返回
 `keyword` 与 `semantic` 的排名和原始分数。空查询、纯标点或纯 FTS 保留字符不是错误，
-返回空 `items`；调用方应改用管理列表接口获取全量列表。搜索没有跨请求快照或分页。
+返回空 `items`；调用方应改用管理列表接口获取全量列表。召回没有跨请求快照或分页。
 
 `retrieval.mode` 表示实际执行策略：语义功能关闭、模型网络/协议错误或 429 降级为
 `keyword` 并返回 `semantic_unavailable`；查询模型预算超时返回 `semantic_timeout`。
@@ -224,7 +222,7 @@ JSON 解码失败才返回 `400`，资源不存在返回 `404`，执行失败返
 仍按 hybrid 执行并只返回关键词候选；部分向量缺失时继续使用已有有效向量，允许少于
 Top-K。
 
-后台相关 active 记忆选择不属于公共搜索接口：使用同一规范化与 `match=any`，但不执行公共
+后台相关 active 记忆选择不属于公共召回接口：使用同一规范化与 `match=any`，但不执行公共
 `any` 的停用词选择和覆盖率重排，只选 `active`，最多取前 32 个去重分词词项和 10 条记忆；
 选择规则记录在 `model-provider.md`。
 
@@ -272,8 +270,9 @@ Top-K。
 
 ## 8. 路由与端点边界
 
-- `/v1/memories/search` 是集合级动作，不是记忆 ID；路由实现必须先匹配该静态路径。
-- 版本、证据是记忆的只读子资源；恢复是新增版本的动作，不是内容写入端点。
-- `PATCH` 仅状态；`DELETE` 仅生命周期/清除；内容新增或更正只走 `POST /v1/memories`。
+- `/v1/memories/recall` 是集合级动作，不是记忆 ID；路由实现必须先匹配该静态路径。
+- 历史、证据是记忆的只读子资源；恢复是新增版本的动作，不是内容写入端点。
+- `PATCH .../state` 仅状态；`DELETE /v1/memories/{id}` 是逻辑删除，`POST .../purge` 是永久清除；
+  内容新增或更正只走 `POST /v1/ingestions`。
 - 不存在 `POST /v1/sources`、模型提取提交端点、直接记忆写入端点或分页端点。
 - 所有本地应用按相同规则访问全部记忆；`app_id` 不产生隔离或授权。

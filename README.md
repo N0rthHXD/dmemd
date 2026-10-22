@@ -78,12 +78,12 @@ API 不验证 Token。`Authorization: Bearer ...` 可以省略，也可以填写
 
 ```sh
 # 简单文本
-curl -sS -X POST http://127.0.0.1:18432/v1/memories \
+curl -sS -X POST http://127.0.0.1:18432/v1/ingestions \
   -H 'Content-Type: application/json' \
   -d '{"content":"以后请默认使用中文回答。"}'
 
 # 对话对象
-curl -sS -X POST http://127.0.0.1:18432/v1/memories \
+curl -sS -X POST http://127.0.0.1:18432/v1/ingestions \
   -H 'Content-Type: application/json' \
   -d '{
     "app_id":"desktop-assistant",
@@ -94,7 +94,7 @@ curl -sS -X POST http://127.0.0.1:18432/v1/memories \
   }'
 
 # 已有结构化内容
-curl -sS -X POST http://127.0.0.1:18432/v1/memories \
+curl -sS -X POST http://127.0.0.1:18432/v1/ingestions \
   -H 'Content-Type: application/json' \
   -d '{"content":{"preferences":{"answer_language":"zh-CN"}}}'
 ```
@@ -114,27 +114,27 @@ curl -sS http://127.0.0.1:18432/v1/ingest-jobs/33333333-3333-4333-8333-333333333
 任务成功后可读取 `memory_ids`；失败时 `error` 是脱敏摘要，不包含完整模型响应或
 原始输入。
 
-### 列表、检索与当前记忆
+### 列表、召回与当前记忆
 
 ```sh
 # 默认返回最近更新的 50 条 active/archived 记忆，无分页
 curl -sS 'http://127.0.0.1:18432/v1/memories?limit=20'
 
-# 关键词检索；按词典分词，默认 match=any、top_k=20、仅 active
-curl -sS -X POST http://127.0.0.1:18432/v1/memories/search \
+# 关键词召回；按词典分词，默认 match=any、top_k=20、仅 active
+curl -sS -X POST http://127.0.0.1:18432/v1/memories/recall \
   -H 'Content-Type: application/json' \
   -d '{"query":"回答 语言","filters":{"kinds":["preference"]},"explain":true}'
 
 # 需要所有原始分词同时命中时显式指定 match=all
-curl -sS -X POST http://127.0.0.1:18432/v1/memories/search \
+curl -sS -X POST http://127.0.0.1:18432/v1/memories/recall \
   -H 'Content-Type: application/json' \
   -d '{"query":"回答 语言","match":"all"}'
 
 # 默认 any 会过滤受控停用词，但不设置最低命中数；
 # 结果按 BM25 名次与词项覆盖率做有界重排
 
-# 混合检索；语义不可用时自动降级为关键词并返回 warnings
-curl -sS -X POST http://127.0.0.1:18432/v1/memories/search \
+# 混合召回；语义不可用时自动降级为关键词并返回 warnings
+curl -sS -X POST http://127.0.0.1:18432/v1/memories/recall \
   -H 'Content-Type: application/json' \
   -d '{"query":"吃饭有什么忌口","mode":"hybrid","top_k":10}'
 
@@ -145,22 +145,20 @@ curl -sS http://127.0.0.1:18432/v1/memories/11111111-1111-4111-8111-111111111111
 
 ```sh
 # PATCH 只修改状态；active/archived 之外的 state 不产生变更
-curl -sS -X PATCH http://127.0.0.1:18432/v1/memories/11111111-1111-4111-8111-111111111111 \
+curl -sS -X PATCH http://127.0.0.1:18432/v1/memories/11111111-1111-4111-8111-111111111111/state \
   -H 'Content-Type: application/json' \
   -d '{"state":"archived"}'
 
 # 版本历史和指定版本
-curl -sS 'http://127.0.0.1:18432/v1/memories/11111111-1111-4111-8111-111111111111/versions?limit=10'
-curl -sS http://127.0.0.1:18432/v1/memories/11111111-1111-4111-8111-111111111111/versions/1
+curl -sS 'http://127.0.0.1:18432/v1/memories/11111111-1111-4111-8111-111111111111/history?limit=10'
+curl -sS http://127.0.0.1:18432/v1/memories/11111111-1111-4111-8111-111111111111/history/1
 
 # 从历史版本恢复为新的 active 版本
-curl -sS -X POST http://127.0.0.1:18432/v1/memories/11111111-1111-4111-8111-111111111111/restorations \
-  -H 'Content-Type: application/json' \
-  -d '{"version":1}'
+curl -sS -X POST http://127.0.0.1:18432/v1/memories/11111111-1111-4111-8111-111111111111/history/1/restore
 
-# 逻辑删除；加 ?purge=true 永久清除记忆及其历史
+# 逻辑删除；永久清除记忆及其历史使用独立的 purge 动作
 curl -sS -X DELETE http://127.0.0.1:18432/v1/memories/11111111-1111-4111-8111-111111111111
-curl -sS -X DELETE 'http://127.0.0.1:18432/v1/memories/11111111-1111-4111-8111-111111111111?purge=true'
+curl -sS -X POST http://127.0.0.1:18432/v1/memories/11111111-1111-4111-8111-111111111111/purge
 ```
 
 ### 来源查询与原文清除

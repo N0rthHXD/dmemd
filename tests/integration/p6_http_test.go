@@ -155,7 +155,7 @@ func TestP6HTTPContract(t *testing.T) {
 		Content: `{"candidates":[{"action":"add","kind":"preference","title":"回答语言","content":"用户希望默认使用中文回答。","evidence":[{"message_id":"msg-1","quote":"以后请默认使用中文回答。"}]}]}`,
 	})
 	started := time.Now()
-	receipt := client.expect(http.MethodPost, "/v1/memories",
+	receipt := client.expect(http.MethodPost, "/v1/ingestions",
 		`{"app_id":"desktop-assistant","external_id":"conversation-42","content":{"messages":[{"role":"user","content":"以后请默认使用中文回答。"}]}}`,
 		nil, http.StatusAccepted)
 	if time.Since(started) > 2*time.Second {
@@ -184,7 +184,7 @@ func TestP6HTTPContract(t *testing.T) {
 	memoryID := memoryIDs[0].(string)
 
 	// No app_id and an arbitrary Authorization token are both accepted.
-	second := client.expect(http.MethodPost, "/v1/memories", `{"content":"另一个独立事件。"}`,
+	second := client.expect(http.MethodPost, "/v1/ingestions", `{"content":"另一个独立事件。"}`,
 		map[string]string{"Authorization": "Bearer arbitrary-local-token"}, http.StatusAccepted)
 	if second["status"] != "queued" {
 		t.Fatalf("second receipt = %#v", second)
@@ -199,7 +199,7 @@ func TestP6HTTPContract(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		fake.EnqueueStatus(http.StatusInternalServerError)
 	}
-	failedReceipt := client.expect(http.MethodPost, "/v1/memories", `{"content":"模型失败时仍接收。"}`, nil, http.StatusAccepted)
+	failedReceipt := client.expect(http.MethodPost, "/v1/ingestions", `{"content":"模型失败时仍接收。"}`, nil, http.StatusAccepted)
 	failedJob := waitForJob(t, client, failedReceipt["job_id"].(string))
 	if failedJob["status"] != "failed" {
 		t.Fatalf("failed job = %#v", failedJob)
@@ -227,26 +227,26 @@ func TestP6HTTPContract(t *testing.T) {
 		t.Fatalf("default memory list is empty: %#v", list)
 	}
 
-	search := client.expect(http.MethodPost, "/v1/memories/search",
+	recall := client.expect(http.MethodPost, "/v1/memories/recall",
 		`{"query":"中文","match":"all","filters":{"kinds":["preference"],"states":["active"]},"top_k":20,"explain":true}`,
 		nil, http.StatusOK)
-	searchItems := client.items(search)
-	if len(searchItems) != 1 {
-		t.Fatalf("search items = %#v", searchItems)
+	recallItems := client.items(recall)
+	if len(recallItems) != 1 {
+		t.Fatalf("recall items = %#v", recallItems)
 	}
-	firstSearch := searchItems[0].(map[string]any)
-	if firstSearch["memory"].(map[string]any)["id"] != memoryID {
-		t.Fatalf("search memory = %#v", firstSearch["memory"])
+	firstRecall := recallItems[0].(map[string]any)
+	if firstRecall["memory"].(map[string]any)["id"] != memoryID {
+		t.Fatalf("recall memory = %#v", firstRecall["memory"])
 	}
-	if _, ok := firstSearch["explanation"].(map[string]any); !ok {
-		t.Fatalf("explanation missing: %#v", firstSearch)
+	if _, ok := firstRecall["explanation"].(map[string]any); !ok {
+		t.Fatalf("explanation missing: %#v", firstRecall)
 	}
-	if terms, _ := firstSearch["matched_terms"].([]any); len(terms) == 0 {
-		t.Fatalf("matched_terms = %#v", firstSearch["matched_terms"])
+	if terms, _ := firstRecall["matched_terms"].([]any); len(terms) == 0 {
+		t.Fatalf("matched_terms = %#v", firstRecall["matched_terms"])
 	}
 
 	// PATCH only changes state; a content field must not become a write path.
-	patched := client.expect(http.MethodPatch, "/v1/memories/"+memoryID,
+	patched := client.expect(http.MethodPatch, "/v1/memories/"+memoryID+"/state",
 		`{"state":"archived","content":"不应成为新正文"}`, nil, http.StatusOK)
 	if patched["state"] != "archived" || patched["content"] != "用户希望默认使用中文回答。" || patched["version"].(float64) != 2 {
 		t.Fatalf("patched = %#v", patched)
@@ -268,17 +268,17 @@ func TestP6HTTPContract(t *testing.T) {
 		}
 	}
 
-	activated := client.expect(http.MethodPatch, "/v1/memories/"+memoryID, `{"state":"active"}`, nil, http.StatusOK)
+	activated := client.expect(http.MethodPatch, "/v1/memories/"+memoryID+"/state", `{"state":"active"}`, nil, http.StatusOK)
 	if activated["state"] != "active" || activated["version"].(float64) != 3 {
 		t.Fatalf("activated = %#v", activated)
 	}
 	// deleted is not a PATCH value; DELETE is the only logical-delete path.
-	ignoredDelete := client.expect(http.MethodPatch, "/v1/memories/"+memoryID, `{"state":"deleted"}`, nil, http.StatusOK)
+	ignoredDelete := client.expect(http.MethodPatch, "/v1/memories/"+memoryID+"/state", `{"state":"deleted"}`, nil, http.StatusOK)
 	if ignoredDelete["state"] != "active" || ignoredDelete["version"].(float64) != 3 {
 		t.Fatalf("PATCH deleted changed lifecycle: %#v", ignoredDelete)
 	}
 
-	versions := client.expect(http.MethodGet, "/v1/memories/"+memoryID+"/versions", "", nil, http.StatusOK)
+	versions := client.expect(http.MethodGet, "/v1/memories/"+memoryID+"/history", "", nil, http.StatusOK)
 	versionItems := client.items(versions)
 	if len(versionItems) < 3 {
 		t.Fatalf("versions = %#v", versionItems)
@@ -291,7 +291,7 @@ func TestP6HTTPContract(t *testing.T) {
 		t.Fatalf("version evidence is not an array: %#v", firstVersion)
 	}
 
-	versionOne := client.expect(http.MethodGet, "/v1/memories/"+memoryID+"/versions/1", "", nil, http.StatusOK)
+	versionOne := client.expect(http.MethodGet, "/v1/memories/"+memoryID+"/history/1", "", nil, http.StatusOK)
 	if versionOne["version"].(float64) != 1 || versionOne["operation"] != "create" {
 		t.Fatalf("version one = %#v", versionOne)
 	}
@@ -299,11 +299,11 @@ func TestP6HTTPContract(t *testing.T) {
 		t.Fatalf("version snapshot missing: %#v", versionOne)
 	}
 
-	client.expect(http.MethodPost, "/v1/memories/"+memoryID+"/restorations", `{"version":999}`, nil, http.StatusNotFound)
-	client.expect(http.MethodGet, "/v1/memories/"+memoryID+"/versions/999", "", nil, http.StatusNotFound)
+	client.expect(http.MethodPost, "/v1/memories/"+memoryID+"/history/999/restore", "", nil, http.StatusNotFound)
+	client.expect(http.MethodGet, "/v1/memories/"+memoryID+"/history/999", "", nil, http.StatusNotFound)
 	client.expect(http.MethodGet, "/v1/memories/"+memoryID+"/evidence?version=999", "", nil, http.StatusNotFound)
 
-	restored := client.expect(http.MethodPost, "/v1/memories/"+memoryID+"/restorations", `{"version":1}`, nil, http.StatusOK)
+	restored := client.expect(http.MethodPost, "/v1/memories/"+memoryID+"/history/1/restore", "", nil, http.StatusOK)
 	if restored["state"] != "active" || restored["version"].(float64) <= 3 || restored["content"] != "用户希望默认使用中文回答。" {
 		t.Fatalf("restored = %#v", restored)
 	}
@@ -359,21 +359,21 @@ func TestP6HTTPContract(t *testing.T) {
 	if tombstone["state"] != "deleted" {
 		t.Fatalf("tombstone = %#v", tombstone)
 	}
-	emptySearch := client.expect(http.MethodPost, "/v1/memories/search", `{"query":"中文"}`, nil, http.StatusOK)
-	if len(client.items(emptySearch)) != 0 {
-		t.Fatalf("deleted memory returned by search: %#v", emptySearch)
+	emptyRecall := client.expect(http.MethodPost, "/v1/memories/recall", `{"query":"中文"}`, nil, http.StatusOK)
+	if len(client.items(emptyRecall)) != 0 {
+		t.Fatalf("deleted memory returned by recall: %#v", emptyRecall)
 	}
-	special := client.expect(http.MethodPost, "/v1/memories/search", `{"query":"\"*( OR *"}`, nil, http.StatusOK)
+	special := client.expect(http.MethodPost, "/v1/memories/recall", `{"query":"\"*( OR *"}`, nil, http.StatusOK)
 	if len(client.items(special)) != 0 {
 		t.Fatalf("FTS syntax input returned items: %#v", special)
 	}
 
-	restoredAgain := client.expect(http.MethodPost, "/v1/memories/"+memoryID+"/restorations", `{"version":1}`, nil, http.StatusOK)
+	restoredAgain := client.expect(http.MethodPost, "/v1/memories/"+memoryID+"/history/1/restore", "", nil, http.StatusOK)
 	if restoredAgain["state"] != "active" {
 		t.Fatalf("restore after delete = %#v", restoredAgain)
 	}
 
-	purged := client.expect(http.MethodDelete, "/v1/memories/"+memoryID+"?purge=true", "", nil, http.StatusOK)
+	purged := client.expect(http.MethodPost, "/v1/memories/"+memoryID+"/purge", "", nil, http.StatusOK)
 	if purged["purged"] != true || purged["id"] != memoryID {
 		t.Fatalf("purge = %#v", purged)
 	}
@@ -385,7 +385,7 @@ func TestP6HTTPContract(t *testing.T) {
 
 	client.expect(http.MethodGet, "/v1/ingest-jobs/00000000-0000-4000-8000-000000000000", "", nil, http.StatusNotFound)
 	client.expect(http.MethodGet, "/v1/memories/00000000-0000-4000-8000-000000000000", "", nil, http.StatusNotFound)
-	client.expect(http.MethodPost, "/v1/memories", "{", nil, http.StatusBadRequest)
+	client.expect(http.MethodPost, "/v1/ingestions", "{", nil, http.StatusBadRequest)
 
 	// Unknown paths return the same simple JSON 404 rather than an HTML body.
 	unknown := client.expect(http.MethodGet, "/v1/unknown", "", nil, http.StatusNotFound)
@@ -404,7 +404,7 @@ func TestP6SourceRedactionCancelsRunningJob(t *testing.T) {
 		Content: `{"candidates":[{"content":"不应在来源清除后落库。"}]}`,
 	})
 
-	receipt := client.expect(http.MethodPost, "/v1/memories", `{"content":"等待模型时清除来源。"}`, nil, http.StatusAccepted)
+	receipt := client.expect(http.MethodPost, "/v1/ingestions", `{"content":"等待模型时清除来源。"}`, nil, http.StatusAccepted)
 	sourceID := receipt["source_id"].(string)
 	jobID := receipt["job_id"].(string)
 	waitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

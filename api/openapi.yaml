@@ -21,22 +21,23 @@ tags:
   - name: ingest
     description: Unified content submission and processing jobs
   - name: memories
-    description: Current memories, lifecycle, versions, evidence and search
+    description: Current memories, lifecycle, history, evidence and recall
   - name: sources
     description: Original submission lookup and redaction
   - name: health
     description: Process liveness and database readiness
 
 paths:
-  /v1/memories:
+  /v1/ingestions:
     post:
       tags: [ingest]
       summary: Submit arbitrary JSON content for background extraction
       description: |
         Accepts strings, objects, arrays or null as content. Saves the source and
-        a queued job in one transaction, then returns 202 without waiting for a
-        model. app_id and external_id are optional informational source fields.
-      operationId: submitMemoryContent
+        a queued ingest job in one transaction, then returns 202 without waiting
+        for a model. app_id and external_id are optional informational source
+        fields. Job progress is queried through GET /v1/ingest-jobs/{id}.
+      operationId: createIngestion
       requestBody:
         required: true
         content:
@@ -89,6 +90,8 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/Unavailable'
+
+  /v1/memories:
     get:
       tags: [memories]
       summary: List current memories
@@ -159,10 +162,10 @@ paths:
         '503':
           $ref: '#/components/responses/Unavailable'
 
-  /v1/memories/search:
+  /v1/memories/recall:
     post:
       tags: [memories]
-      summary: Keyword or hybrid Top-K search
+      summary: Keyword or hybrid Top-K recall
       description: |
         User text is treated as ordinary keywords, never as FTS syntax. Mode
         defaults to keyword. Hybrid runs keyword and semantic recall in parallel
@@ -173,7 +176,7 @@ paths:
         while explicit all requires every original term. top_k is 20 with a
         maximum of 100, and states is [active]. Deleted memories are never
         returned. Explanation appears only when explain=true.
-      operationId: searchMemories
+      operationId: recallMemories
       requestBody:
         required: true
         content:
@@ -182,7 +185,7 @@ paths:
               $ref: '#/components/schemas/SearchRequest'
             examples:
               keyword:
-                summary: Keyword search with the default any match
+                summary: Keyword recall with the default any match
                 value:
                   query: 回答 语言
                   filters:
@@ -191,12 +194,12 @@ paths:
                   top_k: 20
                   explain: true
               keyword_all:
-                summary: Strict keyword search requiring every term
+                summary: Strict keyword recall requiring every term
                 value:
                   query: 回答 语言
                   match: all
               hybrid:
-                summary: Hybrid search
+                summary: Hybrid recall
                 value:
                   query: 吃饭有什么忌口
                   mode: hybrid
@@ -278,14 +281,42 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/Unavailable'
+    delete:
+      tags: [memories]
+      summary: Logically delete a memory
+      description: |
+        Writes a deleted tombstone and a new revision. The record, history and
+        dedicated evidence remain readable; use POST /purge for permanent
+        removal.
+      operationId: deleteMemory
+      responses:
+        '200':
+          description: Logical delete result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteResponse'
+              example:
+                id: 11111111-1111-4111-8111-111111111111
+                state: deleted
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v1/memories/{id}/state:
+    parameters:
+      - $ref: '#/components/parameters/MemoryID'
     patch:
       tags: [memories]
       summary: Change lifecycle state only
       description: |
         Accepts only active or archived. Unknown, missing or unchanged state is
         a no-op returning the current memory. Content fields are ignored; content
-        corrections must be submitted through POST /v1/memories.
-      operationId: updateMemoryState
+        corrections must be submitted through POST /v1/ingestions.
+      operationId: setMemoryState
       requestBody:
         required: true
         content:
@@ -321,39 +352,27 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/Unavailable'
-    delete:
+
+  /v1/memories/{id}/purge:
+    parameters:
+      - $ref: '#/components/parameters/MemoryID'
+    post:
       tags: [memories]
-      summary: Logically delete or permanently purge a memory
+      summary: Permanently purge a memory
       description: |
-        Default is a logical delete with a deleted tombstone and new revision.
-        purge=true permanently removes the current record, history and dedicated
-        evidence; shared sources remain.
-      operationId: deleteMemory
-      parameters:
-        - name: purge
-          in: query
-          description: true (or 1) permanently purges; any other value is a logical delete
-          schema:
-            type: boolean
-          example: false
+        Permanently removes the current record, history and dedicated evidence;
+        shared sources remain. This operation has no request body.
+      operationId: purgeMemory
       responses:
         '200':
-          description: Logical delete or purge result
+          description: Purge result
           content:
             application/json:
               schema:
-                oneOf:
-                  - $ref: '#/components/schemas/DeleteResponse'
-                  - $ref: '#/components/schemas/PurgeResponse'
-              examples:
-                logical:
-                  value:
-                    id: 11111111-1111-4111-8111-111111111111
-                    state: deleted
-                purge:
-                  value:
-                    id: 11111111-1111-4111-8111-111111111111
-                    purged: true
+                $ref: '#/components/schemas/PurgeResponse'
+              example:
+                id: 11111111-1111-4111-8111-111111111111
+                purged: true
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -361,14 +380,14 @@ paths:
         '503':
           $ref: '#/components/responses/Unavailable'
 
-  /v1/memories/{id}/versions:
+  /v1/memories/{id}/history:
     parameters:
       - $ref: '#/components/parameters/MemoryID'
     get:
       tags: [memories]
       summary: List complete revision history
       description: Newest version first; default limit 50; no pagination.
-      operationId: listMemoryVersions
+      operationId: listMemoryHistory
       parameters:
         - name: limit
           in: query
@@ -421,14 +440,14 @@ paths:
         '503':
           $ref: '#/components/responses/Unavailable'
 
-  /v1/memories/{id}/versions/{version}:
+  /v1/memories/{id}/history/{version}:
     parameters:
       - $ref: '#/components/parameters/MemoryID'
       - $ref: '#/components/parameters/Version'
     get:
       tags: [memories]
       summary: Get one complete historical version
-      operationId: getMemoryVersion
+      operationId: getMemoryHistoryEntry
       responses:
         '200':
           description: Version snapshot and complete evidence set
@@ -443,24 +462,18 @@ paths:
         '503':
           $ref: '#/components/responses/Unavailable'
 
-  /v1/memories/{id}/restorations:
+  /v1/memories/{id}/history/{version}/restore:
     parameters:
       - $ref: '#/components/parameters/MemoryID'
+      - $ref: '#/components/parameters/Version'
     post:
       tags: [memories]
       summary: Restore a historical version as a new current version
       description: |
-        Never overwrites history. Restored state is active. Missing or unknown
-        version returns 404; no expected-version or conflict token is required.
-      operationId: restoreMemory
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/RestoreRequest'
-            example:
-              version: 2
+        Never overwrites history. Restored state is active. A missing, invalid
+        or unknown version returns 404; no body, expected-version or conflict
+        token is required.
+      operationId: restoreMemoryVersion
       responses:
         '200':
           description: Restored current memory
@@ -480,8 +493,6 @@ paths:
                 updated_at: '2026-10-20T05:00:00Z'
                 created_by_app: desktop-assistant
                 origin_source_id: 22222222-2222-4222-8222-222222222222
-        '400':
-          $ref: '#/components/responses/BadRequest'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -880,14 +891,6 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Revision'
-
-    RestoreRequest:
-      type: object
-      properties:
-        version:
-          type: integer
-          minimum: 1
-          description: Historical version to copy; missing or unknown returns 404
 
     Evidence:
       type: object

@@ -129,7 +129,7 @@ flowchart TD
 
 ### 统一提交入口
 
-所有待记忆内容使用 `POST /v1/memories` 提交，包括对话、事件、自然语言描述和已有结构化内容。不提供独立的直接写入、来源创建或模型提取提交接口，也不要求调用方指定提取模式。
+所有待记忆内容使用 `POST /v1/ingestions` 提交，包括对话、事件、自然语言描述和已有结构化内容。不提供独立的直接写入、来源创建或模型提取提交接口，也不要求调用方指定提取模式。
 
 1. 接收并解码 JSON，不执行身份、字段取值、证据、版本或重复提交校验。
 2. 在同一事务中保存原始输入和后台处理任务。
@@ -170,11 +170,11 @@ flowchart TD
 
 模型不可用时，内容仍可提交并保存，任务按上述策略重试；已有记忆的查询、检索和管理继续工作。
 
-## 四、记忆检索设计
+## 四、记忆召回设计
 
-### 检索接口与查询语义
+### 召回接口与查询语义
 
-提供 `POST /v1/memories/search`：
+提供 `POST /v1/memories/recall`：
 
 ```json
 {
@@ -196,7 +196,7 @@ flowchart TD
 - 支持类型、状态、创建应用和更新时间范围过滤。
 - 默认只返回 `active` 记忆；可显式查询归档记忆，不通过全文检索返回已删除记忆。
 - `top_k` 默认 20；空查询使用管理列表接口。
-- 搜索是一次性 Top-K 查询，不提供跨请求搜索快照或搜索分页。
+- 召回是一次性 Top-K 查询，不提供跨请求召回快照或召回分页。
 
 ### 关键词检索与中文处理
 
@@ -275,17 +275,17 @@ FTS5 的 BM25 数值越小越相关。显式 `all` 对外返回 `score = -bm25`�
 
 | 方法与路径 | 功能 | 成功响应 |
 | --- | --- | --- |
-| `POST /v1/memories` | 统一提交待记忆内容，保存来源并排队处理 | `202`，`source_id`、`job_id`、任务状态 |
+| `POST /v1/ingestions` | 统一提交待记忆内容，保存来源并排队处理 | `202`，`source_id`、`job_id`、任务状态 |
 | `GET /v1/memories` | 按类型、状态、来源应用等过滤，返回本次列表 | `200`，`items` |
 | `GET /v1/memories/{id}` | 获取当前快照 | `200`，记忆 |
-| `PATCH /v1/memories/{id}` | 更新记忆状态 | `200`，更新后的记忆 |
+| `PATCH /v1/memories/{id}/state` | 更新记忆状态 | `200`，更新后的记忆 |
 | `DELETE /v1/memories/{id}` | 逻辑删除 | `200`，记忆 ID 和状态 |
-| `DELETE /v1/memories/{id}?purge=true` | 永久清除记忆及其历史 | `200`，记忆 ID 和清除结果 |
-| `GET /v1/memories/{id}/versions` | 返回版本历史，可用 `limit` 限制数量 | `200`，`items` |
-| `GET /v1/memories/{id}/versions/{version}` | 获取指定版本 | `200`，版本内容 |
-| `POST /v1/memories/{id}/restorations` | 从指定历史版本恢复记忆 | `200`，恢复后的记忆 |
+| `POST /v1/memories/{id}/purge` | 永久清除记忆及其历史 | `200`，记忆 ID 和清除结果 |
+| `GET /v1/memories/{id}/history` | 返回版本历史，可用 `limit` 限制数量 | `200`，`items` |
+| `GET /v1/memories/{id}/history/{version}` | 获取指定版本 | `200`，版本内容 |
+| `POST /v1/memories/{id}/history/{version}/restore` | 从指定历史版本恢复记忆 | `200`，恢复后的记忆 |
 | `GET /v1/memories/{id}/evidence` | 查询当前或指定版本的来源证据 | `200`，`items` |
-| `POST /v1/memories/search` | 关键词 Top-K 检索 | `200`，`items` |
+| `POST /v1/memories/recall` | 关键词 Top-K 召回 | `200`，`items` |
 | `GET /v1/sources/{id}` | 查询提交内容及其来源信息 | `200`，来源及原文或已清除状态 |
 | `DELETE /v1/sources/{id}` | 清除原文和证据片段，取消未完成任务 | `200`，来源 ID 和清除结果 |
 | `GET /v1/ingest-jobs/{id}` | 查询处理状态、错误和生成的记忆 ID | `200`，任务结果 |
@@ -296,7 +296,7 @@ FTS5 的 BM25 数值越小越相关。显式 `all` 对外返回 `score = -bm25`�
 提交简单内容：
 
 ```http
-POST /v1/memories HTTP/1.1
+POST /v1/ingestions HTTP/1.1
 Host: 127.0.0.1:18432
 Content-Type: application/json
 

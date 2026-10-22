@@ -10,7 +10,7 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/memory"
 )
 
-func (h *handler) submitMemory(w http.ResponseWriter, request *http.Request) {
+func (h *handler) createIngestion(w http.ResponseWriter, request *http.Request) {
 	service, ok := h.requireIngest(w)
 	if !ok {
 		return
@@ -83,7 +83,7 @@ func (h *handler) getMemory(w http.ResponseWriter, request *http.Request) {
 	writeJSON(w, http.StatusOK, memoryFromDomain(item))
 }
 
-func (h *handler) patchMemory(w http.ResponseWriter, request *http.Request) {
+func (h *handler) setMemoryState(w http.ResponseWriter, request *http.Request) {
 	service, ok := h.requireMemories(w)
 	if !ok {
 		return
@@ -113,17 +113,7 @@ func (h *handler) deleteMemory(w http.ResponseWriter, request *http.Request) {
 	if !ok {
 		return
 	}
-	id := request.PathValue("id")
-	purge := request.URL.Query().Get("purge")
-	if strings.EqualFold(purge, "true") || purge == "1" {
-		if err := service.Purge(request.Context(), id); err != nil {
-			h.writeServiceError(w, request, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, purgeResponse{ID: id, Purged: true})
-		return
-	}
-	item, err := service.Delete(request.Context(), id)
+	item, err := service.Delete(request.Context(), request.PathValue("id"))
 	if err != nil {
 		h.writeServiceError(w, request, err)
 		return
@@ -131,7 +121,20 @@ func (h *handler) deleteMemory(w http.ResponseWriter, request *http.Request) {
 	writeJSON(w, http.StatusOK, deleteResponse{ID: item.ID, State: string(item.State)})
 }
 
-func (h *handler) listVersions(w http.ResponseWriter, request *http.Request) {
+func (h *handler) purgeMemory(w http.ResponseWriter, request *http.Request) {
+	service, ok := h.requireMemories(w)
+	if !ok {
+		return
+	}
+	id := request.PathValue("id")
+	if err := service.Purge(request.Context(), id); err != nil {
+		h.writeServiceError(w, request, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, purgeResponse{ID: id, Purged: true})
+}
+
+func (h *handler) listMemoryHistory(w http.ResponseWriter, request *http.Request) {
 	service, ok := h.requireMemories(w)
 	if !ok {
 		return
@@ -145,7 +148,7 @@ func (h *handler) listVersions(w http.ResponseWriter, request *http.Request) {
 	writeJSON(w, http.StatusOK, revisionListResponse{Items: revisionsFromDomain(items)})
 }
 
-func (h *handler) getVersion(w http.ResponseWriter, request *http.Request) {
+func (h *handler) getMemoryHistoryEntry(w http.ResponseWriter, request *http.Request) {
 	service, ok := h.requireMemories(w)
 	if !ok {
 		return
@@ -163,18 +166,13 @@ func (h *handler) getVersion(w http.ResponseWriter, request *http.Request) {
 	writeJSON(w, http.StatusOK, revisionFromDomain(item))
 }
 
-func (h *handler) restoreMemory(w http.ResponseWriter, request *http.Request) {
+func (h *handler) restoreMemoryVersion(w http.ResponseWriter, request *http.Request) {
 	service, ok := h.requireMemories(w)
 	if !ok {
 		return
 	}
-	object, err := decodeObject(request)
-	if err != nil {
-		h.writeBadRequest(w)
-		return
-	}
-	version, valid := rawInt(object, "version")
-	if !valid || version <= 0 {
+	version, err := strconv.Atoi(request.PathValue("version"))
+	if err != nil || version <= 0 {
 		h.writeNotFound(w)
 		return
 	}
@@ -189,7 +187,7 @@ func (h *handler) restoreMemory(w http.ResponseWriter, request *http.Request) {
 	writeJSON(w, http.StatusOK, memoryFromDomain(item))
 }
 
-func (h *handler) getEvidence(w http.ResponseWriter, request *http.Request) {
+func (h *handler) getMemoryEvidence(w http.ResponseWriter, request *http.Request) {
 	service, ok := h.requireMemories(w)
 	if !ok {
 		return

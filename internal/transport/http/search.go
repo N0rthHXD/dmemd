@@ -7,7 +7,7 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/retrieval"
 )
 
-func (h *handler) searchMemories(w http.ResponseWriter, request *http.Request) {
+func (h *handler) recallMemories(w http.ResponseWriter, request *http.Request) {
 	service, ok := h.requireSearch(w)
 	if !ok {
 		return

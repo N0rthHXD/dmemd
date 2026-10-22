@@ -281,7 +281,7 @@ func TestP6ProcessSingleInstanceShutdownAndRestart(t *testing.T) {
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	started := time.Now()
-	status, receipt := doJSON(t, client, http.MethodPost, "http://"+listenOne+"/v1/memories",
+	status, receipt := doJSON(t, client, http.MethodPost, "http://"+listenOne+"/v1/ingestions",
 		`{"content":"进程重启后需要恢复任务。"}`)
 	if status != http.StatusAccepted {
 		t.Fatalf("submit status = %d body=%#v", status, receipt)

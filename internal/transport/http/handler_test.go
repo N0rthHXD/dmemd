@@ -100,14 +100,14 @@ func TestMalformedJSONReturns400WithoutCallingService(t *testing.T) {
 		called = true
 		return ingest.Receipt{}, nil
 	}}}
-	response := serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories", strings.NewReader("{")))
+	response := serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/ingestions", strings.NewReader("{")))
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", response.Code)
 	}
 	if called {
 		t.Fatal("service called for malformed JSON")
 	}
-	response = serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories", strings.NewReader("{} {}")))
+	response = serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/ingestions", strings.NewReader("{} {}")))
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("trailing JSON status = %d, want 400", response.Code)
 	}
@@ -180,7 +180,7 @@ func TestListOptionsAndInvalidFilter(t *testing.T) {
 	}
 }
 
-func TestPatchIgnoresContentAndSearchParsing(t *testing.T) {
+func TestSetStateIgnoresContentAndRecallParsing(t *testing.T) {
 	id := "11111111-1111-4111-8111-111111111111"
 	var state memory.State
 	services := Services{
@@ -201,16 +201,16 @@ func TestPatchIgnoresContentAndSearchParsing(t *testing.T) {
 			return retrieval.Result{Items: []retrieval.Item{}}, nil
 		}},
 	}
-	response := serve(t, services, nil, httptest.NewRequest(http.MethodPatch, "/v1/memories/"+id,
+	response := serve(t, services, nil, httptest.NewRequest(http.MethodPatch, "/v1/memories/"+id+"/state",
 		strings.NewReader(`{"state":"archived","content":"must not be written"}`)))
 	if response.Code != http.StatusOK || state != memory.StateArchived {
 		t.Fatalf("patch = %d state=%q body=%s", response.Code, state, response.Body.String())
 	}
 
-	response = serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/search",
+	response = serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/recall",
 		strings.NewReader(`{"query":"回答 语言","match":"any","filters":{"kinds":["preference"]},"top_k":5,"explain":true}`)))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"items":[]`) {
-		t.Fatalf("search = %d %q", response.Code, response.Body.String())
+		t.Fatalf("recall = %d %q", response.Code, response.Body.String())
 	}
 }
 
@@ -220,10 +220,11 @@ func TestRestoreRejectsInvalidVersionWithoutCallingService(t *testing.T) {
 		t.Fatal("restore called with invalid version")
 		return memory.Memory{}, nil
 	}}}
-	for _, body := range []string{`{}`, `{"version":0}`, `{"version":"two"}`, `{"version":-1}`} {
-		response := serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/"+id+"/restorations", strings.NewReader(body)))
+	for _, version := range []string{"0", "-1", "two"} {
+		response := serve(t, services, nil, httptest.NewRequest(http.MethodPost,
+			"/v1/memories/"+id+"/history/"+version+"/restore", nil))
 		if response.Code != http.StatusNotFound {
-			t.Fatalf("body %s status = %d, want 404", body, response.Code)
+			t.Fatalf("version %s status = %d, want 404", version, response.Code)
 		}
 	}
 }

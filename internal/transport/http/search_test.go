@@ -12,7 +12,7 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/retrieval"
 )
 
-func TestSearchModeTopKValidationAndRequestMapping(t *testing.T) {
+func TestRecallModeTopKValidationAndRequestMapping(t *testing.T) {
 	var captured retrieval.Request
 	calls := 0
 	services := Services{Search: stubSearch{search: func(_ context.Context, request retrieval.Request) (retrieval.Result, error) {
@@ -21,7 +21,7 @@ func TestSearchModeTopKValidationAndRequestMapping(t *testing.T) {
 		return retrieval.Result{Items: []retrieval.Item{}, Retrieval: retrieval.Retrieval{Mode: request.Mode}}, nil
 	}}}
 
-	response := serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/search",
+	response := serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/recall",
 		strings.NewReader(`{"query":"吃饭有什么忌口","mode":"hybrid","match":"any","top_k":10,"explain":true}`)))
 	if response.Code != http.StatusOK {
 		t.Fatalf("hybrid request = %d %q", response.Code, response.Body.String())
@@ -39,7 +39,7 @@ func TestSearchModeTopKValidationAndRequestMapping(t *testing.T) {
 		`{"query":"x","top_k":101}`,
 	} {
 		before := calls
-		response = serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/search", strings.NewReader(body)))
+		response = serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/recall", strings.NewReader(body)))
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("body %s = %d %q", body, response.Code, response.Body.String())
 		}
@@ -48,14 +48,14 @@ func TestSearchModeTopKValidationAndRequestMapping(t *testing.T) {
 		}
 	}
 
-	response = serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/search",
+	response = serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/recall",
 		strings.NewReader(`{"query":"x"}`)))
 	if response.Code != http.StatusOK || captured.Mode != retrieval.ModeKeyword {
 		t.Fatalf("default mode = %d %+v", response.Code, captured)
 	}
 }
 
-func TestSearchMatchRequestMapping(t *testing.T) {
+func TestRecallMatchRequestMapping(t *testing.T) {
 	var captured retrieval.Request
 	services := Services{Search: stubSearch{search: func(_ context.Context, request retrieval.Request) (retrieval.Result, error) {
 		captured = request
@@ -74,7 +74,7 @@ func TestSearchMatchRequestMapping(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			response := serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/search",
+			response := serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/recall",
 				strings.NewReader(test.body)))
 			if response.Code != http.StatusOK {
 				t.Fatalf("response = %d %q", response.Code, response.Body.String())
@@ -86,7 +86,7 @@ func TestSearchMatchRequestMapping(t *testing.T) {
 	}
 }
 
-func TestSearchResponseIncludesWarningsAndHybridExplanation(t *testing.T) {
+func TestRecallResponseIncludesWarningsAndHybridExplanation(t *testing.T) {
 	services := Services{Search: stubSearch{search: func(context.Context, retrieval.Request) (retrieval.Result, error) {
 		return retrieval.Result{
 			Items: []retrieval.Item{{
@@ -105,7 +105,7 @@ func TestSearchResponseIncludesWarningsAndHybridExplanation(t *testing.T) {
 			Warnings:  []string{retrieval.WarningSemanticTimeout},
 		}, nil
 	}}}
-	response := serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/search",
+	response := serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/recall",
 		strings.NewReader(`{"query":"x","mode":"hybrid","explain":true}`)))
 	if response.Code != http.StatusOK {
 		t.Fatalf("response = %d %q", response.Code, response.Body.String())
@@ -164,7 +164,7 @@ func TestKeywordResponseKeepsFieldWeightsAndDefaultRetrievalMode(t *testing.T) {
 			},
 		}}}, nil
 	}}}
-	response := serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/search",
+	response := serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/recall",
 		strings.NewReader(`{"query":"回答","explain":true}`)))
 	body := response.Body.String()
 	if response.Code != http.StatusOK || !strings.Contains(body, `"retrieval":{"mode":"keyword"}`) {

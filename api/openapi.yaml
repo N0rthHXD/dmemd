@@ -964,9 +964,9 @@ components:
           description: >-
             Omitted, empty, or unknown values behave as any. Keyword-mode any
             removes controlled question, auxiliary, and generic terms, then
-            requires at least ceil(n/2) effective terms (at least one when n is
-            two or fewer). all keeps the original terms and requires every one.
-            Only the keyword path uses it.
+            matches any remaining term; recalled candidates are coverage-reranked
+            but are never dropped for low coverage. all keeps the original terms
+            and requires every one. Only the keyword path uses it.
         filters:
           $ref: '#/components/schemas/SearchFilters'
         top_k:

@@ -62,7 +62,7 @@ README 中的开发入口与这些命令保持一致。
 | `internal/testutil` | 临时数据库并行隔离、权限检查、故障注入点、假模型成功/失败/延迟/畸形/阻塞控制 |
 | `tests/integration/p2_transactions_test.go` | 真实 SQLite 跨表提交与分步失败回滚、FTS 一致性和任务结果字段 |
 | `tests/integration/p3_lifecycle_test.go` | 跨模块创建→更正→归档→删除→恢复→清除原文→永久清除，含任务取消与外键检查 |
-| `tests/integration/p4_search_test.go` | 中文一/二字/长词、中英混合、标点、大小写、规范化等价、all/any、词项选择、覆盖率重排、松弛合取、过滤、摘要/证据/解释、生命周期、重建与相关 active 上下文 |
+| `tests/integration/p4_search_test.go` | 中文一/二字/长词、中英混合、标点、大小写、规范化等价、all/any、词项选择、覆盖率重排、低覆盖候选保留、过滤、摘要/证据/解释、生命周期、重建与相关 active 上下文 |
 | `tests/integration/p5_pipeline_test.go` | 统一提交→模型→合并→检索、清除/结果提交两种竞态、接收/running/事务中断/成功后的重启、模型不可用与恢复、部分/零候选 |
 | `tests/integration/readiness_test.go` | 真实数据库驱动 readyz、关闭后 503、模型地址不可达不影响就绪 |
 | `tests/integration/p6_http_test.go` | 完整 HTTP 契约：无 Token/任意 Token、202 提交、任务成功/失败、列表/检索/版本/恢复/证据、归档/删除/清除、来源清除取消在途任务 |

@@ -183,7 +183,7 @@ func (s *Service) searchKeyword(ctx context.Context, groups []Group, request Req
 	}
 	var assembled []Item
 	if optimize && match == MatchAny {
-		assembled, err = s.assembleRerankedKeywordHits(ctx, hits, groups, filters, topK, request.Explain)
+		assembled, err = s.assembleCoverageRerankedKeywordHits(ctx, hits, groups, filters, topK, request.Explain)
 	} else {
 		assembled, err = s.assembleKeywordHits(ctx, hits, groups, filters, topK, request.Explain)
 	}
@@ -236,21 +236,12 @@ func (s *Service) assembleKeywordHits(ctx context.Context, hits []Hit, groups []
 // fusion stable and avoids adding raw BM25 scores to a ratio.
 const keywordCoverageWeight = 0.005
 
-func minimumMatchedTerms(termCount int) int {
-	if termCount <= 0 {
-		return 0
-	}
-	minimum := (termCount + 1) / 2
-	if minimum < 1 {
-		return 1
-	}
-	return minimum
-}
-
-// assembleRerankedKeywordHits applies relaxed conjunction at the candidate
-// layer, then fuses each candidate's BM25 rank with its actual term coverage.
-// Candidates are kept in BM25 order as the stable fallback for equal scores.
-func (s *Service) assembleRerankedKeywordHits(ctx context.Context, hits []Hit, groups []Group, filters Filters, topK int, explain bool) ([]Item, error) {
+// assembleCoverageRerankedKeywordHits fuses each candidate's BM25 rank with
+// its actual term coverage. It deliberately keeps every recalled candidate:
+// a hard minimum-coverage filter hurts natural-language recall, so coverage
+// may only move candidates within the BM25 candidate set. Candidates remain in
+// BM25 order as the stable fallback for equal scores.
+func (s *Service) assembleCoverageRerankedKeywordHits(ctx context.Context, hits []Hit, groups []Group, filters Filters, topK int, explain bool) ([]Item, error) {
 	if len(hits) == 0 || len(groups) == 0 {
 		return []Item{}, nil
 	}
@@ -262,19 +253,14 @@ func (s *Service) assembleRerankedKeywordHits(ctx context.Context, hits []Hit, g
 	if err != nil {
 		return nil, err
 	}
-	minimum := minimumMatchedTerms(len(groups))
 	selected := make([]rankedCandidate, 0, len(hits))
 	for index, hit := range hits {
 		candidate, ok := candidates[hit.MemoryID]
 		if !ok || !matchesFilters(candidate.Memory, filters) || candidate.Memory.State == memory.StateDeleted {
 			continue
 		}
-		matched := matchedGroupCount(groups, candidate.Memory.Title, candidate.Memory.Content)
-		if matched < minimum {
-			continue
-		}
 		hitCopy := hit
-		coverage := float64(matched) / float64(len(groups))
+		coverage := float64(matchedGroupCount(groups, candidate.Memory.Title, candidate.Memory.Content)) / float64(len(groups))
 		selected = append(selected, rankedCandidate{
 			candidate:   candidate,
 			keyword:     &hitCopy,

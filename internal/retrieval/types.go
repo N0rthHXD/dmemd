@@ -17,8 +17,8 @@ const (
 	DefaultTopK = 20
 	// MaxTopK is the contracted upper bound. Larger values are a request error.
 	MaxTopK = 100
-	// CandidateLimitMin and CandidateLimitMax bound each recall path before
-	// Reciprocal Rank Fusion.
+	// CandidateLimitMin and CandidateLimitMax bound each keyword recall path
+	// before coverage reranking or Reciprocal Rank Fusion.
 	CandidateLimitMin = 100
 	CandidateLimitMax = 500
 	// RRFConstant is the Cormack et al. rank-fusion constant.

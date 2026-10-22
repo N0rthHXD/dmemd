@@ -273,7 +273,7 @@
 - **依赖**：T4.8。
 - **描述**：将文档/查询共用规则从“连续汉字逐字 token、整组编译为相邻短语”改为内置词典精准分词；每个分词词项独立作为查询组，`all/any` 对词项做 `AND`/`OR`；保留 NFC、小写和标点边界，不删除停用词、不做 n-gram 扩展。
 - **验收标准**：索引与查询使用同一分词结果；长中文查询按多个词项匹配，不再编译为整句短语；非相邻词项可在同一文档中命中；`matched_terms` 返回词项；HTTP 请求和响应结构不变。
-- **执行记录**：在 `internal/retrieval/normalize.go` 引入固定版本 `github.com/go-ego/gse v1.1.0`，以 `SkipSubSeg` 精准模式加载内置中文词典；`Groups` 每个词项生成独立 `Group`，`Tokens`/`IndexText`/`MatchedGroups` 复用同一分词。更新 `internal/retrieval/*_test.go`、`internal/store/sqlite/search_query_test.go` 和 `tests/integration/p4_search_test.go`，覆盖 `Jon是什么时候失去银行职员工作的？`、非相邻词项、词项缺失与相关 active 选择。验证：`go test -count=1 ./...`、`make check`。限制：不迁移旧派生索引、不兼容旧逐字索引，开发库需重建索引；不做停用词、n-gram 或同义词扩展。2026-10-22 关键词检索优化为 keyword 模式的 `any` 增加受控停用词选择、候选覆盖率重排和松弛合取；显式 `all` 与后台 `RelatedActive` 保持原词项语义。
+- **执行记录**：在 `internal/retrieval/normalize.go` 引入固定版本 `github.com/go-ego/gse v1.1.0`，以 `SkipSubSeg` 精准模式加载内置中文词典；`Groups` 每个词项生成独立 `Group`，`Tokens`/`IndexText`/`MatchedGroups` 复用同一分词。更新 `internal/retrieval/*_test.go`、`internal/store/sqlite/search_query_test.go` 和 `tests/integration/p4_search_test.go`，覆盖 `Jon是什么时候失去银行职员工作的？`、非相邻词项、词项缺失与相关 active 选择。验证：`go test -count=1 ./...`、`make check`。限制：不迁移旧派生索引、不兼容旧逐字索引，开发库需重建索引；不做停用词、n-gram 或同义词扩展。2026-10-22 关键词检索优化曾为 keyword 模式的 `any` 增加受控停用词选择、候选覆盖率重排和松弛合取；显式 `all` 与后台 `RelatedActive` 保持原词项语义。同日 LoCoMo 双语子集复评（`bilingual-006`）显示松弛合取使 Session hit@10 从 91.13% 降至 75.76%，未通过召回验收；去掉该过滤后为 92.21%。已移除硬性最低命中限制，保留词项选择与覆盖率重排；端到端 QA 复评待补做，详见 `docs/keyword-retrieval-optimization.md` 第 8 节。
 
 ## P5：模型与持久化处理链
 

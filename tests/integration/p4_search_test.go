@@ -298,7 +298,7 @@ func TestP4ChineseDictionaryTermsMatchIndependently(t *testing.T) {
 	}
 }
 
-func TestP4KeywordTermSelectionCoverageAndRelaxedConjunction(t *testing.T) {
+func TestP4KeywordTermSelectionAndCoverageRerank(t *testing.T) {
 	f := newP4Fixture(t)
 	exact := f.create(t, memory.CreateInput{
 		Kind: memory.KindEvent, Title: "记录", Content: "Jon失去银行职员工作。",
@@ -317,8 +317,8 @@ func TestP4KeywordTermSelectionCoverageAndRelaxedConjunction(t *testing.T) {
 	})
 
 	result := f.run(t, retrieval.Request{Query: "Jon是什么时候失去银行职员工作的？"})
-	if !slices.Equal(p4IDs(result), []string{exact.ID, partial.ID, borderline.ID}) {
-		t.Fatalf("reranked result = %+v, want exact, partial, borderline", p4IDs(result))
+	if !slices.Equal(p4IDs(result), []string{exact.ID, partial.ID, borderline.ID, weak.ID}) {
+		t.Fatalf("reranked result = %+v, want exact, partial, borderline, weak", p4IDs(result))
 	}
 	for i := 1; i < len(result.Items); i++ {
 		if result.Items[i-1].Score < result.Items[i].Score {
@@ -326,9 +326,6 @@ func TestP4KeywordTermSelectionCoverageAndRelaxedConjunction(t *testing.T) {
 		}
 	}
 	for _, item := range result.Items {
-		if item.Memory.ID == weak.ID {
-			t.Fatalf("candidate below relaxed threshold was returned: %+v", item)
-		}
 		for _, term := range item.MatchedTerms {
 			if term == "的" || term == "是" || term == "什么" || term == "时候" {
 				t.Fatalf("stopword leaked into matched_terms: %#v", item.MatchedTerms)
@@ -340,6 +337,9 @@ func TestP4KeywordTermSelectionCoverageAndRelaxedConjunction(t *testing.T) {
 	}
 	if got := p4Item(t, result, partial.ID).MatchedTerms; !slices.Equal(got, []string{"jon", "失去", "工作"}) {
 		t.Fatalf("partial matched_terms = %#v", got)
+	}
+	if got := p4Item(t, result, weak.ID).MatchedTerms; !slices.Equal(got, []string{"工作"}) {
+		t.Fatalf("low-coverage matched_terms = %#v", got)
 	}
 
 	strict := f.run(t, retrieval.Request{Query: "jon 失去 银行职员 工作", Match: retrieval.MatchAll})

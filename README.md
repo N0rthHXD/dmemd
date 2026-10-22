@@ -19,6 +19,9 @@ FTS5/BM25 与 Embedding 余弦召回，按 RRF 融合；语义模型不可用或
 关键词候选。Embedding 默认关闭，启用后由独立后台 Worker 生成并校验向量，关键词索引
 仍在记忆写入事务中同步维护。
 
+默认关键词路径已按 `docs/keyword-retrieval-optimization.md` 完成词项选择与覆盖率重排，
+并移除硬性最低命中过滤；LoCoMo 双语子集检索复评结果见该文档第 9 节。
+
 ## 环境
 
 - Go 精确版本见 `.go-version`（当前为 `1.27.3`）。
@@ -131,7 +134,7 @@ curl -sS -X POST http://127.0.0.1:18432/v1/memories/search \
   -H 'Content-Type: application/json' \
   -d '{"query":"回答 语言","match":"all"}'
 
-# 默认 any 会过滤受控停用词，并要求至少一半有效词项命中；
+# 默认 any 会过滤受控停用词，但不设置最低命中数；
 # 结果按 BM25 名次与词项覆盖率做有界重排
 
 # 混合检索；语义不可用时自动降级为关键词并返回 warnings

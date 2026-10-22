@@ -109,8 +109,8 @@ func CheckPrivateDatabaseFiles(t testing.TB, path string) {
 	}
 }
 
-// DocumentBuilder is the deterministic pre-normalized builder used by P2 tests.
-// Production NFC/tokenization is wired in T4.1.
+// DocumentBuilder is the deterministic pre-normalized builder used by tests.
+// Production wiring supplies NFC/tokenization.
 type DocumentBuilder struct{}
 
 // BuildDocument implements memory.DocumentBuilder.

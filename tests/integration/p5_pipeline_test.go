@@ -31,7 +31,7 @@ type p5Stack struct {
 	worker    *ingest.Worker
 }
 
-var errP5InjectedCommit = errors.New("injected P5 commit failure")
+var errInjectedCommit = errors.New("injected commit failure")
 
 type p5InterruptingStore struct {
 	sqlite.IngestStore
@@ -42,7 +42,7 @@ func (f p5InterruptingStore) WithTx(ctx context.Context, fn func(context.Context
 		if err := fn(ctx, tx); err != nil {
 			return err
 		}
-		return errP5InjectedCommit
+		return errInjectedCommit
 	})
 }
 
@@ -350,7 +350,7 @@ func TestP5RestartRecoveryAndNoDuplicateSuccess(t *testing.T) {
 		ingest.WithModelName("test-model"),
 		ingest.WithProcessorClock(func() time.Time { return f.clock }),
 	)
-	if _, err := failingProcessor.Process(ctx, interruptedJob); !errors.Is(err, errP5InjectedCommit) {
+	if _, err := failingProcessor.Process(ctx, interruptedJob); !errors.Is(err, errInjectedCommit) {
 		t.Fatalf("interrupted error = %v", err)
 	}
 	if f.fake.RequestCount() != beforeFailureRequests+1 {

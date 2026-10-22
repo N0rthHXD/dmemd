@@ -78,7 +78,7 @@ func TestHealthAndReadinessEndpoints(t *testing.T) {
 		response := httptest.NewRecorder()
 		app.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/memories", nil))
 		if response.Code != http.StatusNotFound {
-			t.Fatalf("GET /v1/memories status = %d, want 404 in P1", response.Code)
+			t.Fatalf("GET /v1/memories status = %d, want 404 without business routes", response.Code)
 		}
 	})
 }

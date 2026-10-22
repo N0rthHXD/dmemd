@@ -1,26 +1,22 @@
 # dmemd
 
-`dmemd` 是面向同一操作系统用户的本地 AI 记忆服务。首版采用 Go 单进程、SQLite
-与 HTTP/1.1 JSON API。P1–P6 已于 2026-10-20 完成验收；语义与关键词混合检索已按
-`docs/hybrid-retrieval-design.md` 实现。P7 的质量、容量、备份和发布准备暂缓，不阻塞
-当前本地服务使用。
+`dmemd` 是面向同一操作系统用户的本地 AI 记忆服务。采用 Go 单进程、SQLite 与
+HTTP/1.1 JSON API，支持关键词检索与基于 Embedding 的语义混合检索。
 
-## 当前状态
+## 功能概览
 
-P1–P5 已建立精确依赖基线、API/模型契约、配置与日志、真实 SQLite 单写连接/读池、
-顺序迁移、跨表事务、完整记忆版本与证据、来源清除、中文关键词检索、远端模型适配、
-统一异步接收、自动合并、单 Worker、三次尝试与崩溃恢复。P6 已提供架构规定的全部
-本地 HTTP API、完整进程组装、用户数据目录单实例锁、优雅关闭、调用端示例和 HTTP
-契约回归测试。当前没有认证、分页、幂等键、条件请求或独立前端。
+- 统一异步接收文本、对话和结构化内容，模型提取与记忆合并由后台单 Worker 完成。
+- 记忆具有完整版本、证据和生命周期：创建、更正、补证、归档、删除、历史恢复与永久清除。
+- 关键词检索使用 NFC/大小写规范化与中文词典分词，基于 SQLite FTS5/BM25，支持过滤、
+  可读摘要、证据引用和按需解释。
+- 混合检索并行执行关键词与 Embedding 余弦召回，按 RRF 融合；语义模型不可用或超时时
+  自动降级为关键词结果，并通过 `warnings` 返回稳定代码。Embedding 默认关闭。
+- 提供架构规定的全部本地 HTTP API、用户数据目录单实例锁和优雅关闭。
+- 当前没有认证、分页、幂等键、条件请求或独立前端。
 
-检索支持 `keyword` 与 `hybrid` 两种模式，默认仍为关键词检索。混合模式并行执行
-FTS5/BM25 与 Embedding 余弦召回，按 RRF 融合；语义模型不可用或超时时自动降级为
-关键词结果，并通过 `warnings` 返回稳定代码。没有可用向量时仍按 hybrid 执行，只返回
-关键词候选。Embedding 默认关闭，启用后由独立后台 Worker 生成并校验向量，关键词索引
-仍在记忆写入事务中同步维护。
-
-默认关键词路径已按 `docs/keyword-retrieval-optimization.md` 完成词项选择与覆盖率重排，
-并移除硬性最低命中过滤；LoCoMo 双语子集检索复评结果见该文档第 9 节。
+默认关键词检索会过滤受控停用词，并按 BM25 名次与词项覆盖率做有界重排，不设置最低命中
+过滤；显式 `match=all` 保持严格合取。没有可用向量时仍按 hybrid 执行，只返回关键词候选。
+关键词索引在记忆写入事务中同步维护，向量由独立后台 Worker 异步生成。
 
 ## 环境
 
@@ -54,7 +50,7 @@ make build
 默认监听 `127.0.0.1:18432`，数据目录为
 `${XDG_DATA_HOME:-$HOME/.local/share}/dmemd/`，配置目录为
 `${XDG_CONFIG_HOME:-$HOME/.config}/dmemd/`。配置也可通过
-`--config /path/to/config.json` 指定；显式指定的文件不存在时启动失败。
+`--config <配置文件路径>` 指定；显式指定的文件不存在时启动失败。
 
 同一数据目录同时只允许一个进程运行。单实例保护使用数据目录内的进程锁，不依赖
 HTTP 端口冲突；进程崩溃后锁由操作系统释放，可直接重新启动。启动顺序为
@@ -198,12 +194,9 @@ curl -sS http://127.0.0.1:18432/readyz
 ## 文档
 
 - `系统 AI 记忆服务架构设计.md`：架构依据
-- `tech-stack.md`、`project-structure.md`、`plan.md`、`tasks.md`：技术与实施规划
 - `api/openapi.yaml`：HTTP 契约（仅文档，不生成校验层）
-- `docs/hybrid-retrieval-design.md`：关键词与语义混合检索实现方案
-- `docs/keyword-retrieval-optimization.md`：关键词检索优化与参数精简实施方案
 - `docs/contracts/api-decisions.md`：架构未展开的接口语义
-- `docs/contracts/model-provider.md`：首个远端模型协议
+- `docs/contracts/model-provider.md`：远端模型协议
 - `docs/contracts/storage.md`：SQLite 连接、迁移、表与事务契约
-- `docs/performance.md`：P7 容量测试规格（尚未执行）
+- `docs/dependency-baseline.md`：依赖版本与 SQLite 能力基线
 - `docs/testing.md`：测试命令与隔离方式

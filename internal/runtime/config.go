@@ -68,7 +68,7 @@ func (d *Duration) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// DatabaseConfig contains SQLite runtime settings used from P2 onward.
+// DatabaseConfig contains SQLite runtime settings.
 type DatabaseConfig struct {
 	Path               string   `json:"path"`
 	BusyTimeout        Duration `json:"busy_timeout"`

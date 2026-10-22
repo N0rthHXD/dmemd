@@ -11,8 +11,8 @@ import (
 )
 
 // ErrDocumentBuilderMissing is returned by a write operation when the injected
-// search-document builder was not configured. The production builder is wired
-// in P4; tests inject a deterministic builder.
+// search-document builder was not configured. Production wiring supplies the
+// normalized builder; tests may inject a deterministic builder.
 var ErrDocumentBuilderMissing = errors.New("memory: 搜索文档构造器未配置")
 
 // Service implements the management read API and the internal unified write

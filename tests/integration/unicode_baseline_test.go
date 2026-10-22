@@ -7,7 +7,7 @@ import (
 )
 
 // TestUnicodeNormalizationBaseline confirms the pinned x/text version provides
-// the NFC behavior reserved for P4 document/query normalization.
+// the NFC behavior used for document/query normalization.
 func TestUnicodeNormalizationBaseline(t *testing.T) {
 	t.Parallel()
 

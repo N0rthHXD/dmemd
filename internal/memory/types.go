@@ -96,8 +96,8 @@ type SearchDocument struct {
 	ContentHash  string
 }
 
-// DocumentBuilder is injected into the write path. P4 provides the production
-// NFC/tokenization implementation; tests may supply a deterministic builder.
+// DocumentBuilder is injected into the write path. Production wiring supplies
+// the NFC/tokenization implementation; tests may supply a deterministic builder.
 // Building is pure and must not perform I/O.
 type DocumentBuilder interface {
 	BuildDocument(memory Memory) (SearchDocument, error)

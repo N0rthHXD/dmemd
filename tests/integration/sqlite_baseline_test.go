@@ -11,7 +11,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// TestSQLiteDependencyBaseline is the T1.2 probe. It uses a real temporary
+// TestSQLiteDependencyBaseline is the dependency baseline probe. It uses a real temporary
 // SQLite file through the pinned driver and verifies the capabilities the
 // architecture depends on: version reporting, WAL, foreign keys and FTS5.
 func TestSQLiteDependencyBaseline(t *testing.T) {

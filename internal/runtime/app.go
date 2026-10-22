@@ -39,7 +39,7 @@ func (f ReadinessFunc) Ready(ctx context.Context) error {
 // API. The runtime owns assembly; transport owns DTOs and response mapping.
 type Services = httptransport.Services
 
-// Option customizes the assembled application. Options are used by the full P6
+// Option customizes the assembled application. Options are used by the full
 // process assembly while health-only tests can keep calling New with three
 // arguments.
 type Option func(*App)

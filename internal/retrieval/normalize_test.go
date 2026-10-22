@@ -111,6 +111,61 @@ func TestIndexTextUsesDictionaryTerms(t *testing.T) {
 	}
 }
 
+func TestSelectQueryTermsRemovesStopwords(t *testing.T) {
+	groups := Groups("Jon是什么时候失去银行职员工作的？")
+	got := GroupTexts(selectQueryTerms(groups))
+	want := []string{"jon", "失去", "银行职员", "工作"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("selected terms = %#v, want %#v", got, want)
+	}
+}
+
+func TestSelectQueryTermsRemovesEnglishStopwords(t *testing.T) {
+	groups := Groups("How to configure the server?")
+	got := GroupTexts(selectQueryTerms(groups))
+	want := []string{"configure", "server"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("selected terms = %#v, want %#v", got, want)
+	}
+}
+
+func TestSelectQueryTermsPreservesNegationNumbersAndTime(t *testing.T) {
+	groups := []Group{
+		{Text: "2026", Tokens: []string{"2026"}},
+		{Text: "昨天", Tokens: []string{"昨天"}},
+		{Text: "not", Tokens: []string{"not"}},
+		{Text: "不", Tokens: []string{"不"}},
+		{Text: "的", Tokens: []string{"的"}},
+		{Text: "the", Tokens: []string{"the"}},
+	}
+	got := GroupTexts(selectQueryTerms(groups))
+	want := []string{"2026", "昨天", "not", "不"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("selected terms = %#v, want %#v", got, want)
+	}
+}
+
+func TestSelectQueryTermsFallsBackWhenAllTermsRemoved(t *testing.T) {
+	groups := Groups("的 是 什么")
+	got := GroupTexts(selectQueryTerms(groups))
+	want := GroupTexts(groups)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("selected terms = %#v, want original %#v", got, want)
+	}
+}
+
+func TestMatchedGroupCountUsesFoldedTerms(t *testing.T) {
+	if got := matchedGroupCount(Groups("cafe"), "Café", ""); got != 1 {
+		t.Fatalf("folded title match count = %d, want 1", got)
+	}
+	if got := matchedGroupCount(Groups("cafe 2026"), "Café", "记录 2026"); got != 2 {
+		t.Fatalf("title and content match count = %d, want 2", got)
+	}
+	if got := matchedGroupCount(Groups("cafe"), "无关", "无关"); got != 0 {
+		t.Fatalf("unmatched count = %d, want 0", got)
+	}
+}
+
 func TestMatchedGroupsUsesDictionaryTerms(t *testing.T) {
 	groups := Groups("回答 语言 记忆")
 	matched := MatchedGroups(groups, "回答格式", "默认使用中文回答，并保留记忆。")

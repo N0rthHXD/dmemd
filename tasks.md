@@ -273,7 +273,7 @@
 - **依赖**：T4.8。
 - **描述**：将文档/查询共用规则从“连续汉字逐字 token、整组编译为相邻短语”改为内置词典精准分词；每个分词词项独立作为查询组，`all/any` 对词项做 `AND`/`OR`；保留 NFC、小写和标点边界，不删除停用词、不做 n-gram 扩展。
 - **验收标准**：索引与查询使用同一分词结果；长中文查询按多个词项匹配，不再编译为整句短语；非相邻词项可在同一文档中命中；`matched_terms` 返回词项；HTTP 请求和响应结构不变。
-- **执行记录**：在 `internal/retrieval/normalize.go` 引入固定版本 `github.com/go-ego/gse v1.1.0`，以 `SkipSubSeg` 精准模式加载内置中文词典；`Groups` 每个词项生成独立 `Group`，`Tokens`/`IndexText`/`MatchedGroups` 复用同一分词。更新 `internal/retrieval/*_test.go`、`internal/store/sqlite/search_query_test.go` 和 `tests/integration/p4_search_test.go`，覆盖 `Jon是什么时候失去银行职员工作的？`、非相邻词项、词项缺失与相关 active 选择。验证：`go test -count=1 ./...`、`make check`。限制：不迁移旧派生索引、不兼容旧逐字索引，开发库需重建索引；不做停用词、n-gram 或同义词扩展。
+- **执行记录**：在 `internal/retrieval/normalize.go` 引入固定版本 `github.com/go-ego/gse v1.1.0`，以 `SkipSubSeg` 精准模式加载内置中文词典；`Groups` 每个词项生成独立 `Group`，`Tokens`/`IndexText`/`MatchedGroups` 复用同一分词。更新 `internal/retrieval/*_test.go`、`internal/store/sqlite/search_query_test.go` 和 `tests/integration/p4_search_test.go`，覆盖 `Jon是什么时候失去银行职员工作的？`、非相邻词项、词项缺失与相关 active 选择。验证：`go test -count=1 ./...`、`make check`。限制：不迁移旧派生索引、不兼容旧逐字索引，开发库需重建索引；不做停用词、n-gram 或同义词扩展。2026-10-22 关键词检索优化为 keyword 模式的 `any` 增加受控停用词选择、候选覆盖率重排和松弛合取；显式 `all` 与后台 `RelatedActive` 保持原词项语义。
 
 ## P5：模型与持久化处理链
 
@@ -403,7 +403,7 @@
 - **依赖**：T6.5。
 - **描述**：接入 POST /v1/memories/search，映射 query、match、filters、top_k、explain，并返回契约中的 items。
 - **验收标准**：默认 all/20/active；返回 memory/score/snippet/matched_terms/evidence_refs，explanation 按需出现；静态 search 路由不会被当作记忆 ID；无搜索分页；中文与特殊字符测试复用真实 SQLite。
-- **执行记录**：在 `search.go` 接入 `POST /v1/memories/search`，解析 query/match/filters/top_k/explain 后委托 `retrieval.SearchService`；静态 search 路由独立注册。验证：P6 HTTP 集成测试使用真实 SQLite 与假模型覆盖中文关键词、kind 过滤、explain=true 返回 explanation、默认 active/top_k=20、删除后检索为空，以及包含 FTS 保留字符的输入返回 200 空 items；`TestPatchIgnoresContentAndSearchParsing` 验证参数透传。限制：一次请求完成 Top-K，无跨请求搜索快照或分页。
+- **执行记录**：在 `search.go` 接入 `POST /v1/memories/search`，解析 query/match/filters/top_k/explain 后委托 `retrieval.SearchService`；静态 search 路由独立注册。验证：P6 HTTP 集成测试使用真实 SQLite 与假模型覆盖中文关键词、kind 过滤、explain=true 返回 explanation、默认 active/top_k=20、删除后检索为空，以及包含 FTS 保留字符的输入返回 200 空 items；`TestPatchIgnoresContentAndSearchParsing` 验证参数透传。限制：一次请求完成 Top-K，无跨请求搜索快照或分页。2026-10-22 关键词检索优化将默认 `match` 由 `all` 改为 `any`；显式 `all` 保持严格合取，请求/响应结构和路由不变。
 
 ### [x] T6.7 接入来源查询与原文清除路由
 

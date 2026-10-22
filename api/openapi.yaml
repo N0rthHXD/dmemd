@@ -168,9 +168,12 @@ paths:
         User text is treated as ordinary keywords, never as FTS syntax. Mode
         defaults to keyword. Hybrid runs keyword and semantic recall in parallel
         and fuses them with Reciprocal Rank Fusion; semantic failures degrade to
-        the keyword result with a stable warning. Default match is all, top_k is
-        20 with a maximum of 100, and states is [active]. Deleted memories are
-        never returned. Explanation appears only when explain=true.
+        the keyword result with a stable warning. Match defaults to any when
+        omitted, empty, or unknown; keyword-mode any selects effective terms
+        from a controlled stopword list and requires at least half of them,
+        while explicit all requires every original term. top_k is 20 with a
+        maximum of 100, and states is [active]. Deleted memories are never
+        returned. Explanation appears only when explain=true.
       operationId: searchMemories
       requestBody:
         required: true
@@ -180,15 +183,19 @@ paths:
               $ref: '#/components/schemas/SearchRequest'
             examples:
               keyword:
-                summary: Keyword search
+                summary: Keyword search with the default any match
                 value:
                   query: 回答 语言
-                  match: all
                   filters:
                     kinds: [preference]
                     states: [active]
                   top_k: 20
                   explain: true
+              keyword_all:
+                summary: Strict keyword search requiring every term
+                value:
+                  query: 回答 语言
+                  match: all
               hybrid:
                 summary: Hybrid search
                 value:
@@ -953,7 +960,13 @@ components:
         match:
           type: string
           enum: [all, any]
-          description: Unknown values behave as all; only the keyword path uses it
+          default: any
+          description: >-
+            Omitted, empty, or unknown values behave as any. Keyword-mode any
+            removes controlled question, auxiliary, and generic terms, then
+            requires at least ceil(n/2) effective terms (at least one when n is
+            two or fewer). all keeps the original terms and requires every one.
+            Only the keyword path uses it.
         filters:
           $ref: '#/components/schemas/SearchFilters'
         top_k:
@@ -1024,7 +1037,8 @@ components:
         score:
           type: number
           description: >-
-            keyword mode uses -bm25; hybrid mode uses the RRF score. Larger is
+            Keyword-mode any uses a bounded BM25-rank and term-coverage fusion;
+            explicit all uses -bm25. Hybrid mode uses the RRF score. Larger is
             more relevant only within this result set.
         snippet:
           type: string
@@ -1035,7 +1049,8 @@ components:
           type: array
           description: >-
             Keyword query groups actually found in the title or content.
-            Semantic-only results always return an empty array.
+            Keyword-mode any returns the selected effective terms; all keeps the
+            original terms. Semantic-only results always return an empty array.
           items:
             type: string
         evidence_refs:

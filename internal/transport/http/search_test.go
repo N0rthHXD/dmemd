@@ -55,6 +55,37 @@ func TestSearchModeTopKValidationAndRequestMapping(t *testing.T) {
 	}
 }
 
+func TestSearchMatchRequestMapping(t *testing.T) {
+	var captured retrieval.Request
+	services := Services{Search: stubSearch{search: func(_ context.Context, request retrieval.Request) (retrieval.Result, error) {
+		captured = request
+		return retrieval.Result{Items: []retrieval.Item{}}, nil
+	}}}
+
+	tests := []struct {
+		name string
+		body string
+		want retrieval.Match
+	}{
+		{name: "omitted", body: `{"query":"x"}`, want: ""},
+		{name: "unknown", body: `{"query":"x","match":"latest"}`, want: "latest"},
+		{name: "explicit all", body: `{"query":"x","match":"all"}`, want: retrieval.MatchAll},
+		{name: "explicit any", body: `{"query":"x","match":"any"}`, want: retrieval.MatchAny},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/search",
+				strings.NewReader(test.body)))
+			if response.Code != http.StatusOK {
+				t.Fatalf("response = %d %q", response.Code, response.Body.String())
+			}
+			if captured.Match != test.want {
+				t.Fatalf("match = %q, want %q", captured.Match, test.want)
+			}
+		})
+	}
+}
+
 func TestSearchResponseIncludesWarningsAndHybridExplanation(t *testing.T) {
 	services := Services{Search: stubSearch{search: func(context.Context, retrieval.Request) (retrieval.Result, error) {
 		return retrieval.Result{

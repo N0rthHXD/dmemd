@@ -126,10 +126,12 @@ P4（T4.1–T4.9）关键词检索落定的契约，补充《系统 AI 记忆服
 - 查询由 `retrieval.Compile` 生成：每个分词词项编译为带引号的字面量短语，`all` 用 `AND`、`any`
   用 `OR` 组合；不再把连续汉字或整句查询编译为一个相邻短语。用户文本不会进入 FTS 语法；
   引号、括号、星号、`OR`/`NEAR` 等只作为普通 token 或被标点边界丢弃。最终表达式通过参数
-  绑定传给 `memory_fts MATCH ?`。
+  绑定传给 `memory_fts MATCH ?`。服务层 keyword 模式的 `any` 会在编译前选择有效词项，
+  并在候选层应用宽松合取与覆盖率重排；`Compile` 本身仍只做字面量 `AND`/`OR` 组合。
 - `Store.Search` 以 `memories` 当前快照为准执行状态、类型、创建应用和更新时间过滤；默认只查
   `active`，显式请求可查 `archived`，`deleted` 在服务层和存储层都被移除，永不返回。排序固定为
   `bm25(memory_fts, 4, 1) ASC, updated_at DESC, id ASC`，返回 `score=-bm25` 和 Top-K。
+  这是存储层顺序；服务层 keyword 模式的 `any` 可在其上按覆盖率重排并返回融合分数。
 - `memory_search_docs` 是派生数据，`memory_fts` 是外部内容 FTS5 表。插入、更新、删除文档由
   触发器在同一事务内同步 FTS。归档只更新 `memories.state` 并保留索引；逻辑删除删除搜索文档。
 - `Store.RebuildSearchDocuments` 在一个写事务内从 `memories` 重新生成全部未删除（`active` 与

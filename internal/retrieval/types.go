@@ -33,6 +33,8 @@ const (
 	// DefaultSnippetRunes bounds a readable snippet taken from original content.
 	DefaultSnippetRunes = 160
 	// FieldWeightTitle and FieldWeightContent are the FTS5 BM25 column weights.
+	// Candidate settings 4/1, 2/1 and 1/1 remain possible; 4/1 stays the
+	// default and is defined only here, never per request.
 	FieldWeightTitle   = 4
 	FieldWeightContent = 1
 
@@ -55,7 +57,8 @@ const (
 	WarningSemanticTimeout     = "semantic_timeout"
 )
 
-// Match controls how dictionary terms in a query are combined.
+// Match controls how dictionary terms in a query are combined. The zero value
+// and unknown values mean MatchAny; only MatchAll requests strict conjunction.
 type Match string
 
 const (
@@ -158,7 +161,7 @@ type EvidenceRef struct {
 	SourceID string `json:"source_id"`
 }
 
-// KeywordExplanation reports the keyword-path rank and raw BM25 score.
+// KeywordExplanation reports the final keyword-path rank and raw BM25 score.
 type KeywordExplanation struct {
 	Rank int     `json:"rank"`
 	BM25 float64 `json:"bm25"`

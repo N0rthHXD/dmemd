@@ -124,7 +124,8 @@ FTS 重建按记忆 ID 更新文档并清理无效项，不通过清空搜索文
    `min(500, max(100, 5*top_k))`。
 3. keyword 只查 FTS；hybrid 并行执行关键词查询和“查询向量→向量扫描”链路。
 4. 两路应用相同的类型、状态、应用和更新时间过滤，默认仅 active，可显式查 archived，
-   永不返回 deleted。`match=all/any` 仅控制关键词路，默认 all。
+   永不返回 deleted。`match=all/any` 仅控制关键词路，默认 any；keyword 模式的 any 会过滤
+   受控停用词并要求至少一半有效词项命中，显式 all 才要求全部原始词项。
 5. 向量 SQL 关联当前记忆和搜索文档，先过滤再流式计算，只接受 Profile、维数、内容
    哈希匹配的向量；以固定大小堆选候选，及时响应 context 取消。
 6. 候选按 memory_id 合并，批量读取当前快照，排除已删除、过滤不符或输入已变的候选，
@@ -150,7 +151,7 @@ rank 从 1 开始，未被某路召回时该路贡献为 0。关键词路按 BM2
 | --- | --- |
 | `query` | 查询文本 |
 | `mode` | keyword/hybrid，默认 keyword；其他值返回 `400` |
-| `match` | all/any，默认 all，仅作用于关键词路 |
+| `match` | all/any，默认 any，仅作用于关键词路；keyword 模式显式 all 为严格合取 |
 | `filters` | kinds、states、created_by_app、updated_after、updated_before |
 | `top_k` | 默认 20，上限 100 |
 | `explain` | 默认 false，按需返回排序解释 |
@@ -170,7 +171,8 @@ rank 从 1 开始，未被某路召回时该路贡献为 0。关键词路按 BM2
 
 每项返回 `memory`、`score`、`snippet`、`matched_terms`、`evidence_refs`。
 `retrieval.mode` 表示实际执行策略，不由某路是否恰好返回空集合决定。
-keyword 的 score 为 -BM25，hybrid 为 RRF；分数越大越好，仅用于当前结果排序。
+keyword 模式的 any 查询 `score` 为 BM25 名次与词项覆盖率的融合分数，显式 all 为 -BM25；
+hybrid 为 RRF。分数越大越好，仅用于当前结果排序。
 
 `explain=true` 时返回 `explanation`：包含 `ranking`（bm25/rrf），以及参与的
 `keyword: {rank, bm25}`、`semantic: {rank, cosine}`。不返回 Profile、内容哈希、

@@ -20,7 +20,7 @@ type semanticOutcome struct {
 
 func (s *Service) searchHybrid(ctx context.Context, groups []Group, request Request, filters Filters, topK int) (Result, error) {
 	if s.encoder == nil {
-		result, err := s.searchKeyword(ctx, groups, request, filters, topK, []string{WarningSemanticUnavailable})
+		result, err := s.searchKeyword(ctx, groups, request, filters, topK, []string{WarningSemanticUnavailable}, false)
 		return result, err
 	}
 	limit := candidateLimit(topK)

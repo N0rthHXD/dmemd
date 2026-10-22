@@ -67,11 +67,29 @@ func TestCompileQuotesUserOperators(t *testing.T) {
 	}
 }
 
-func TestNormalizeMatchDefaultsToAll(t *testing.T) {
-	if normalizeMatch("unknown") != MatchAll {
-		t.Fatalf("unknown match did not default to all")
+func TestNormalizeMatchDefaultsToAny(t *testing.T) {
+	tests := []struct {
+		match Match
+		want  Match
+	}{
+		{match: "", want: MatchAny},
+		{match: MatchAny, want: MatchAny},
+		{match: "unknown", want: MatchAny},
+		{match: MatchAll, want: MatchAll},
 	}
-	if normalizeMatch(MatchAny) != MatchAny {
-		t.Fatalf("any match changed")
+	for _, test := range tests {
+		if got := normalizeMatch(test.match); got != test.want {
+			t.Fatalf("normalizeMatch(%q) = %q, want %q", test.match, got, test.want)
+		}
+	}
+}
+
+func TestCompileDefaultsToAny(t *testing.T) {
+	expression, err := Compile(Groups("回答 语言"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expression != `("回答") OR ("语言")` {
+		t.Fatalf("default expression = %q, want OR", expression)
 	}
 }

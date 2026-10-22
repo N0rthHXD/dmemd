@@ -145,35 +145,43 @@ func TestP4ChineseKeywordSearchContract(t *testing.T) {
 	if result := f.run(t, retrieval.Request{Query: "终端"}); !slices.Equal(p4IDs(result), p4Set(procedure.ID)) {
 		t.Fatalf("two-character content query = %+v", p4IDs(result))
 	}
-	if result := f.run(t, retrieval.Request{Query: "运行服务"}); !slices.Equal(p4IDs(result), p4Set(procedure.ID)) {
+	if result := f.run(t, retrieval.Request{Query: "运行服务", Match: retrieval.MatchAll}); !slices.Equal(p4IDs(result), p4Set(procedure.ID)) {
 		t.Fatalf("multi-term Chinese query = %+v", p4IDs(result))
 	}
-	if result := f.run(t, retrieval.Request{Query: "部署步骤"}); !slices.Equal(p4IDs(result), p4Set(procedure.ID)) {
+	if result := f.run(t, retrieval.Request{Query: "部署步骤", Match: retrieval.MatchAll}); !slices.Equal(p4IDs(result), p4Set(procedure.ID)) {
 		t.Fatalf("long Chinese title query = %+v", p4IDs(result))
 	}
-	if result := f.run(t, retrieval.Request{Query: "记忆检索"}); !slices.Equal(p4IDs(result), p4Set(memoryResult.ID)) {
+	if result := f.run(t, retrieval.Request{Query: "记忆检索", Match: retrieval.MatchAll}); !slices.Equal(p4IDs(result), p4Set(memoryResult.ID)) {
 		t.Fatalf("phrase query = %+v", p4IDs(result))
 	}
 	if result := f.run(t, retrieval.Request{Query: "记忆"}); !p4SameMembers(p4IDs(result), memoryResult.ID, aiMemory.ID) {
 		t.Fatalf("two-character query = %+v", p4IDs(result))
 	}
-	if result := f.run(t, retrieval.Request{Query: "AI记忆"}); !slices.Equal(p4IDs(result), p4Set(aiMemory.ID)) {
+	if result := f.run(t, retrieval.Request{Query: "AI记忆", Match: retrieval.MatchAll}); !slices.Equal(p4IDs(result), p4Set(aiMemory.ID)) {
 		t.Fatalf("mixed query = %+v", p4IDs(result))
 	}
 	if result := f.run(t, retrieval.Request{Query: "MEMORY"}); !slices.Equal(p4IDs(result), p4Set(meeting.ID)) {
 		t.Fatalf("case-insensitive English query = %+v", p4IDs(result))
 	}
-	if result := f.run(t, retrieval.Request{Query: "终端，运行"}); !slices.Equal(p4IDs(result), p4Set(procedure.ID)) {
+	if result := f.run(t, retrieval.Request{Query: "终端，运行", Match: retrieval.MatchAll}); !slices.Equal(p4IDs(result), p4Set(procedure.ID)) {
 		t.Fatalf("punctuation boundary query = %+v", p4IDs(result))
 	}
 
-	all := f.run(t, retrieval.Request{Query: "回答 语言"})
+	all := f.run(t, retrieval.Request{Query: "回答 语言", Match: retrieval.MatchAll})
 	if !slices.Equal(p4IDs(all), p4Set(answer.ID)) {
 		t.Fatalf("match=all result = %+v", p4IDs(all))
 	}
 	anyResult := f.run(t, retrieval.Request{Query: "回答 语言", Match: retrieval.MatchAny})
 	if !p4SameMembers(p4IDs(anyResult), answer.ID, format.ID, longSnippet.ID) {
 		t.Fatalf("match=any result = %+v", p4IDs(anyResult))
+	}
+	defaultAny := f.run(t, retrieval.Request{Query: "回答 语言"})
+	if !p4SameMembers(p4IDs(defaultAny), answer.ID, format.ID, longSnippet.ID) {
+		t.Fatalf("default match result = %+v", p4IDs(defaultAny))
+	}
+	unknownAny := f.run(t, retrieval.Request{Query: "回答 语言", Match: "unknown"})
+	if !p4SameMembers(p4IDs(unknownAny), answer.ID, format.ID, longSnippet.ID) {
+		t.Fatalf("unknown match result = %+v", p4IDs(unknownAny))
 	}
 	for _, item := range anyResult.Items {
 		switch item.Memory.ID {
@@ -248,7 +256,7 @@ func TestP4ChineseKeywordSearchContract(t *testing.T) {
 		t.Fatalf("deleted state was not removed from active search: %+v", p4IDs(result))
 	}
 
-	longResult := f.run(t, retrieval.Request{Query: "关键回答"})
+	longResult := f.run(t, retrieval.Request{Query: "关键回答", Match: retrieval.MatchAll})
 	if !slices.Equal(p4IDs(longResult), p4Set(longSnippet.ID)) {
 		t.Fatalf("long snippet result = %+v", p4IDs(longResult))
 	}
@@ -261,7 +269,7 @@ func TestP4ChineseKeywordSearchContract(t *testing.T) {
 	}
 
 	for _, query := range []string{"", " ，。！？ ", "*", `记忆" OR * (NEAR)`} {
-		if result := f.run(t, retrieval.Request{Query: query}); len(result.Items) != 0 {
+		if result := f.run(t, retrieval.Request{Query: query, Match: retrieval.MatchAll}); len(result.Items) != 0 {
 			t.Fatalf("query %q returned %+v", query, p4IDs(result))
 		}
 	}
@@ -279,7 +287,7 @@ func TestP4ChineseDictionaryTermsMatchIndependently(t *testing.T) {
 	})
 
 	query := "Jon是什么时候失去银行职员工作的？"
-	result := f.run(t, retrieval.Request{Query: query})
+	result := f.run(t, retrieval.Request{Query: query, Match: retrieval.MatchAll})
 	if !slices.Equal(p4IDs(result), p4Set(reordered.ID)) {
 		t.Fatalf("long Chinese query = %+v", p4IDs(result))
 	}
@@ -287,6 +295,56 @@ func TestP4ChineseDictionaryTermsMatchIndependently(t *testing.T) {
 	wantTerms := []string{"jon", "是", "什么", "时候", "失去", "银行职员", "工作", "的"}
 	if !slices.Equal(item.MatchedTerms, wantTerms) {
 		t.Fatalf("matched_terms = %#v, want %#v", item.MatchedTerms, wantTerms)
+	}
+}
+
+func TestP4KeywordTermSelectionCoverageAndRelaxedConjunction(t *testing.T) {
+	f := newP4Fixture(t)
+	exact := f.create(t, memory.CreateInput{
+		Kind: memory.KindEvent, Title: "记录", Content: "Jon失去银行职员工作。",
+	})
+	f.advance(time.Minute)
+	partial := f.create(t, memory.CreateInput{
+		Kind: memory.KindEvent, Title: "Jon失去工作", Content: "无关正文。",
+	})
+	f.advance(time.Minute)
+	borderline := f.create(t, memory.CreateInput{
+		Kind: memory.KindEvent, Title: "Jon工作", Content: "无关正文。",
+	})
+	f.advance(time.Minute)
+	weak := f.create(t, memory.CreateInput{
+		Kind: memory.KindEvent, Title: "工作记录", Content: "普通工作记录。",
+	})
+
+	result := f.run(t, retrieval.Request{Query: "Jon是什么时候失去银行职员工作的？"})
+	if !slices.Equal(p4IDs(result), []string{exact.ID, partial.ID, borderline.ID}) {
+		t.Fatalf("reranked result = %+v, want exact, partial, borderline", p4IDs(result))
+	}
+	for i := 1; i < len(result.Items); i++ {
+		if result.Items[i-1].Score < result.Items[i].Score {
+			t.Fatalf("scores are not descending: %+v", result.Items)
+		}
+	}
+	for _, item := range result.Items {
+		if item.Memory.ID == weak.ID {
+			t.Fatalf("candidate below relaxed threshold was returned: %+v", item)
+		}
+		for _, term := range item.MatchedTerms {
+			if term == "的" || term == "是" || term == "什么" || term == "时候" {
+				t.Fatalf("stopword leaked into matched_terms: %#v", item.MatchedTerms)
+			}
+		}
+	}
+	if got := p4Item(t, result, exact.ID).MatchedTerms; !slices.Equal(got, []string{"jon", "失去", "银行职员", "工作"}) {
+		t.Fatalf("exact matched_terms = %#v", got)
+	}
+	if got := p4Item(t, result, partial.ID).MatchedTerms; !slices.Equal(got, []string{"jon", "失去", "工作"}) {
+		t.Fatalf("partial matched_terms = %#v", got)
+	}
+
+	strict := f.run(t, retrieval.Request{Query: "jon 失去 银行职员 工作", Match: retrieval.MatchAll})
+	if !slices.Equal(p4IDs(strict), p4Set(exact.ID)) {
+		t.Fatalf("explicit all result = %+v", p4IDs(strict))
 	}
 }
 
@@ -527,6 +585,9 @@ func TestP4RelatedActiveContext(t *testing.T) {
 	unrelated := f.create(t, memory.CreateInput{
 		Kind: memory.KindFact, Title: "部署步骤", Content: "打开终端运行服务。",
 	})
+	stopwordOnly := f.create(t, memory.CreateInput{
+		Kind: memory.KindFact, Title: "疑问词", Content: "什么",
+	})
 
 	related, err := f.search.RelatedActive(ctx, "回答 记忆", 0)
 	if err != nil {
@@ -547,6 +608,16 @@ func TestP4RelatedActiveContext(t *testing.T) {
 	}
 	if len(related) != 1 || related[0].ID != answer.ID {
 		t.Fatalf("limited related = %+v", p4MemoryIDs(related))
+	}
+	related, err = f.search.RelatedActive(ctx, "回答 什么", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p4SameMembers(p4MemoryIDs(related), answer.ID, stopwordOnly.ID) {
+		t.Fatalf("related active kept original terms = %+v", p4MemoryIDs(related))
+	}
+	if result := f.run(t, retrieval.Request{Query: "回答 什么"}); !slices.Equal(p4IDs(result), p4Set(answer.ID)) {
+		t.Fatalf("public any term selection = %+v", p4IDs(result))
 	}
 	related, err = f.search.RelatedActive(ctx, "火星殖民地", 0)
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/N0rthHXD/dmemd/internal/memory"
@@ -88,10 +89,14 @@ func (s *Service) Search(ctx context.Context, request Request) (Result, error) {
 			Retrieval: Retrieval{Mode: mode},
 		}, nil
 	}
+	match := normalizeMatch(request.Match)
+	if mode == ModeKeyword && match == MatchAny {
+		groups = selectQueryTerms(groups)
+	}
 	if mode == ModeHybrid {
 		return s.searchHybrid(ctx, groups, request, filters, topK)
 	}
-	return s.searchKeyword(ctx, groups, request, filters, topK, nil)
+	return s.searchKeyword(ctx, groups, request, filters, topK, nil, true)
 }
 
 // RelatedActive selects at most ten active memories for background extraction.
@@ -110,7 +115,7 @@ func (s *Service) RelatedActive(ctx context.Context, text string, limit int) ([]
 	}
 	result, err := s.searchKeyword(ctx, groups, Request{Match: MatchAny}, Filters{
 		States: []memory.State{memory.StateActive},
-	}, limit, []string{})
+	}, limit, []string{}, false)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +154,7 @@ func (s *Service) RebuildIndex(ctx context.Context) (RebuildResult, error) {
 	return result, nil
 }
 
-func (s *Service) searchKeyword(ctx context.Context, groups []Group, request Request, filters Filters, limit int, warnings []string) (Result, error) {
+func (s *Service) searchKeyword(ctx context.Context, groups []Group, request Request, filters Filters, topK int, warnings []string, optimize bool) (Result, error) {
 	result := Result{
 		Items:     []Item{},
 		Retrieval: Retrieval{Mode: ModeKeyword},
@@ -159,6 +164,12 @@ func (s *Service) searchKeyword(ctx context.Context, groups []Group, request Req
 	expression, err := Compile(groups, match)
 	if err != nil {
 		return Result{}, err
+	}
+	limit := topK
+	if optimize && match == MatchAny {
+		// Reranking needs a wider candidate pool. top_k still bounds the
+		// response, not the recall range.
+		limit = candidateLimit(topK)
 	}
 	hits, err := s.backend.Search(ctx, Query{
 		Match:      match,
@@ -170,7 +181,12 @@ func (s *Service) searchKeyword(ctx context.Context, groups []Group, request Req
 	if err != nil {
 		return Result{}, err
 	}
-	assembled, err := s.assembleKeywordHits(ctx, hits, groups, filters, limit, request.Explain)
+	var assembled []Item
+	if optimize && match == MatchAny {
+		assembled, err = s.assembleRerankedKeywordHits(ctx, hits, groups, filters, topK, request.Explain)
+	} else {
+		assembled, err = s.assembleKeywordHits(ctx, hits, groups, filters, topK, request.Explain)
+	}
 	if err != nil {
 		return Result{}, err
 	}
@@ -211,6 +227,72 @@ func (s *Service) assembleKeywordHits(ctx context.Context, hits []Hit, groups []
 		if len(selected) >= limit {
 			break
 		}
+	}
+	return s.buildKeywordItems(ctx, selected, groups, explain)
+}
+
+// keywordCoverageWeight bounds how much term coverage can move a candidate
+// relative to its BM25 rank. Coverage is in [0,1]; the fixed weight keeps the
+// fusion stable and avoids adding raw BM25 scores to a ratio.
+const keywordCoverageWeight = 0.005
+
+func minimumMatchedTerms(termCount int) int {
+	if termCount <= 0 {
+		return 0
+	}
+	minimum := (termCount + 1) / 2
+	if minimum < 1 {
+		return 1
+	}
+	return minimum
+}
+
+// assembleRerankedKeywordHits applies relaxed conjunction at the candidate
+// layer, then fuses each candidate's BM25 rank with its actual term coverage.
+// Candidates are kept in BM25 order as the stable fallback for equal scores.
+func (s *Service) assembleRerankedKeywordHits(ctx context.Context, hits []Hit, groups []Group, filters Filters, topK int, explain bool) ([]Item, error) {
+	if len(hits) == 0 || len(groups) == 0 {
+		return []Item{}, nil
+	}
+	ids := make([]string, 0, len(hits))
+	for _, hit := range hits {
+		ids = append(ids, hit.MemoryID)
+	}
+	candidates, err := s.backend.LoadSearchCandidates(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	minimum := minimumMatchedTerms(len(groups))
+	selected := make([]rankedCandidate, 0, len(hits))
+	for index, hit := range hits {
+		candidate, ok := candidates[hit.MemoryID]
+		if !ok || !matchesFilters(candidate.Memory, filters) || candidate.Memory.State == memory.StateDeleted {
+			continue
+		}
+		matched := matchedGroupCount(groups, candidate.Memory.Title, candidate.Memory.Content)
+		if matched < minimum {
+			continue
+		}
+		hitCopy := hit
+		coverage := float64(matched) / float64(len(groups))
+		selected = append(selected, rankedCandidate{
+			candidate:   candidate,
+			keyword:     &hitCopy,
+			keywordRank: index + 1,
+			score:       reciprocalRank(index+1) + keywordCoverageWeight*coverage,
+		})
+	}
+	sort.SliceStable(selected, func(i, j int) bool {
+		if selected[i].score != selected[j].score {
+			return selected[i].score > selected[j].score
+		}
+		return selected[i].keywordRank < selected[j].keywordRank
+	})
+	if len(selected) > topK {
+		selected = selected[:topK]
+	}
+	for i := range selected {
+		selected[i].keywordRank = i + 1
 	}
 	return s.buildKeywordItems(ctx, selected, groups, explain)
 }

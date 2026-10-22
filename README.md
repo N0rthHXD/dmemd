@@ -121,10 +121,18 @@ curl -sS http://127.0.0.1:18432/v1/ingest-jobs/33333333-3333-4333-8333-333333333
 # 默认返回最近更新的 50 条 active/archived 记忆，无分页
 curl -sS 'http://127.0.0.1:18432/v1/memories?limit=20'
 
-# 关键词检索；按词典分词，默认 match=all、top_k=20、仅 active
+# 关键词检索；按词典分词，默认 match=any、top_k=20、仅 active
 curl -sS -X POST http://127.0.0.1:18432/v1/memories/search \
   -H 'Content-Type: application/json' \
   -d '{"query":"回答 语言","filters":{"kinds":["preference"]},"explain":true}'
+
+# 需要所有原始分词同时命中时显式指定 match=all
+curl -sS -X POST http://127.0.0.1:18432/v1/memories/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"回答 语言","match":"all"}'
+
+# 默认 any 会过滤受控停用词，并要求至少一半有效词项命中；
+# 结果按 BM25 名次与词项覆盖率做有界重排
 
 # 混合检索；语义不可用时自动降级为关键词并返回 warnings
 curl -sS -X POST http://127.0.0.1:18432/v1/memories/search \
@@ -190,6 +198,7 @@ curl -sS http://127.0.0.1:18432/readyz
 - `tech-stack.md`、`project-structure.md`、`plan.md`、`tasks.md`：技术与实施规划
 - `api/openapi.yaml`：HTTP 契约（仅文档，不生成校验层）
 - `docs/hybrid-retrieval-design.md`：关键词与语义混合检索实现方案
+- `docs/keyword-retrieval-optimization.md`：关键词检索优化与参数精简实施方案
 - `docs/contracts/api-decisions.md`：架构未展开的接口语义
 - `docs/contracts/model-provider.md`：首个远端模型协议
 - `docs/contracts/storage.md`：SQLite 连接、迁移、表与事务契约

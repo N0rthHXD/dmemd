@@ -39,8 +39,8 @@ func quotePhrase(tokens []string) string {
 }
 
 func normalizeMatch(match Match) Match {
-	if match == MatchAny {
-		return MatchAny
+	if match == MatchAll {
+		return MatchAll
 	}
-	return MatchAll
+	return MatchAny
 }

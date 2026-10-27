@@ -45,3 +45,18 @@ func TestRunRejectsMissingExplicitConfig(t *testing.T) {
 		t.Fatal("run accepted missing explicit config")
 	}
 }
+
+func TestArtifactIntegrityCheckExitsWithoutStartingServer(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"data_dir":"`+filepath.Join(dir, "data")+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"--artifact-integrity-check", "--config", path}, &stdout, &stderr); err != nil {
+		t.Fatalf("check: %v; %s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"checked":0,"issues":[]`) {
+		t.Fatalf("report = %s", stdout.String())
+	}
+}

@@ -35,11 +35,12 @@ func TestLabeledSummaries(t *testing.T) {
 					topics = []string{testCase.Topic}
 				}
 				f.create(t, memory.CreateInput{
-					Kind:     kind,
-					Title:    item.Title,
-					Content:  item.Content,
-					ScopeKey: testCase.ScopeKey,
-					Topics:   topics,
+					Durability: memory.Durability(item.Durability),
+					Kind:       kind,
+					Title:      item.Title,
+					Content:    item.Content,
+					ScopeKey:   testCase.ScopeKey,
+					Topics:     topics,
 				})
 			}
 

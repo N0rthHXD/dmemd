@@ -15,12 +15,14 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/memory"
 	"github.com/N0rthHXD/dmemd/internal/retrieval"
 	"github.com/N0rthHXD/dmemd/internal/source"
+	"github.com/N0rthHXD/dmemd/internal/topic"
 )
 
 const (
-	// processBudget bounds one full job attempt, including extraction, context
-	// selection and every decision batch.
-	processBudget = 120 * time.Second
+	// DefaultProcessBudget bounds an attempt, independently of per-call limits.
+	DefaultProcessBudget     = 600 * time.Second
+	DefaultExtractionTimeout = 180 * time.Second
+	DefaultDecisionTimeout   = 300 * time.Second
 	// maxCandidatesPerSource is the fixed first-release extraction budget.
 	maxCandidatesPerSource = 64
 	// maxDecisionBatch is the fixed dependency batch size.
@@ -45,19 +47,37 @@ type FactGroupReader interface {
 // Processor orchestrates source loading, extraction, per-candidate context
 // selection, on-demand model decisions and one atomic merge transaction.
 type Processor struct {
-	store     Store
-	sources   SourceReader
-	related   retrieval.RelatedService
-	writer    memory.Writer
-	extractor ExtractionProvider
-	decider   DecisionProvider
-	modelName string
-	now       func() time.Time
-	logger    *slog.Logger
+	store             Store
+	sources           SourceReader
+	related           retrieval.RelatedService
+	writer            memory.Writer
+	extractor         ExtractionProvider
+	decider           DecisionProvider
+	modelName         string
+	now               func() time.Time
+	logger            *slog.Logger
+	processBudget     time.Duration
+	extractionTimeout time.Duration
+	decisionTimeout   time.Duration
 }
 
 // ProcessorOption customizes a Processor.
 type ProcessorOption func(*Processor)
+
+// WithProcessingBudget configures the attempt budget and individual model calls.
+func WithProcessingBudget(budget, extraction, decision time.Duration) ProcessorOption {
+	return func(p *Processor) {
+		if budget > 0 {
+			p.processBudget = budget
+		}
+		if extraction > 0 {
+			p.extractionTimeout = extraction
+		}
+		if decision > 0 {
+			p.decisionTimeout = decision
+		}
+	}
+}
 
 // WithProcessorClock overrides the processing clock. Values are UTC.
 func WithProcessorClock(now func() time.Time) ProcessorOption {
@@ -99,13 +119,16 @@ func WithDecisionProvider(provider DecisionProvider) ProcessorOption {
 // preparation happen before Store.WithTx.
 func NewProcessor(store Store, sources SourceReader, related retrieval.RelatedService, writer memory.Writer, provider ExtractionProvider, options ...ProcessorOption) *Processor {
 	processor := &Processor{
-		store:     store,
-		sources:   sources,
-		related:   related,
-		writer:    writer,
-		extractor: provider,
-		now:       time.Now,
-		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		store:             store,
+		sources:           sources,
+		related:           related,
+		writer:            writer,
+		extractor:         provider,
+		now:               time.Now,
+		logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		processBudget:     DefaultProcessBudget,
+		extractionTimeout: DefaultExtractionTimeout,
+		decisionTimeout:   DefaultDecisionTimeout,
 	}
 	if decider, ok := provider.(DecisionProvider); ok {
 		processor.decider = decider
@@ -118,12 +141,22 @@ func NewProcessor(store Store, sources SourceReader, related retrieval.RelatedSe
 
 // Process runs one claimed job. Extraction and decision calls happen outside the
 // write transaction; all writes and the job success state commit together.
-func (p *Processor) Process(ctx context.Context, job Job) (ProcessResult, error) {
+func (p *Processor) Process(ctx context.Context, job Job) (output ProcessResult, processErr error) {
 	if p.store == nil || p.sources == nil || p.related == nil || p.writer == nil || p.extractor == nil {
 		return ProcessResult{}, errors.New("ingest: processor dependencies not configured")
 	}
-	budgetCtx, cancel := context.WithTimeout(ctx, processBudget)
+	budgetCtx, cancel := context.WithTimeout(ctx, p.processBudget)
 	defer cancel()
+	stage := "source"
+	defer func() {
+		if processErr != nil {
+			code := ""
+			if ctx.Err() == nil && errors.Is(budgetCtx.Err(), context.DeadlineExceeded) {
+				code = "process_budget_exceeded"
+			}
+			processErr = processingError(stage, code, processErr)
+		}
+	}()
 
 	src, err := p.sources.GetSource(budgetCtx, job.SourceID)
 	if err != nil {
@@ -134,11 +167,12 @@ func (p *Processor) Process(ctx context.Context, job Job) (ProcessResult, error)
 	}
 
 	started := time.Now()
-	extracted, err := p.extractor.Extract(budgetCtx, ExtractionRequest{Source: src})
+	stage = "extraction"
+	candidates, extractionWarnings, err := p.extractValidated(budgetCtx, src)
 	if err != nil {
 		return ProcessResult{}, err
 	}
-	candidates := normalizeCandidates(src, extracted.Candidates, p.modelName, p.now().UTC())
+	candidates = normalizeCandidates(src, candidates, p.modelName, p.now().UTC())
 	if len(candidates) > maxCandidatesPerSource {
 		return ProcessResult{}, &ProviderError{
 			Operation: "candidate_limit_exceeded",
@@ -155,6 +189,7 @@ func (p *Processor) Process(ctx context.Context, job Job) (ProcessResult, error)
 
 	// Pin the catalog generation before any context read or model call. A write
 	// that lands while we decide therefore invalidates the plan.
+	stage = "context"
 	generation, err := p.related.CatalogGeneration(budgetCtx)
 	if err != nil {
 		return ProcessResult{}, fmt.Errorf("读取目录版本: %w", err)
@@ -164,17 +199,20 @@ func (p *Processor) Process(ctx context.Context, job Job) (ProcessResult, error)
 		return ProcessResult{}, err
 	}
 	plan.catalogGeneration = generation
+	plan.warnings = append(plan.warnings, extractionWarnings...)
 	if err := p.loadContext(budgetCtx, plan); err != nil {
 		return ProcessResult{}, err
 	}
 	if !plan.complete {
 		plan.warnings = append(plan.warnings, WarningContextTruncated)
 	}
+	stage = "decision"
 	if err := p.decide(budgetCtx, plan); err != nil {
 		return ProcessResult{}, err
 	}
 
 	var result mergeResult
+	stage = "commit"
 	now := p.now().UTC()
 	err = p.store.WithTx(budgetCtx, func(ctx context.Context, tx Tx) error {
 		currentJob, err := tx.GetJob(ctx, job.ID)
@@ -230,6 +268,8 @@ func (p *Processor) Process(ctx context.Context, job Job) (ProcessResult, error)
 		currentJob.Error = ""
 		currentJob.ProtocolFailures = 0
 		currentJob.WaitReason = ""
+		currentJob.Stage = ""
+		currentJob.ReasonCode = ""
 		currentJob.NextAttemptAt = nil
 		currentJob.UpdatedAt = now
 		currentJob.FinishedAt = &now
@@ -287,6 +327,156 @@ func (p *Processor) finishCancelled(ctx context.Context, job Job) (ProcessResult
 		return ProcessResult{}, err
 	}
 	return ProcessResult{Status: JobCancelled, MemoryIDs: []string{}}, nil
+}
+
+// extractValidated is the boundary between an untrusted model response and
+// deterministic ingestion. One local repair is allowed. Candidates that still
+// fail are isolated; candidates that already passed are retained byte-for-byte.
+func (p *Processor) extractValidated(ctx context.Context, src source.Source) ([]Candidate, []string, error) {
+	started := time.Now()
+	extracted, err := modelCall(ctx, p.extractionTimeout, func(callCtx context.Context) (ExtractionResult, error) {
+		return p.extractor.Extract(callCtx, ExtractionRequest{Source: src})
+	})
+	p.logModelCall("extraction", 1, len(src.Content), started, err)
+	repairer, canRepair := p.extractor.(ExtractionRepairProvider)
+	repairUsed := false
+	if err != nil {
+		var providerErr *ProviderError
+		if !canRepair || !errors.As(err, &providerErr) || providerErr.Operation != "protocol" {
+			return nil, nil, err
+		}
+		extracted, err = p.repairExtraction(ctx, repairer, ExtractionRepairRequest{
+			Source: src, Retry: true,
+			Issues: []ExtractionIssue{{Code: "invalid_structure", Message: "return a JSON object with a candidates array"}},
+		})
+		repairUsed = true
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	if len(extracted.Candidates) > maxCandidatesPerSource {
+		return nil, nil, &ProviderError{Operation: "candidate_limit_exceeded", Err: ErrCandidateLimitExceeded}
+	}
+	original := prepareExtractionCandidates(extracted.Candidates)
+	normalizeExtractionMetadata(original)
+	issues := ValidateExtraction(src, original)
+	if len(issues) == 0 {
+		return original, nil, nil
+	}
+	// Explicit privacy exclusions are not repairable. Do not let a second
+	// model response resurrect them by omitting their exclusion evidence.
+	excluded := make(map[string]struct{})
+	for _, issue := range issues {
+		if issue.Code == "explicit_exclusion" {
+			excluded[issue.CandidateID] = struct{}{}
+		}
+	}
+	warnings := []string{}
+	if len(excluded) > 0 {
+		warnings = append(warnings, WarningExtractionExcluded)
+	}
+	eligible := make([]Candidate, 0, len(original))
+	for _, candidate := range original {
+		if _, skip := excluded[candidate.CandidateID]; !skip {
+			eligible = append(eligible, candidate)
+		}
+	}
+	repairIssues := make([]ExtractionIssue, 0, len(issues))
+	for _, issue := range issues {
+		if _, skip := excluded[issue.CandidateID]; !skip {
+			repairIssues = append(repairIssues, issue)
+		}
+	}
+	if len(repairIssues) == 0 {
+		return eligible, warnings, nil
+	}
+	invalid := issueIDs(repairIssues)
+	current := eligible
+	if canRepair && !repairUsed {
+		batch := make([]Candidate, 0, len(invalid))
+		for _, candidate := range eligible {
+			if _, bad := invalid[candidate.CandidateID]; bad {
+				batch = append(batch, candidate)
+			}
+		}
+		repaired, repairErr := p.repairExtraction(ctx, repairer, ExtractionRepairRequest{
+			Source: src, Candidates: batch, Issues: repairIssues,
+			Retry: len(batch) >= 3 && len(batch)*2 >= len(eligible),
+		})
+		if repairErr == nil {
+			current = mergeExtractionRepair(eligible, repaired.Candidates, repairIssues)
+		}
+	}
+	if ctx.Err() != nil {
+		return nil, nil, ctx.Err()
+	}
+	if len(current) > maxCandidatesPerSource {
+		return nil, nil, &ProviderError{Operation: "candidate_limit_exceeded", Err: ErrCandidateLimitExceeded}
+	}
+	normalizeExtractionMetadata(current)
+	remainingIssues := ValidateExtraction(src, current)
+	current = isolateInvalidCandidates(current, remainingIssues)
+	// A missing/invalid replacement is observable, rather than silently losing
+	// a fact. Successful repairs need no warning.
+	for id := range invalid {
+		found := false
+		for _, candidate := range current {
+			if candidate.CandidateID == id || strings.HasPrefix(candidate.CandidateID, id+".") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			warnings = append(warnings, WarningExtractionIsolated)
+			break
+		}
+	}
+	if len(remainingIssues) > 0 {
+		warnings = append(warnings, WarningExtractionIsolated)
+	}
+	for _, issue := range issues {
+		p.logger.Debug("extraction validation issue", "candidate_id", issue.CandidateID, "field", issue.Field, "code", issue.Code)
+	}
+	return prepareExtractionCandidates(current), uniqueWarnings(warnings), nil
+}
+
+func mergeExtractionRepair(original, repaired []Candidate, issues []ExtractionIssue) []Candidate {
+	invalid := issueIDs(issues)
+	result := make([]Candidate, 0, len(original)+len(repaired))
+	for _, candidate := range original {
+		if _, bad := invalid[candidate.CandidateID]; !bad {
+			result = append(result, candidate)
+			continue
+		}
+		seen := make(map[string]struct{})
+		for _, replacement := range repaired {
+			id := replacement.CandidateID
+			if id != candidate.CandidateID && !strings.HasPrefix(id, candidate.CandidateID+".") {
+				continue
+			}
+			if _, duplicate := seen[id]; duplicate {
+				replacement.ProtocolErrors = append(replacement.ProtocolErrors, "candidate_id")
+			}
+			seen[id] = struct{}{}
+			result = append(result, replacement)
+		}
+	}
+	// A repair response that does not preserve candidate ids cannot safely be
+	// associated with the invalid source candidate, so it is ignored.
+	return result
+}
+
+func uniqueWarnings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 // buildPlan validates extraction output and creates the deterministic subset of
@@ -457,6 +647,18 @@ func (p *Processor) loadContext(ctx context.Context, plan *mergePlan) error {
 			}
 		}
 	}
+	// Explicit, well-scoped replacements are deterministic. Mark them as add
+	// actions so the transaction performs the same guarded convergence check;
+	// ambiguous candidates continue to the decision model below.
+	for _, candidate := range sortedCandidates(plan) {
+		if _, done := plan.decided[candidate.CandidateID]; done {
+			continue
+		}
+		if action, ok := planConvergence(plan, candidate); ok {
+			plan.actions = append(plan.actions, action)
+			plan.decided[candidate.CandidateID] = struct{}{}
+		}
+	}
 	return nil
 }
 
@@ -495,18 +697,7 @@ func (p *Processor) decide(ctx context.Context, plan *mergePlan) error {
 			Conflicts:       plan.conflicts,
 			ContextComplete: plan.complete,
 		}
-		started := time.Now()
-		result, err := p.decider.Decide(ctx, request)
-		if err != nil {
-			return err
-		}
-		p.logger.Info("model decision completed",
-			"model", p.modelName,
-			"candidates", len(batch),
-			"decisions", len(result.Decisions),
-			"duration_ms", time.Since(started).Milliseconds(),
-		)
-		decisions, err := validateDecisions(batch, result)
+		decisions, err := p.decideValidated(ctx, request)
 		if err != nil {
 			return err
 		}
@@ -589,6 +780,15 @@ func candidateQuery(candidate Candidate) string {
 	return strings.Join(parts, " ")
 }
 
+func prepareExtractionCandidates(candidates []Candidate) []Candidate {
+	result := make([]Candidate, 0, len(candidates))
+	for index, candidate := range candidates {
+		candidate.CandidateID = fmt.Sprintf("c%d", index+1)
+		result = append(result, candidate)
+	}
+	return result
+}
+
 func normalizeCandidates(src source.Source, candidates []Candidate, modelName string, now time.Time) []Candidate {
 	fallbackObserved := src.CreatedAt
 	if fallbackObserved.IsZero() {
@@ -602,7 +802,9 @@ func normalizeCandidates(src source.Source, candidates []Candidate, modelName st
 		if content == "" {
 			continue
 		}
-		candidate.CandidateID = fmt.Sprintf("c%d", index+1)
+		if candidate.CandidateID == "" {
+			candidate.CandidateID = fmt.Sprintf("c%d", index+1)
+		}
 		if _, duplicate := seen[candidate.CandidateID]; duplicate {
 			continue
 		}
@@ -626,7 +828,7 @@ func normalizeCandidates(src source.Source, candidates []Candidate, modelName st
 		candidate.ValidFrom = memory.UTCPointer(candidate.ValidFrom)
 		candidate.ValidTo = memory.UTCPointer(candidate.ValidTo)
 		if len(candidate.Topics) > 0 {
-			candidate.Topics = memory.NormalizeTopics(candidate.Topics)
+			candidate.Topics = topic.Raw(candidate.Topics)
 		}
 		candidate.Evidence = buildServiceEvidence(src, candidate.Evidence, modelName, now)
 		result = append(result, candidate)

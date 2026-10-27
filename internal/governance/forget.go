@@ -17,9 +17,10 @@ import (
 // request. Unknown identifiers are reported as their ordinary not-found errors.
 var ErrInvalidForget = errors.New("invalid forget request")
 
-// ForgetRequest names explicit leaves to forget permanently. At least one list
-// must contain an identifier. Sources expand to every associated memory and
-// application report; runs also remove their dedicated report source.
+// ForgetRequest names leaves to forget permanently. At least one list must
+// contain an identifier. Sources expand through origins and evidence in every
+// revision, then memories expand through safe same-group duplicates. Runs also
+// remove their dedicated report source.
 type ForgetRequest struct {
 	MemoryIDs     []string `json:"memory_ids,omitempty"`
 	SourceIDs     []string `json:"source_ids,omitempty"`
@@ -28,9 +29,11 @@ type ForgetRequest struct {
 
 // ForgetResult lists the identifiers removed by one committed transaction.
 type ForgetResult struct {
-	MemoryIDs     []string `json:"memory_ids"`
-	SourceIDs     []string `json:"source_ids"`
-	ExperienceIDs []string `json:"experience_ids"`
+	MemoryIDs                []string `json:"memory_ids"`
+	SourceIDs                []string `json:"source_ids"`
+	ExperienceIDs            []string `json:"experience_ids"`
+	Warnings                 []string `json:"warnings,omitempty"`
+	RetainedRelatedMemoryIDs []string `json:"retained_related_memory_ids,omitempty"`
 }
 
 // ForgetService is the HTTP-facing permanent-forget capability.
@@ -140,12 +143,19 @@ func (s *ForgetServiceAPI) Forget(ctx context.Context, request ForgetRequest) (F
 			}
 		}
 
+		retained, err := expandForgetDuplicates(ctx, tx, memoryIDs)
+		if err != nil {
+			return err
+		}
 		for _, id := range sortedSet(experienceIDs) {
 			if err := s.purgeExperienceInTx(ctx, tx, id, now); err != nil {
 				return err
 			}
 		}
 		for _, id := range sortedSet(memoryIDs) {
+			if err := tx.DeleteForgetConflicts(ctx, id, now); err != nil {
+				return err
+			}
 			if err := s.memories.PurgeInTx(ctx, tx, id); err != nil {
 				return err
 			}
@@ -165,9 +175,13 @@ func (s *ForgetServiceAPI) Forget(ctx context.Context, request ForgetRequest) (F
 		}
 
 		result = ForgetResult{
-			MemoryIDs:     sortedSet(memoryIDs),
-			SourceIDs:     sortedSet(sourceIDs),
-			ExperienceIDs: sortedSet(experienceIDs),
+			MemoryIDs:                sortedSet(memoryIDs),
+			SourceIDs:                sortedSet(sourceIDs),
+			ExperienceIDs:            sortedSet(experienceIDs),
+			RetainedRelatedMemoryIDs: retained,
+		}
+		if len(retained) > 0 {
+			result.Warnings = []string{"related_memories_retained"}
 		}
 		return nil
 	})

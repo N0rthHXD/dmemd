@@ -181,7 +181,7 @@ func (t *Tx) InsertConflict(ctx context.Context, conflict memory.Conflict) error
 	for _, member := range conflict.Members {
 		if _, err := t.tx.ExecContext(ctx, `INSERT INTO memory_conflict_members(
 			conflict_id, memory_id, version) VALUES (?, ?, ?)
-			ON CONFLICT(conflict_id, memory_id) DO UPDATE SET version = excluded.version`,
+			ON CONFLICT(conflict_id, memory_id) DO NOTHING`,
 			conflict.ID, member.MemoryID, member.Version); err != nil {
 			return fmt.Errorf("写入冲突成员 %s/%s: %w", conflict.ID, member.MemoryID, err)
 		}
@@ -211,11 +211,18 @@ func (t *Tx) UpdateConflict(ctx context.Context, conflict memory.Conflict) error
 }
 
 // UpsertConflictMember extends an open conflict with a member or refreshes its
-// detection version.
+// current version is read from memories; the initial detection version stays immutable.
 func (t *Tx) UpsertConflictMember(ctx context.Context, conflictID string, member memory.ConflictMember) error {
+	var status string
+	if err := t.tx.QueryRowContext(ctx, `SELECT status FROM memory_conflicts WHERE id = ?`, conflictID).Scan(&status); err != nil {
+		return fmt.Errorf("读取冲突状态 %s: %w", conflictID, err)
+	}
+	if memory.ConflictStatus(status) != memory.ConflictOpen {
+		return fmt.Errorf("%w: 已解决冲突成员不可变", memory.ErrConflictStale)
+	}
 	_, err := t.tx.ExecContext(ctx, `INSERT INTO memory_conflict_members(
 		conflict_id, memory_id, version) VALUES (?, ?, ?)
-		ON CONFLICT(conflict_id, memory_id) DO UPDATE SET version = excluded.version`,
+		ON CONFLICT(conflict_id, memory_id) DO NOTHING`,
 		conflictID, member.MemoryID, member.Version)
 	if err != nil {
 		return fmt.Errorf("写入冲突成员 %s/%s: %w", conflictID, member.MemoryID, err)

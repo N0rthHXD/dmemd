@@ -95,23 +95,12 @@ func (s *Service) ResolveInTx(ctx context.Context, tx Tx, input ResolveInput) (C
 	if err := s.applyResolution(ctx, tx, &conflict, input); err != nil {
 		return Conflict{}, err
 	}
-	conflict.Status = ConflictResolved
-	conflict.Revision++
-	conflict.UpdatedAt = s.timestamp()
 	payload, err := json.Marshal(s.resolutionPayload(input))
 	if err != nil {
 		return Conflict{}, fmt.Errorf("编码裁决结果: %w", err)
 	}
-	conflict.Resolution = string(payload)
-	if err := tx.UpdateConflict(ctx, conflict); err != nil {
-		return Conflict{}, err
-	}
-	if err := tx.InsertConflictEvent(ctx, ConflictEvent{
-		ID:         idgen.NewUUID(),
-		ConflictID: conflict.ID,
-		Action:     "resolved",
-		CreatedAt:  conflict.UpdatedAt,
-	}); err != nil {
+	conflict, err = CompleteConflictResolution(ctx, tx, conflict, string(payload), s.timestamp())
+	if err != nil {
 		return Conflict{}, err
 	}
 	memberIDs := make([]string, 0, len(conflict.Members))
@@ -122,13 +111,34 @@ func (s *Service) ResolveInTx(ctx context.Context, tx Tx, input ResolveInput) (C
 		"conflict:"+conflict.ID+":"+strconv.Itoa(conflict.Revision)); err != nil {
 		return Conflict{}, err
 	}
+	return tx.GetConflict(ctx, conflict.ID)
+}
+
+// CompleteConflictResolution seals an adjudication after its memory revisions
+// have been written. Ingest and management share the same immutable audit path.
+func CompleteConflictResolution(ctx context.Context, tx Tx, conflict Conflict, resolution string, now time.Time) (Conflict, error) {
+	if conflict.Status != ConflictOpen {
+		return Conflict{}, ErrConflictStale
+	}
+	conflict.Status = ConflictResolved
+	conflict.Revision++
+	conflict.UpdatedAt = now.UTC()
+	conflict.Resolution = resolution
+	if err := tx.UpdateConflict(ctx, conflict); err != nil {
+		return Conflict{}, err
+	}
+	if err := tx.InsertConflictEvent(ctx, ConflictEvent{
+		ID: idgen.NewUUID(), ConflictID: conflict.ID, Action: "resolved", CreatedAt: conflict.UpdatedAt,
+	}); err != nil {
+		return Conflict{}, err
+	}
 	if _, err := tx.CancelJob(ctx, task.KindReviewConflict, task.ConflictKey(conflict.ID), conflict.UpdatedAt); err != nil {
 		return Conflict{}, err
 	}
 	if err := tx.BumpCatalogGeneration(ctx); err != nil {
 		return Conflict{}, err
 	}
-	return tx.GetConflict(ctx, conflict.ID)
+	return conflict, nil
 }
 
 func (s *Service) resolutionPayload(input ResolveInput) resolutionPayload {
@@ -159,6 +169,9 @@ func validateMemberVersions(conflict Conflict, supplied []ConflictMember) error 
 	}
 	seen := make(map[string]struct{}, len(supplied))
 	for _, member := range supplied {
+		if _, duplicate := seen[member.MemoryID]; duplicate {
+			return fmt.Errorf("%w: 成员 %s 重复", ErrInvalidResolution, member.MemoryID)
+		}
 		detected, ok := current[member.MemoryID]
 		if !ok {
 			return fmt.Errorf("%w: 成员 %s 不属于该冲突", ErrInvalidResolution, member.MemoryID)

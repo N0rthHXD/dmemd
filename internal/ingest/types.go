@@ -22,7 +22,8 @@ const (
 	JobCancelled JobStatus = "cancelled"
 )
 
-// Waiting reasons are fixed codes and never contain provider or source text.
+// Waiting reasons are fixed scheduling categories. Job.Stage and Job.ReasonCode
+// provide finer diagnostics without containing provider or source text.
 const (
 	WaitReasonConfiguration = "configuration"
 	WaitReasonTransient     = "transient"
@@ -55,6 +56,8 @@ type Job struct {
 	Attempts         int        `json:"attempts"`
 	ProtocolFailures int        `json:"protocol_failures"`
 	WaitReason       string     `json:"wait_reason,omitempty"`
+	Stage            string     `json:"stage,omitempty"`
+	ReasonCode       string     `json:"reason_code,omitempty"`
 	NextAttemptAt    *time.Time `json:"next_attempt_at,omitempty"`
 	Error            string     `json:"error,omitempty"`
 	MemoryIDs        []string   `json:"memory_ids"`
@@ -91,12 +94,51 @@ type FactGroupProposal struct {
 	Cardinality memory.Cardinality `json:"cardinality,omitempty"`
 }
 
+// Phase describes the lifecycle phase stated by an extracted assertion. It is
+// deliberately separate from memory.State: a scheduled event is still an
+// active memory, while a cancelled event is not a deleted memory.
+type Phase = memory.Phase
+
+const (
+	PhaseUnknown    Phase = "unknown"
+	PhaseScheduled  Phase = "scheduled"
+	PhaseInProgress Phase = "in_progress"
+	PhaseCompleted  Phase = "completed"
+	PhaseCancelled  Phase = "cancelled"
+	PhasePostponed  Phase = "postponed"
+)
+
+// Durability is the model's classification of how long an assertion should be
+// useful. The service uses it as extraction metadata and never treats it as a
+// lifecycle or truth decision.
+type Durability = memory.Durability
+
+const (
+	DurabilityUnknown   Durability = "unknown"
+	DurabilityDurable   Durability = "durable"
+	DurabilityEpisodic  Durability = "episodic"
+	DurabilityTemporary Durability = "temporary"
+)
+
+// ProcedureProposal keeps the structure that makes a procedure actionable.
+// The fields are extraction metadata; the persisted atomic memory still keeps
+// the faithful assertion text in Candidate.Content.
+type ProcedureProposal struct {
+	Steps                []string `json:"steps,omitempty"`
+	Preconditions        []string `json:"preconditions,omitempty"`
+	CompletionConditions []string `json:"completion_conditions,omitempty"`
+	FailureBranches      []string `json:"failure_branches,omitempty"`
+}
+
 // Candidate is one independently extracted assertion. CandidateID is assigned
 // by the service; the model never chooses a memory, version, evidence or
 // persistent-state identifier.
 type Candidate struct {
-	CandidateID    string               `json:"candidate_id"`
-	Kind           memory.Kind          `json:"kind,omitempty"`
+	CandidateID string      `json:"candidate_id"`
+	Kind        memory.Kind `json:"kind,omitempty"`
+	// Protocol diagnostics survive tolerant parsing for validation and repair.
+	TemporalErrors []string             `json:"-"`
+	ProtocolErrors []string             `json:"-"`
 	Title          string               `json:"title,omitempty"`
 	Content        string               `json:"content"`
 	ObservedAt     *time.Time           `json:"observed_at,omitempty"`
@@ -104,8 +146,11 @@ type Candidate struct {
 	ValidTo        *time.Time           `json:"valid_to,omitempty"`
 	ValidFromBasis memory.TemporalBasis `json:"valid_from_basis,omitempty"`
 	ValidToBasis   memory.TemporalBasis `json:"valid_to_basis,omitempty"`
+	Phase          Phase                `json:"phase,omitempty"`
+	Durability     Durability           `json:"durability,omitempty"`
 	Topics         []string             `json:"topics,omitempty"`
 	FactGroup      *FactGroupProposal   `json:"fact_group,omitempty"`
+	Procedure      *ProcedureProposal   `json:"procedure,omitempty"`
 	Evidence       []source.Evidence    `json:"evidence,omitempty"`
 }
 
@@ -119,6 +164,27 @@ type ExtractionRequest struct {
 // successful result.
 type ExtractionResult struct {
 	Candidates []Candidate `json:"candidates"`
+}
+
+// ExtractionIssue is a safe, non-source-bearing description of a candidate
+// validation failure. It is suitable for a targeted model repair request and
+// for logs/metrics.
+type ExtractionIssue struct {
+	CandidateID string `json:"candidate_id,omitempty"`
+	Field       string `json:"field,omitempty"`
+	Code        string `json:"code"`
+	Message     string `json:"message"`
+}
+
+// ExtractionRepairRequest asks an optional provider to repair only the
+// extraction protocol. It does not expose memory ids or database state.
+type ExtractionRepairRequest struct {
+	Source     source.Source     `json:"source"`
+	Candidates []Candidate       `json:"candidates"`
+	Issues     []ExtractionIssue `json:"issues"`
+	// Retry requests a fresh structured response after a structural protocol
+	// failure. It shares the single repair-call budget with local repairs.
+	Retry bool `json:"retry"`
 }
 
 // EvidenceRef references one evidence entry of the current extraction batch.
@@ -162,8 +228,10 @@ type DecisionResult struct {
 
 // ContextWarning codes are stable and contain no model data.
 const (
-	WarningContextTruncated = "context_truncated"
-	WarningConflictDetected = "fact_conflict"
+	WarningContextTruncated   = "context_truncated"
+	WarningConflictDetected   = "fact_conflict"
+	WarningExtractionIsolated = "extraction_candidates_isolated"
+	WarningExtractionExcluded = "extraction_content_excluded"
 )
 
 // ProcessResult reports one completed processing attempt.

@@ -24,11 +24,11 @@ func TestRecallModeTopKValidationAndRequestMapping(t *testing.T) {
 	}}}
 
 	response := serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/recall",
-		strings.NewReader(`{"query":"吃饭有什么忌口","scope_key":"project:dmemd","layers":["atomic","summary"],"mode":"hybrid","match":"any","top_k":10,"explain":true}`)))
+		strings.NewReader(`{"query":"吃饭有什么忌口","scope_key":"project:dmemd","layers":["atomic","summary"],"mode":"hybrid","top_k":10,"explain":true}`)))
 	if response.Code != http.StatusOK {
 		t.Fatalf("hybrid request = %d %q", response.Code, response.Body.String())
 	}
-	if calls != 1 || captured.Mode != retrieval.ModeHybrid || captured.Match != retrieval.MatchAny ||
+	if calls != 1 || captured.Mode != retrieval.ModeHybrid ||
 		captured.TopK != 10 || !captured.Explain || captured.ScopeKey != "project:dmemd" {
 		t.Fatalf("captured request = %+v", captured)
 	}
@@ -62,37 +62,6 @@ func TestRecallModeTopKValidationAndRequestMapping(t *testing.T) {
 	}
 	if len(captured.Layers) != 0 {
 		t.Fatalf("omitted layers should reach the service empty: %+v", captured.Layers)
-	}
-}
-
-func TestRecallMatchRequestMapping(t *testing.T) {
-	var captured retrieval.RecallRequest
-	services := Services{Search: stubSearch{recall: func(_ context.Context, request retrieval.RecallRequest) (retrieval.RecallResult, error) {
-		captured = request
-		return retrieval.RecallResult{Memories: []retrieval.Item{}}, nil
-	}}}
-
-	tests := []struct {
-		name string
-		body string
-		want retrieval.Match
-	}{
-		{name: "omitted", body: `{"query":"x"}`, want: ""},
-		{name: "unknown", body: `{"query":"x","match":"latest"}`, want: "latest"},
-		{name: "explicit all", body: `{"query":"x","match":"all"}`, want: retrieval.MatchAll},
-		{name: "explicit any", body: `{"query":"x","match":"any"}`, want: retrieval.MatchAny},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			response := serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/recall",
-				strings.NewReader(test.body)))
-			if response.Code != http.StatusOK {
-				t.Fatalf("response = %d %q", response.Code, response.Body.String())
-			}
-			if captured.Match != test.want {
-				t.Fatalf("match = %q, want %q", captured.Match, test.want)
-			}
-		})
 	}
 }
 

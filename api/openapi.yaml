@@ -887,6 +887,14 @@ paths:
         removes its dedicated source. The whole request is one transaction: an
         unknown identifier or storage failure rolls back every listed target.
         Historical and rendered derived reads return 404 after commit.
+        Source association includes evidence in any memory revision, not only
+        the current origin. Duplicate closure requires the same non-empty fact
+        group, scope, kind and phase, formatting-normalized identical content,
+        and equal or overlapping valid time. Deleted copies are included.
+        Same-group memories that fail these safeguards are retained and listed
+        with related_memories_retained. Dependent conflicts (including resolved
+        history) are removed and their review jobs cancelled; derived jobs are
+        revision-invalidated and rebuilt from remaining inputs.
       operationId: forget
       requestBody:
         required: true
@@ -1176,8 +1184,8 @@ components:
 
     Memory:
       type: object
-      required: [id, kind, title, content, state, assertion_status, version, observed_at,
-        valid_from_basis, valid_to_basis, topics, created_at, updated_at]
+      required: [id, kind, phase, durability, title, content, state, assertion_status, version, observed_at,
+        valid_from_basis, valid_to_basis, topics, raw_topics, created_at, updated_at]
       properties:
         id:
           type: string
@@ -1185,6 +1193,14 @@ components:
         kind:
           type: string
           enum: [fact, preference, event, procedure]
+        phase:
+          type: string
+          description: Lifecycle phase of the assertion; independent from memory state
+          enum: [unknown, scheduled, in_progress, completed, cancelled, postponed]
+        durability:
+          type: string
+          description: Extraction durability metadata; not a truth or lifecycle decision
+          enum: [unknown, durable, episodic, temporary]
         title:
           type: string
         content:
@@ -1238,10 +1254,16 @@ components:
           description: Flat scope label; absent or empty means unknown
         topics:
           type: array
-          description: Normalized flat topic labels; never a hierarchy
+          description: Canonical topic labels including inherited parents; bilingual aliases use taxonomy-v1, unknown labels remain extension leaves
           items:
             type: string
-          example: [go, sqlite]
+          example: [containers, kubernetes, oom]
+        raw_topics:
+          type: array
+          description: Original labels before alias and parent expansion, preserved for audit
+          items:
+            type: string
+          example: [K8s, 节点内存耗尽]
 
     Relation:
       type: object
@@ -1413,10 +1435,14 @@ components:
         query:
           type: string
           description: >-
-            Ordinary keywords; empty or punctuation-only input returns empty
-            partitions. Whitespace and punctuation separate groups; dictionary
-            terms are matched independently. The same text is normalized for
-            semantic retrieval without the document template.
+            Keywords or a natural-language question. All keyword paths, including
+            derived layers and the hybrid keyword branch, use the same dictionary
+            segmentation and controlled stopword filtering, preserving negation.
+            Any remaining term may match. Empty, punctuation-only, or stopword-only
+            input returns empty partitions without running retrieval. Keyword mode
+            ranks by BM25 and bounded term coverage without a minimum-coverage
+            filter. Semantic retrieval uses the original query without the document
+            template.
         scope_key:
           type: string
           description: >-
@@ -1440,16 +1466,6 @@ components:
             Keyword uses FTS5/BM25 only. Hybrid runs both atomic recall paths and
             fuses them with RRF; semantic failures degrade to keyword with a
             warning. Derived layers always use their own FTS index.
-        match:
-          type: string
-          enum: [all, any]
-          default: any
-          description: >-
-            Omitted, empty, or unknown values behave as any. Keyword-mode any
-            removes controlled question, auxiliary, and generic terms, then
-            matches any remaining term; recalled candidates are coverage-reranked
-            but are never dropped for low coverage. all keeps the original terms
-            and requires every one. Only keyword retrieval paths use it.
         filters:
           $ref: '#/components/schemas/SearchFilters'
         top_k:
@@ -1504,7 +1520,10 @@ components:
       properties:
         memories:
           type: array
-          description: Atomic fact, preference, event and procedure results.
+          description: >-
+            Atomic fact, preference, event and procedure results. Accepted
+            assertions first, then labelled pending alternatives; rejected
+            assertions are never recalled. Pending items emit fact_conflict.
           items:
             $ref: '#/components/schemas/SearchItem'
         summaries:
@@ -1530,7 +1549,7 @@ components:
           type: array
           description: >-
             Open conflicts touching this atomic query and as_of instant. Pending
-            member text is never copied into ordinary items.
+            member text may appear in memories with assertion_status=pending and conflict_refs.
           items:
             $ref: '#/components/schemas/ConflictSummary'
         warnings:
@@ -1585,7 +1604,7 @@ components:
             type: string
         outcome:
           type: string
-          enum: [success, failure, unknown]
+          enum: [success, failure, unknown, partial_success]
           description: Application's own report; missing means unknown
         skill_id:
           type: string
@@ -1610,7 +1629,7 @@ components:
           type: string
         outcome:
           type: string
-          enum: [success, failure, unknown]
+          enum: [success, failure, unknown, partial_success]
         state:
           type: string
           enum: [recorded, revoked]
@@ -1701,6 +1720,9 @@ components:
       type: object
       required: [id, kind, target_key, current_version, state, updated_at]
       properties:
+        reason_code:
+          type: string
+          description: Current diagnostic such as no_procedure_input, topic_mismatch, model_generation_failed, invalid_model_output, model_unavailable or no_eligible_input; readable even before a first revision exists
         id:
           type: string
         kind:
@@ -1726,7 +1748,8 @@ components:
     ArtifactRevision:
       type: object
       required: [artifact_id, version, title, content, content_hash, generator,
-        protocol_version, truncated, memory_refs, run_refs, created_at]
+        protocol_version, taxonomy_version, generator_version, run_id, provenance,
+        truncated, memory_refs, run_refs, created_at]
       properties:
         artifact_id:
           type: string
@@ -1739,13 +1762,46 @@ components:
           type: string
         payload:
           type: object
-          description: Structured experience-case or skill payload; summaries use {}
+          description: Structured payload; summaries include coverage (full/subset) and truncated; experience cases include the application-reported outcome and verification disclaimer
         content_hash:
           type: string
+          description: SHA-256 of title, body, serialized payload and immutable provenance, separated by NUL bytes
         generator:
           type: string
         protocol_version:
           type: string
+        taxonomy_version:
+          type: string
+          example: taxonomy-v1
+        generator_version:
+          type: string
+          example: generator-v2
+        run_id:
+          type: string
+          description: Generation job ID and revision (not the client experience deduplication key)
+        provenance:
+          type: object
+          description: Immutable serialized audit manifest, checked independently against the dependency tables
+          required: [memory_refs, run_refs, run_id, taxonomy_version, generator_version, protocol_version, truncated]
+          properties:
+            memory_refs:
+              type: array
+              items:
+                $ref: '#/components/schemas/ArtifactMemoryRef'
+            run_refs:
+              type: array
+              items:
+                $ref: '#/components/schemas/ArtifactRunRef'
+            run_id:
+              type: string
+            taxonomy_version:
+              type: string
+            generator_version:
+              type: string
+            protocol_version:
+              type: string
+            truncated:
+              type: boolean
         reason_code:
           type: string
           description: Fixed code such as input_truncated
@@ -1782,9 +1838,10 @@ components:
         score:
           type: number
           description: >-
-            Keyword-mode any uses a bounded BM25-rank and term-coverage fusion;
-            explicit all uses -bm25. Hybrid mode uses the RRF score. Larger is
-            more relevant only within this result set.
+            Keyword mode uses a bounded BM25-rank and term-coverage fusion.
+            Hybrid mode uses the RRF score. Accepted assertions precede pending
+            assertions regardless of score; scores compare relevance within the
+            same assertion status in this result set.
         snippet:
           type: string
           description: >-
@@ -1794,8 +1851,8 @@ components:
           type: array
           description: >-
             Keyword query groups actually found in the title or content.
-            Keyword-mode any returns the selected effective terms; all keeps the
-            original terms. Semantic-only results always return an empty array.
+            Terms use the shared filtered any query. Semantic-only results always
+            return an empty array.
           items:
             type: string
         evidence_refs:
@@ -1939,6 +1996,18 @@ components:
           items:
             type: string
             format: uuid
+        warnings:
+          type: array
+          description: Present when related memories could not be safely deleted.
+          items:
+            type: string
+            enum: [related_memories_retained]
+        retained_related_memory_ids:
+          type: array
+          description: Sorted retained same-group IDs; omitted when none remain.
+          items:
+            type: string
+            format: uuid
 
     Job:
       type: object
@@ -1956,8 +2025,8 @@ components:
           description: |
             waiting means the task is parked. transient waits resume
             automatically with bounded backoff; configuration waits are
-            reevaluated after a restart; protocol waits fail after three
-            consecutive malformed responses.
+            reevaluated after a restart; protocol waits fail after worker.max_attempts
+            consecutive malformed responses (default three), after local repair.
           enum: [queued, running, waiting, succeeded, failed, cancelled]
         attempts:
           type: integer
@@ -1970,6 +2039,15 @@ components:
           type: string
           enum: [transient, configuration, protocol]
           description: Fixed wait reason; never contains source or provider text
+        stage:
+          type: string
+          enum: [source, extraction, extraction_repair, context, decision, decision_repair, commit, processing]
+          description: Stage that caused the wait or failure
+        reason_code:
+          type: string
+          enum: [configuration, transient, protocol, model_timeout, process_budget_exceeded,
+            state_changed, decision_protocol_invalid, decision_repair_failed]
+          description: Stable diagnostic code; independent of the display error
         next_attempt_at:
           type: string
           format: date-time

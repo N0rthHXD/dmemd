@@ -135,22 +135,32 @@ func TestSelectQueryTermsPreservesNegationNumbersAndTime(t *testing.T) {
 		{Text: "昨天", Tokens: []string{"昨天"}},
 		{Text: "not", Tokens: []string{"not"}},
 		{Text: "不", Tokens: []string{"不"}},
+		{Text: "没", Tokens: []string{"没"}},
+		{Text: "无", Tokens: []string{"无"}},
+		{Text: "never", Tokens: []string{"never"}},
 		{Text: "的", Tokens: []string{"的"}},
 		{Text: "the", Tokens: []string{"the"}},
 	}
 	got := GroupTexts(selectQueryTerms(groups))
-	want := []string{"2026", "昨天", "not", "不"}
+	want := []string{"2026", "昨天", "not", "不", "没", "无", "never"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("selected terms = %#v, want %#v", got, want)
 	}
 }
 
-func TestSelectQueryTermsFallsBackWhenAllTermsRemoved(t *testing.T) {
-	groups := Groups("的 是 什么")
-	got := GroupTexts(selectQueryTerms(groups))
-	want := GroupTexts(groups)
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("selected terms = %#v, want original %#v", got, want)
+func TestSelectQueryTermsReturnsEmptyWhenAllTermsRemoved(t *testing.T) {
+	for _, query := range []string{"", "，。！？", "的 是 什么", "what is the"} {
+		if got := selectQueryTerms(Groups(query)); len(got) != 0 {
+			t.Fatalf("selected terms for %q = %#v, want empty", query, got)
+		}
+	}
+}
+
+func TestQueryGroupsUsesSharedPreprocessing(t *testing.T) {
+	for _, query := range []string{"我对什么过敏？", "过敏 过敏", "过敏"} {
+		if got := GroupTexts(queryGroups(query)); !reflect.DeepEqual(got, []string{"过敏"}) {
+			t.Fatalf("queryGroups(%q) = %#v", query, got)
+		}
 	}
 }
 

@@ -67,6 +67,8 @@ type ExperienceTx interface {
 // before any foreign-key cascade removes an edge.
 type ForgetTx interface {
 	ListMemoryIDsForSource(ctx context.Context, sourceID string) ([]string, error)
+	ListForgetGroupMemories(ctx context.Context, groupID string) ([]memory.Memory, error)
+	DeleteForgetConflicts(ctx context.Context, memoryID string, now time.Time) error
 	ListExperienceIDsForSource(ctx context.Context, sourceID string) ([]string, error)
 	DeleteExperienceRun(ctx context.Context, experienceID string) error
 	DeleteIngestJobsBySource(ctx context.Context, sourceID string) error

@@ -170,7 +170,7 @@ func TestHTTPContract(t *testing.T) {
 	fake.Enqueue(testutil.FakeResponse{
 		Status:  http.StatusOK,
 		Block:   true,
-		Content: `{"candidates":[{"action":"add","kind":"preference","title":"回答语言","content":"用户希望默认使用中文回答。","evidence":[{"message_id":"msg-1","quote":"以后请默认使用中文回答。"}]}]}`,
+		Content: `{"candidates":[{"action":"add","kind":"preference","title":"回答语言","content":"用户希望默认使用中文回答。","evidence":[{"quote":"以后请默认使用中文回答。"}]}]}`,
 	})
 	started := time.Now()
 	receipt := client.expect(http.MethodPost, "/v1/ingestions",
@@ -226,6 +226,9 @@ func TestHTTPContract(t *testing.T) {
 	if failedJob["status"] != "waiting" || failedJob["wait_reason"] != "transient" {
 		t.Fatalf("failed job = %#v", failedJob)
 	}
+	if failedJob["stage"] != "extraction" || failedJob["reason_code"] != "transient" {
+		t.Fatalf("waiting diagnostics = %#v", failedJob)
+	}
 	if message, _ := failedJob["error"].(string); !strings.Contains(message, "HTTP 500") {
 		t.Fatalf("failed job error = %#v", failedJob["error"])
 	}
@@ -250,7 +253,7 @@ func TestHTTPContract(t *testing.T) {
 	}
 
 	recall := client.expect(http.MethodPost, "/v1/memories/recall",
-		`{"query":"中文","match":"all","filters":{"kinds":["preference"],"states":["active"]},"top_k":20,"explain":true}`,
+		`{"query":"中文","filters":{"kinds":["preference"],"states":["active"]},"top_k":20,"explain":true}`,
 		nil, http.StatusOK)
 	for _, partition := range []string{"memories", "summaries", "experiences", "skills", "conflicts", "warnings"} {
 		if _, ok := recall[partition].([]any); !ok {

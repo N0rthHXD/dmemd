@@ -61,9 +61,15 @@ func buildQueryStopwords() map[string]struct{} {
 	return words
 }
 
-// selectQueryTerms removes controlled question, auxiliary and generic terms
-// from an ordinary any-match keyword query. It returns the original groups when
-// every term was removed so a query can never become unconstrained.
+// queryGroups is the shared preprocessing path for every text query. Documents
+// retain their original terms; only queries are deduplicated and stopword-filtered.
+func queryGroups(text string) []Group {
+	return selectQueryTerms(dedupeGroups(Groups(text)))
+}
+
+// selectQueryTerms removes controlled question, auxiliary and generic terms.
+// If no effective terms remain, callers must return empty results, not run an
+// unconstrained query.
 func selectQueryTerms(groups []Group) []Group {
 	if len(groups) == 0 {
 		return groups
@@ -74,9 +80,6 @@ func selectQueryTerms(groups []Group) []Group {
 			continue
 		}
 		selected = append(selected, group)
-	}
-	if len(selected) == 0 {
-		return groups
 	}
 	return selected
 }

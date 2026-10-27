@@ -335,9 +335,8 @@ func TestForgetRemovesHistoricalDerivedVersions(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// The second revision has no dependency edge, so a source forget still
-	// leaves it; forgetting the memory must remove every version of the
-	// dependent object through DeleteArtifactsForMemory.
+	// The second revision has no dependency edge; forgetting the memory must
+	// still remove every version of the dependent object.
 	if _, err := f.forget.Forget(context.Background(), governance.ForgetRequest{MemoryIDs: []string{item.ID}}); err != nil {
 		t.Fatal(err)
 	}

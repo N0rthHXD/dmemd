@@ -370,7 +370,7 @@ OpenAI-compatible Embeddings：`POST <base_url>/embeddings`，请求体包含 `m
 允许动作：`add`、`merge_evidence`、`enrich`、`change`、`correct`、`separate`、`conflict`、
 `unresolved`、`skip`。`enrich/correct/change/merge_evidence` 首版只允许一个目标。目标记忆
 和组 ID 必须出现在本次上下文中；证据引用只能来自本批候选。未知动作、缺失决策、重复
-candidate_id、伪造目标和非法区间属于协议错误，整个尝试不提交并进入任务重试；业务上证据
+candidate_id、伪造目标和非法区间先进入一次定向 repair，仍不合法才使整个尝试不提交并进入任务重试；业务上证据
 不足的动作规范化为 pending/unresolved，不降级为 add。
 
 ### 9.3 上下文与预算
@@ -378,7 +378,14 @@ candidate_id、伪造目标和非法区间属于协议错误，整个尝试不�
 - 每个候选按主体/属性/场景/正文做关键词召回，默认最多 20 条初始相似记忆；同组时间线
   额外最多 50 条。任一上限截断时 `context_complete=false`，破坏性动作转 pending。
 - 一致性上下文可包含历史段、pending 和归档背景，但不含删除墓碑；归档记录不能被自动激活。
-- 每次任务尝试共用 120 秒总预算；单次远端调用仍受 `model.timeout` 与剩余预算约束。
+- 每次任务尝试共用 `worker.process_budget`（默认 600 秒）总预算；提取和提取 repair 使用
+  `worker.extraction_timeout`（默认 180 秒），决策和决策 repair 使用 `worker.decision_timeout`
+  （默认 300 秒）。每次调用还受剩余总预算约束，`model.timeout` 只控制治理调用。
+- `separate` 的非法 `target_memory_ids` 由服务删除，不增加调用；`change` 多目标不能猜测，
+  仅将无效候选、原决策和固定错误码发送一次 repair。同批有效决策保留。repair 仍失败才记协议
+  失败，网络/超时仍记暂时失败。协议隔离上限由 `worker.max_attempts` 配置，默认 3。
+- 模型调用日志包含 `stage`、`batch_size`、`context_size`（字节）、`duration_ms` 和错误类型；
+  协议校验单独记录 `protocol_error_type`，不记录原文、完整响应或自由文本原因。
 - 调用次数为一次提取加每 8 个候选一批决策；无相关事实且可确定性新增/补证时不调用决策。
 - 网络、限流、超时进入 `waiting` 并按 5 秒、30 秒、2 分钟递增退避，之后最长 30 分钟；
   恢复后继续同一任务。连续三次解析/协议错误进入 `failed`；认证/配置错误保持等待并在重启后

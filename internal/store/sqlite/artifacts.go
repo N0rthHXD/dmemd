@@ -12,10 +12,10 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/artifact"
 )
 
-const artifactColumns = `id, kind, target_key, scope_key, topic, current_version, state, updated_at`
+const artifactColumns = `id, kind, target_key, scope_key, topic, current_version, state, reason_code, updated_at`
 
 const artifactRevisionColumns = `artifact_id, version, title, content, payload_json,
-	content_hash, generator, protocol_version, reason_code, truncated, created_at`
+	content_hash, generator, protocol_version, taxonomy_version, generator_version, run_id, provenance_json, reason_code, truncated, created_at`
 
 var (
 	_ artifact.Backend = (*Store)(nil)
@@ -92,7 +92,7 @@ func scanArtifact(row rowScanner) (artifact.Artifact, error) {
 	var item artifact.Artifact
 	var kind, state, updated string
 	if err := row.Scan(&item.ID, &kind, &item.TargetKey, &item.ScopeKey, &item.Topic,
-		&item.CurrentVersion, &state, &updated); err != nil {
+		&item.CurrentVersion, &state, &item.ReasonCode, &updated); err != nil {
 		return artifact.Artifact{}, err
 	}
 	item.Kind = artifact.Kind(kind)
@@ -161,14 +161,15 @@ func listArtifactRevisions(ctx context.Context, q artifactQueryer, id string, li
 
 func scanArtifactRevision(row rowScanner) (artifact.Revision, error) {
 	var item artifact.Revision
-	var payload, created string
+	var payload, provenance, created string
 	var truncated int
 	if err := row.Scan(&item.ArtifactID, &item.Version, &item.Title, &item.Content, &payload,
-		&item.ContentHash, &item.Generator, &item.ProtocolVersion, &item.ReasonCode,
+		&item.ContentHash, &item.Generator, &item.ProtocolVersion, &item.TaxonomyVersion, &item.GeneratorVersion, &item.RunID, &provenance, &item.ReasonCode,
 		&truncated, &created); err != nil {
 		return artifact.Revision{}, err
 	}
 	item.Payload = json.RawMessage(payload)
+	item.Provenance = json.RawMessage(provenance)
 	if item.Payload == nil {
 		item.Payload = json.RawMessage("{}")
 	}
@@ -234,9 +235,9 @@ func (t *Tx) CreateArtifact(ctx context.Context, item artifact.Artifact) error {
 		return fmt.Errorf("%w: invalid artifact metadata", artifact.ErrInvalidInput)
 	}
 	if _, err := t.tx.ExecContext(ctx, `INSERT INTO artifacts(`+artifactColumns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		item.ID, string(item.Kind), item.TargetKey, item.ScopeKey, item.Topic,
-		item.CurrentVersion, string(item.State), formatTime(item.UpdatedAt)); err != nil {
+		item.CurrentVersion, string(item.State), item.ReasonCode, formatTime(item.UpdatedAt)); err != nil {
 		return fmt.Errorf("写入派生对象 %s: %w", item.ID, err)
 	}
 	return nil
@@ -248,10 +249,10 @@ func (t *Tx) UpdateArtifact(ctx context.Context, item artifact.Artifact) error {
 		return fmt.Errorf("%w: state %q", artifact.ErrInvalidInput, item.State)
 	}
 	result, err := t.tx.ExecContext(ctx, `UPDATE artifacts SET
-		scope_key = ?, topic = ?, current_version = ?, state = ?, updated_at = ?
+		scope_key = ?, topic = ?, current_version = ?, state = ?, reason_code = ?, updated_at = ?
 		WHERE id = ?`,
 		item.ScopeKey, item.Topic, item.CurrentVersion, string(item.State),
-		formatTime(item.UpdatedAt), item.ID)
+		item.ReasonCode, formatTime(item.UpdatedAt), item.ID)
 	if err != nil {
 		return fmt.Errorf("更新派生对象 %s: %w", item.ID, err)
 	}
@@ -276,9 +277,10 @@ func (t *Tx) InsertArtifactRevision(ctx context.Context, revision artifact.Revis
 		truncated = 1
 	}
 	if _, err := t.tx.ExecContext(ctx, `INSERT INTO artifact_revisions(`+artifactRevisionColumns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		revision.ArtifactID, revision.Version, revision.Title, revision.Content,
 		string(payload), revision.ContentHash, revision.Generator, revision.ProtocolVersion,
+		revision.TaxonomyVersion, revision.GeneratorVersion, revision.RunID, string(revision.Provenance),
 		revision.ReasonCode, truncated, formatTime(revision.CreatedAt)); err != nil {
 		return fmt.Errorf("写入派生版本 %s@%d: %w", revision.ArtifactID, revision.Version, err)
 	}
@@ -348,11 +350,25 @@ func (t *Tx) DeleteArtifactSearchDocument(ctx context.Context, artifactID string
 // depends on the memory. Historical-only dependencies still matter for purge,
 // but they no longer make an unrelated current summary stale.
 func (t *Tx) ListArtifactsForMemory(ctx context.Context, memoryID string) ([]artifact.Artifact, error) {
+	return t.listArtifactsForMemory(ctx, memoryID, true)
+}
+
+// ListAllArtifactsForMemory includes historical-only dependencies so purge can
+// invalidate every affected task before removing the artifact and its history.
+func (t *Tx) ListAllArtifactsForMemory(ctx context.Context, memoryID string) ([]artifact.Artifact, error) {
+	return t.listArtifactsForMemory(ctx, memoryID, false)
+}
+
+func (t *Tx) listArtifactsForMemory(ctx context.Context, memoryID string, currentOnly bool) ([]artifact.Artifact, error) {
+	versionFilter := ""
+	if currentOnly {
+		versionFilter = " AND d.artifact_version = a.current_version"
+	}
 	rows, err := t.tx.QueryContext(ctx, `SELECT DISTINCT a.id, a.kind, a.target_key,
-		a.scope_key, a.topic, a.current_version, a.state, a.updated_at
+		a.scope_key, a.topic, a.current_version, a.state, a.reason_code, a.updated_at
 		FROM artifacts a
 		JOIN artifact_memory_dependencies d
-			ON d.artifact_id = a.id AND d.artifact_version = a.current_version
+			ON d.artifact_id = a.id`+versionFilter+`
 		WHERE d.memory_id = ? ORDER BY a.id ASC`, memoryID)
 	if err != nil {
 		return nil, fmt.Errorf("读取记忆 %s 的派生依赖: %w", memoryID, err)
@@ -376,7 +392,7 @@ func (t *Tx) ListArtifactsForMemory(ctx context.Context, memoryID string) ([]art
 // depends on one application result.
 func (t *Tx) ListArtifactsForRun(ctx context.Context, experienceID string) ([]artifact.Artifact, error) {
 	rows, err := t.tx.QueryContext(ctx, `SELECT DISTINCT a.id, a.kind, a.target_key,
-		a.scope_key, a.topic, a.current_version, a.state, a.updated_at
+		a.scope_key, a.topic, a.current_version, a.state, a.reason_code, a.updated_at
 		FROM artifacts a
 		JOIN artifact_run_dependencies d
 			ON d.artifact_id = a.id AND d.artifact_version = a.current_version
@@ -427,7 +443,7 @@ func (t *Tx) ListArtifactsByScope(ctx context.Context, kind artifact.Kind, scope
 // deletion must enumerate the whole set before any cascade removes the edges.
 func (t *Tx) ListAllArtifactsForRun(ctx context.Context, experienceID string) ([]artifact.Artifact, error) {
 	rows, err := t.tx.QueryContext(ctx, `SELECT DISTINCT a.id, a.kind, a.target_key,
-		a.scope_key, a.topic, a.current_version, a.state, a.updated_at
+		a.scope_key, a.topic, a.current_version, a.state, a.reason_code, a.updated_at
 		FROM artifacts a
 		JOIN artifact_run_dependencies d ON d.artifact_id = a.id
 		WHERE d.experience_id = ? ORDER BY a.id ASC`, experienceID)
@@ -824,13 +840,14 @@ func (t *Tx) ListAggregationInputs(ctx context.Context, target artifact.Target, 
 		}
 	case artifact.KindProfile:
 		conditions = append(conditions, "m.kind IN ('preference', 'procedure', 'fact')")
+		conditions = append(conditions, "m.durability = 'durable'", "m.phase = 'unknown'", "m.valid_to IS NULL")
 	case artifact.KindExperienceCase:
 		conditions = append(conditions, "m.kind IN ('procedure', 'event')")
 	default:
 		return nil, false, fmt.Errorf("%w: kind %q", artifact.ErrInvalidInput, target.Kind)
 	}
 	args = append(args, limit+1)
-	rows, err := t.tx.QueryContext(ctx, `SELECT m.id, m.version, m.kind, m.title, m.content,
+	rows, err := t.tx.QueryContext(ctx, `SELECT m.id, m.version, m.kind, m.phase, m.durability, m.title, m.content,
 		m.scope_key, m.topics_json, m.observed_at, m.updated_at
 		FROM memories m
 		WHERE `+strings.Join(conditions, " AND ")+`
@@ -845,7 +862,7 @@ func (t *Tx) ListAggregationInputs(ctx context.Context, target artifact.Target, 
 	for rows.Next() {
 		var item artifact.MemoryInput
 		var topicsJSON, observedAt, updatedAt string
-		if err := rows.Scan(&item.ID, &item.Version, &item.Kind, &item.Title, &item.Content,
+		if err := rows.Scan(&item.ID, &item.Version, &item.Kind, &item.Phase, &item.Durability, &item.Title, &item.Content,
 			&item.ScopeKey, &topicsJSON, &observedAt, &updatedAt); err != nil {
 			return nil, false, fmt.Errorf("选择聚合输入: %w", err)
 		}
@@ -867,4 +884,20 @@ func (t *Tx) ListAggregationInputs(ctx context.Context, target artifact.Target, 
 		return items[:limit], true, nil
 	}
 	return items, false, nil
+}
+
+// HasProcedureInputs distinguishes an upstream extraction gap from a topic
+// mismatch without relaxing the eligibility gate used for generation.
+func (t *Tx) HasProcedureInputs(ctx context.Context, scopeKey string, asOf time.Time) (bool, error) {
+	var found bool
+	err := t.tx.QueryRowContext(ctx, `SELECT EXISTS (
+		SELECT 1 FROM memories m WHERE m.scope_key = ? AND m.kind = 'procedure'
+		AND m.state = 'active' AND m.assertion_status = 'accepted'
+		AND (m.valid_from IS NULL OR m.valid_from <= ?)
+		AND (m.valid_to IS NULL OR ? < m.valid_to)
+		AND NOT EXISTS (SELECT 1 FROM memory_conflict_members cm
+			JOIN memory_conflicts c ON c.id = cm.conflict_id
+			WHERE cm.memory_id = m.id AND c.status = 'open'))`,
+		scopeKey, formatTime(asOf), formatTime(asOf)).Scan(&found)
+	return found, err
 }

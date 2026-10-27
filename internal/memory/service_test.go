@@ -154,6 +154,51 @@ func TestCreateWritesSnapshotRevisionEvidenceAndIndex(t *testing.T) {
 	}
 }
 
+func TestCreateAndRevisionPersistExtractionPhaseAndDurability(t *testing.T) {
+	f := newFixture(t)
+	src := f.seedSource(t, "source-phase", "app", `{"text":"2026年10月8日安排拍摄"}`)
+	created, err := f.create(t, memory.CreateInput{
+		Kind: memory.KindEvent, Phase: memory.PhaseScheduled, Durability: memory.DurabilityEpisodic,
+		Title: "拍摄", Content: "2026年10月8日安排拍摄", ObservedAt: baseTime,
+		OriginSourceID: src.ID,
+		Evidence:       []source.Evidence{source.NewEvidence(src, "", "2026年10月8日安排拍摄", "model", baseTime)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Phase != memory.PhaseScheduled || created.Durability != memory.DurabilityEpisodic {
+		t.Fatalf("created=%+v", created)
+	}
+	got, err := f.memory.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Phase != memory.PhaseScheduled || got.Durability != memory.DurabilityEpisodic {
+		t.Fatalf("stored=%+v", got)
+	}
+	revision, err := f.memory.GetVersion(context.Background(), created.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revision.Snapshot.Phase != memory.PhaseScheduled || revision.Snapshot.Durability != memory.DurabilityEpisodic {
+		t.Fatalf("revision=%+v", revision.Snapshot)
+	}
+	updated, err := f.revise(t, memory.ReviseInput{MemoryID: created.ID, Kind: created.Kind, Title: created.Title, Content: "2026年10月8日拍摄已取消", ObservedAt: created.ObservedAt, Phase: memory.PhaseCancelled, Durability: memory.DurabilityEpisodic, Evidence: revision.Evidence, Operation: memory.OperationUpdate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Phase != memory.PhaseCancelled || updated.Durability != memory.DurabilityEpisodic {
+		t.Fatalf("updated=%+v", updated)
+	}
+	revision, err = f.memory.GetVersion(context.Background(), created.ID, updated.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revision.Snapshot.Phase != memory.PhaseCancelled || revision.Snapshot.Durability != memory.DurabilityEpisodic {
+		t.Fatalf("updated revision=%+v", revision.Snapshot)
+	}
+}
+
 func TestCreateRollsBackEveryTableOnCallerFailure(t *testing.T) {
 	f := newFixture(t)
 	src := f.seedSource(t, "source-rollback", "app", `{"text":"remember me"}`)

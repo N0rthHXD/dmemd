@@ -14,6 +14,7 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/memory"
 	"github.com/N0rthHXD/dmemd/internal/skill"
 	"github.com/N0rthHXD/dmemd/internal/source"
+	"github.com/N0rthHXD/dmemd/internal/topic"
 )
 
 // ErrUnparseable marks a successful HTTP response whose assistant content is
@@ -29,7 +30,7 @@ func ParseCandidates(content string) ([]ingest.Candidate, error) {
 	}
 	rawCandidates, ok := root["candidates"]
 	if !ok || bytes.Equal(bytes.TrimSpace(rawCandidates), []byte("null")) {
-		return []ingest.Candidate{}, nil
+		return nil, ErrUnparseable
 	}
 	var items []json.RawMessage
 	if err := json.Unmarshal(rawCandidates, &items); err != nil {
@@ -87,7 +88,7 @@ func ParseTopics(content string) ([]string, error) {
 	if err := json.Unmarshal(rawTopics, &topics); err != nil {
 		return nil, ErrUnparseable
 	}
-	return memory.NormalizeTopics(topics), nil
+	return topic.Raw(topics), nil
 }
 
 // ParseAggregate parses the tolerant summary/profile protocol. An empty content
@@ -211,12 +212,10 @@ func unwrapFence(content string) (string, error) {
 func parseCandidate(raw json.RawMessage) (ingest.Candidate, bool) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
-		return ingest.Candidate{}, false
+		return ingest.Candidate{ProtocolErrors: []string{"candidate"}}, true
 	}
 	content, ok := stringField(fields, "content")
-	if !ok || strings.TrimSpace(content) == "" {
-		return ingest.Candidate{}, false
-	}
+	contentValid := ok
 	title, _ := stringField(fields, "title")
 	title = strings.TrimSpace(title)
 	if title == "" {
@@ -224,22 +223,107 @@ func parseCandidate(raw json.RawMessage) (ingest.Candidate, bool) {
 	}
 	kind := memory.KindFact
 	if value, ok := stringField(fields, "kind"); ok {
-		kind = normalizeKind(memory.Kind(value))
+		kind = memory.Kind(value)
 	}
+	observedAt, observedValid := parseCandidateTime(fields, "observed_at")
+	validFrom, fromValid := parseCandidateTime(fields, "valid_from")
+	validTo, toValid := parseCandidateTime(fields, "valid_to")
 	candidate := ingest.Candidate{
+		CandidateID:    strings.TrimSpace(optionalStringValue(fields, "candidate_id")),
 		Kind:           kind,
 		Title:          title,
 		Content:        content,
-		ObservedAt:     parseOptionalTime(fields, "observed_at"),
-		ValidFrom:      parseOptionalTime(fields, "valid_from"),
-		ValidTo:        parseOptionalTime(fields, "valid_to"),
+		ObservedAt:     observedAt,
+		ValidFrom:      validFrom,
+		ValidTo:        validTo,
 		ValidFromBasis: memory.TemporalBasis(optionalStringValue(fields, "valid_from_basis")),
 		ValidToBasis:   memory.TemporalBasis(optionalStringValue(fields, "valid_to_basis")),
-		Topics:         memory.NormalizeTopics(stringSliceField(fields, "topics")),
+		Phase:          ingest.Phase(optionalStringValue(fields, "phase")),
+		Durability:     ingest.Durability(optionalStringValue(fields, "durability")),
+		Topics:         topic.Raw(stringSliceField(fields, "topics")),
 		Evidence:       parseEvidence(fields["evidence"]),
 	}
 	candidate.FactGroup = parseFactGroup(fields["fact_group"])
+	candidate.Procedure = parseProcedure(fields["procedure"])
+	if !contentValid {
+		candidate.ProtocolErrors = append(candidate.ProtocolErrors, "content")
+	}
+	for _, field := range []string{"kind", "phase", "durability", "valid_from_basis", "valid_to_basis"} {
+		if raw, exists := fields[field]; exists {
+			var value string
+			if json.Unmarshal(raw, &value) != nil {
+				candidate.ProtocolErrors = append(candidate.ProtocolErrors, field)
+			}
+		}
+	}
+	if raw, exists := fields["evidence"]; exists && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		var entries []json.RawMessage
+		if json.Unmarshal(raw, &entries) != nil || len(entries) != len(candidate.Evidence) {
+			candidate.ProtocolErrors = append(candidate.ProtocolErrors, "evidence")
+		}
+	}
+	if raw, exists := fields["procedure"]; exists && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		var procedure map[string]json.RawMessage
+		if json.Unmarshal(raw, &procedure) != nil || procedure == nil {
+			candidate.ProtocolErrors = append(candidate.ProtocolErrors, "procedure")
+		} else {
+			for _, field := range []string{"steps", "preconditions", "completion_conditions", "failure_branches"} {
+				if value, exists := procedure[field]; exists {
+					var values []string
+					if json.Unmarshal(value, &values) != nil {
+						candidate.ProtocolErrors = append(candidate.ProtocolErrors, "procedure."+field)
+					}
+				}
+			}
+		}
+	}
+	if !observedValid {
+		candidate.TemporalErrors = append(candidate.TemporalErrors, "observed_at")
+	}
+	if !fromValid {
+		candidate.TemporalErrors = append(candidate.TemporalErrors, "valid_from")
+	}
+	if !toValid {
+		candidate.TemporalErrors = append(candidate.TemporalErrors, "valid_to")
+	}
 	return candidate, true
+}
+
+func parseCandidateTime(fields map[string]json.RawMessage, name string) (*time.Time, bool) {
+	raw, exists := fields[name]
+	if !exists || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, true
+	}
+	value, present := stringField(fields, name)
+	if !present {
+		return nil, false
+	}
+	if strings.TrimSpace(value) == "" {
+		return nil, true
+	}
+	parsed := parseOptionalTime(fields, name)
+	return parsed, parsed != nil
+}
+
+func parseProcedure(raw json.RawMessage) *ingest.ProcedureProposal {
+	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		return nil
+	}
+	proposal := &ingest.ProcedureProposal{
+		Steps:                stringSliceField(fields, "steps"),
+		Preconditions:        stringSliceField(fields, "preconditions"),
+		CompletionConditions: stringSliceField(fields, "completion_conditions"),
+		FailureBranches:      stringSliceField(fields, "failure_branches"),
+	}
+	if len(proposal.Steps) == 0 && len(proposal.Preconditions) == 0 &&
+		len(proposal.CompletionConditions) == 0 && len(proposal.FailureBranches) == 0 {
+		return nil
+	}
+	return proposal
 }
 
 func parseDecision(raw json.RawMessage) (ingest.Decision, error) {
@@ -439,15 +523,6 @@ func optionalInt(fields map[string]json.RawMessage, name string) (int, bool, boo
 		return 0, false, false
 	}
 	return int(value), true, true
-}
-
-func normalizeKind(kind memory.Kind) memory.Kind {
-	switch kind {
-	case memory.KindFact, memory.KindPreference, memory.KindEvent, memory.KindProcedure:
-		return kind
-	default:
-		return memory.KindFact
-	}
 }
 
 func firstRunes(value string, limit int) string {

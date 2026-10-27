@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/N0rthHXD/dmemd/internal/artifact"
 	"github.com/N0rthHXD/dmemd/internal/governance/task"
@@ -74,6 +75,7 @@ func (h *AggregateHandler) processExperience(ctx context.Context, job task.Job) 
 	if h.timeout > 0 {
 		callCtx, cancel = context.WithTimeout(ctx, h.timeout)
 	}
+	started := time.Now()
 	result, callErr := h.experience.ComposeExperience(callCtx, artifact.ExperienceRequest{
 		Run:       experienceInputFromRun(run),
 		ScopeKey:  run.ScopeKey,
@@ -82,6 +84,7 @@ func (h *AggregateHandler) processExperience(ctx context.Context, job task.Job) 
 		Truncated: truncated,
 	})
 	cancel()
+	h.limiter.Record("experience_case", len(bounded), aggregateContextSize(bounded), started, callErr)
 	if callErr != nil {
 		return callErr
 	}
@@ -107,7 +110,7 @@ func (h *AggregateHandler) processExperience(ctx context.Context, job task.Job) 
 			return ErrRevisionChanged
 		}
 		currentInputs, _, err := tx.ListAggregationInputs(ctx,
-			artifact.Target{Kind: artifact.KindExperienceCase, ScopeKey: latest.ScopeKey}, now, h.maxInputs)
+			artifact.Target{Kind: artifact.KindExperienceCase, ScopeKey: latest.ScopeKey}, h.now().UTC(), h.maxInputs)
 		if err != nil {
 			return err
 		}
@@ -126,7 +129,8 @@ func (h *AggregateHandler) processExperience(ctx context.Context, job task.Job) 
 			ReasonCode:      reasonCode,
 			Truncated:       truncated,
 			Generator:       "governance:experience",
-			ProtocolVersion: "experience-v1",
+			ProtocolVersion: "experience-v2",
+			RunID:           job.ID + ":" + fmt.Sprint(job.Revision),
 			Memories:        bounded,
 			Runs:            []artifact.RunRef{{ExperienceID: experienceID}},
 		}); err != nil {
@@ -205,13 +209,15 @@ func renderExperienceCase(run ExperienceRun, result artifact.ExperienceResult,
 			result.Lessons, result.FailureModes)
 	}
 	content = truncateRunes(content, maxAggregateContentRunes)
+	// This service-owned statement cannot be omitted by model-authored content.
+	content = "这是应用报告，不代表独立验证。结果：" + string(run.Outcome) + "。\n\n" + content
 
 	memoryRefs := make([]map[string]any, 0, len(memories))
 	for _, memory := range memories {
 		if memory.ID == "" || memory.Version <= 0 {
 			continue
 		}
-		memoryRefs = append(memoryRefs, map[string]any{"id": memory.ID, "version": memory.Version})
+		memoryRefs = append(memoryRefs, map[string]any{"memory_id": memory.ID, "version": memory.Version})
 	}
 	payload, err := json.Marshal(map[string]any{
 		"problem":         problem,
@@ -219,6 +225,7 @@ func renderExperienceCase(run ExperienceRun, result artifact.ExperienceResult,
 		"preconditions":   preconditions,
 		"actions":         actions,
 		"outcome":         string(run.Outcome),
+		"verification":    "application_report_not_independently_verified",
 		"lessons":         nonNilStrings(result.Lessons),
 		"failure_modes":   nonNilStrings(result.FailureModes),
 		"memory_refs":     memoryRefs,

@@ -36,8 +36,11 @@ func TestParseCandidatesDefaultsPartialAndEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(candidates) != 3 {
+	if len(candidates) != 5 {
 		t.Fatalf("candidates = %d: %+v", len(candidates), candidates)
+	}
+	if len(candidates[0].ProtocolErrors) == 0 || len(candidates[3].ProtocolErrors) == 0 || strings.TrimSpace(candidates[4].Content) != "" {
+		t.Fatalf("invalid candidate diagnostics were lost: %+v", candidates)
 	}
 	first := candidates[0]
 	if first.Kind != memory.KindFact {
@@ -49,7 +52,7 @@ func TestParseCandidatesDefaultsPartialAndEvidence(t *testing.T) {
 	if first.ObservedAt != nil {
 		t.Fatalf("missing observed_at = %v", first.ObservedAt)
 	}
-	if len(first.Topics) != 2 || first.Topics[0] != "go" || first.Topics[1] != "sqlite" {
+	if len(first.Topics) != 3 || first.Topics[0] != "Go" || first.Topics[1] != "sqlite" || first.Topics[2] != "go" {
 		t.Fatalf("topics = %#v", first.Topics)
 	}
 	if len(first.Evidence) != 1 || first.Evidence[0].MessageID != "m1" || first.Evidence[0].Quote != "默认使用中文" {
@@ -59,7 +62,7 @@ func TestParseCandidatesDefaultsPartialAndEvidence(t *testing.T) {
 		first.Evidence[0].Location.Start != 2 || first.Evidence[0].Location.End != 8 {
 		t.Fatalf("evidence location = %+v", first.Evidence[0].Location)
 	}
-	if candidates[1].Kind != memory.KindFact || candidates[1].Title != "自定义" {
+	if candidates[1].Kind != "unknown" || candidates[1].Title != "自定义" {
 		t.Fatalf("unknown values = %+v", candidates[1])
 	}
 	third := candidates[2]
@@ -71,6 +74,21 @@ func TestParseCandidatesDefaultsPartialAndEvidence(t *testing.T) {
 		t.Fatalf("fact group = %+v", third.FactGroup)
 	}
 	_ = errors.Is(err, ErrUnparseable)
+}
+
+func TestParseCandidatesV2MetadataAndProcedure(t *testing.T) {
+	candidates, err := ParseCandidates(`{"candidates":[{"candidate_id":"c1","kind":"procedure","content":"先检查配置，再运行部署。","phase":"scheduled","durability":"durable","procedure":{"steps":["检查配置","运行部署"],"preconditions":["配置存在"],"completion_conditions":["部署完成"],"failure_branches":["配置缺失时停止"]},"evidence":[{"message_id":"m1","quote":"先检查配置，再运行部署。"}]}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].CandidateID != "c1" ||
+		candidates[0].Phase != ingest.PhaseScheduled || candidates[0].Durability != ingest.DurabilityDurable {
+		t.Fatalf("candidate = %+v", candidates)
+	}
+	if candidates[0].Procedure == nil || len(candidates[0].Procedure.Steps) != 2 ||
+		candidates[0].Procedure.FailureBranches[0] != "配置缺失时停止" {
+		t.Fatalf("procedure = %+v", candidates[0].Procedure)
+	}
 }
 
 func TestParseCandidatesObservedAtAndRuneTitle(t *testing.T) {
@@ -91,7 +109,10 @@ func TestParseCandidatesObservedAtAndRuneTitle(t *testing.T) {
 		t.Fatalf("observed_at = %v", candidates[0].ObservedAt)
 	}
 	if candidates[1].ObservedAt != nil || candidates[2].ObservedAt != nil {
-		t.Fatalf("invalid observed_at should fall back later: %+v %+v", candidates[1].ObservedAt, candidates[2].ObservedAt)
+		t.Fatalf("invalid observed_at parsed: %+v %+v", candidates[1].ObservedAt, candidates[2].ObservedAt)
+	}
+	if len(candidates[1].TemporalErrors) != 1 || len(candidates[2].TemporalErrors) != 1 {
+		t.Fatalf("invalid observed_at diagnostics lost: %+v", candidates)
 	}
 	chinese := strings.Repeat("记", 50)
 	title, err := ParseCandidates(`{"candidates":[{"content":"` + chinese + `"}]}`)
@@ -105,8 +126,6 @@ func TestParseCandidatesObservedAtAndRuneTitle(t *testing.T) {
 
 func TestParseCandidatesZeroCandidates(t *testing.T) {
 	for _, content := range []string{
-		`{}`,
-		`{"candidates":null}`,
 		`{"candidates":[]}`,
 		"```json\n{\"candidates\": []}\n```",
 	} {
@@ -122,6 +141,8 @@ func TestParseCandidatesZeroCandidates(t *testing.T) {
 
 func TestParseCandidatesRejectsOverallUnparseable(t *testing.T) {
 	for _, content := range []string{
+		`{}`,
+		`{"candidates":null}`,
 		"",
 		"I could not determine any memories.",
 		`[]`,

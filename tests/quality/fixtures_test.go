@@ -41,10 +41,11 @@ type classificationCase struct {
 }
 
 type memorySpec struct {
-	Kind    string   `json:"kind"`
-	Title   string   `json:"title"`
-	Content string   `json:"content"`
-	Topics  []string `json:"topics,omitempty"`
+	Durability string   `json:"durability"`
+	Kind       string   `json:"kind"`
+	Title      string   `json:"title"`
+	Content    string   `json:"content"`
+	Topics     []string `json:"topics,omitempty"`
 }
 
 type summaryCase struct {

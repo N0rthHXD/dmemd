@@ -6,8 +6,8 @@ import "strings"
 // quoted as a phrase, so user punctuation, quotes, parentheses, stars and words
 // such as OR/NEAR can never become FTS operators. Groups from Groups contain a
 // single dictionary term each; the phrase form also keeps multi-token groups
-// passed by other callers safe.
-func Compile(groups []Group, match Match) (string, error) {
+// passed by other callers safe. Any group may match; conjunction is not supported.
+func Compile(groups []Group) (string, error) {
 	if len(groups) == 0 {
 		return "", nil
 	}
@@ -23,11 +23,7 @@ func Compile(groups []Group, match Match) (string, error) {
 		}
 		expressions = append(expressions, "("+quotePhrase(group.Tokens)+")")
 	}
-	operator := " AND "
-	if normalizeMatch(match) == MatchAny {
-		operator = " OR "
-	}
-	return strings.Join(expressions, operator), nil
+	return strings.Join(expressions, " OR "), nil
 }
 
 func quotePhrase(tokens []string) string {
@@ -36,11 +32,4 @@ func quotePhrase(tokens []string) string {
 	// compiler safe if a token source changes later.
 	phrase = strings.ReplaceAll(phrase, `"`, `""`)
 	return `"` + phrase + `"`
-}
-
-func normalizeMatch(match Match) Match {
-	if match == MatchAll {
-		return MatchAll
-	}
-	return MatchAny
 }

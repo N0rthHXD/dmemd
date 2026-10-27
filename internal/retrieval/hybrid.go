@@ -31,13 +31,12 @@ func (s *Service) searchHybrid(ctx context.Context, groups []Group, request Requ
 	semanticChannel := make(chan semanticOutcome, 1)
 
 	go func() {
-		expression, err := Compile(groups, normalizeMatch(request.Match))
+		expression, err := Compile(groups)
 		if err != nil {
 			keywordChannel <- keywordOutcome{err: err}
 			return
 		}
 		hits, err := s.backend.Search(runCtx, Query{
-			Match:      normalizeMatch(request.Match),
 			Groups:     groups,
 			Expression: expression,
 			Filters:    filters,
@@ -192,6 +191,10 @@ func (s *Service) fuseHybrid(ctx context.Context, groups []Group, keywordHits []
 		selected = append(selected, *entry)
 	}
 	sort.SliceStable(selected, func(i, j int) bool {
+		li, lj := selected[i].candidate.Memory.AssertionStatus, selected[j].candidate.Memory.AssertionStatus
+		if li != lj {
+			return li == memory.AssertionAccepted
+		}
 		if selected[i].score != selected[j].score {
 			return selected[i].score > selected[j].score
 		}

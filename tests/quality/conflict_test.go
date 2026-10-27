@@ -23,6 +23,17 @@ func TestLabeledConflictAdjudication(t *testing.T) {
 		t.Run(testCase.Name, func(t *testing.T) {
 			f := newFixture(t, false)
 			scopeKey := "quality:" + testCase.Name
+			group, err := memory.NewFactGroup(memory.FactGroupInput{
+				Subject: "质量样例主体", Predicate: "单值属性", Scope: scopeKey, Cardinality: memory.CardinalitySingle,
+			}, f.now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.store.WithTx(context.Background(), func(ctx context.Context, tx *sqlite.Tx) error {
+				return tx.InsertFactGroup(ctx, group)
+			}); err != nil {
+				t.Fatal(err)
+			}
 			created := make([]memory.Memory, 0, len(testCase.Members))
 			for index, spec := range testCase.Members {
 				assertion := memory.AssertionStatus(spec.Assertion)
@@ -34,6 +45,7 @@ func TestLabeledConflictAdjudication(t *testing.T) {
 					Title:           "冲突样例",
 					Content:         spec.Content,
 					ScopeKey:        scopeKey,
+					FactGroupID:     group.ID,
 					Topics:          []string{"conflict-quality"},
 					AssertionStatus: assertion,
 					ValidFrom:       spec.ValidFrom,
@@ -67,13 +79,14 @@ func TestLabeledConflictAdjudication(t *testing.T) {
 			}
 			if err := f.store.WithTx(context.Background(), func(ctx context.Context, tx *sqlite.Tx) error {
 				if err := tx.InsertConflict(ctx, memory.Conflict{
-					ID:         conflictID,
-					Status:     memory.ConflictOpen,
-					ReasonCode: memory.ConflictContradictoryValue,
-					Revision:   1,
-					CreatedAt:  f.now,
-					UpdatedAt:  f.now,
-					Members:    members,
+					ID:          conflictID,
+					FactGroupID: group.ID,
+					Status:      memory.ConflictOpen,
+					ReasonCode:  memory.ConflictContradictoryValue,
+					Revision:    1,
+					CreatedAt:   f.now,
+					UpdatedAt:   f.now,
+					Members:     members,
 				}); err != nil {
 					return err
 				}

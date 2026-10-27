@@ -283,20 +283,15 @@ func TestProductionExperienceAndSkillAssembly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if skillArtifact.State != artifact.StateActive || skillArtifact.CurrentVersion != 1 {
+	if skillArtifact.State != artifact.StateDisabled || skillArtifact.ReasonCode != "no_procedure_input" {
 		t.Fatalf("skill = %+v", skillArtifact)
 	}
-	content, err := stack.Services.Skills.Get(context.Background(), skillArtifact.ID, 0)
-	if err != nil || !strings.Contains(content.Content, "name:") {
-		t.Fatalf("skill content = %+v err=%v", content, err)
-	}
-	if fake.RequestCount() != 2 {
-		t.Fatalf("model calls = %d, want 2", fake.RequestCount())
+	if fake.RequestCount() != 1 {
+		t.Fatalf("model calls = %d, want 1 (no procedure)", fake.RequestCount())
 	}
 	requests := fake.Requests()
-	if !strings.Contains(string(requests[0].Body), "application-reported result") ||
-		!strings.Contains(string(requests[1].Body), "guidance-only skill") {
-		t.Fatalf("model prompts = %s / %s", requests[0].Body, requests[1].Body)
+	if !strings.Contains(string(requests[0].Body), "application-reported result") {
+		t.Fatalf("model prompt = %s", requests[0].Body)
 	}
 
 	recall, err := stack.Services.Search.Recall(context.Background(), retrieval.RecallRequest{
@@ -305,14 +300,14 @@ func TestProductionExperienceAndSkillAssembly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(recall.Experiences) != 1 || len(recall.Skills) != 1 {
+	if len(recall.Experiences) != 1 || len(recall.Skills) != 0 {
 		t.Fatalf("recall = %+v", recall)
 	}
 	if _, err := stack.Services.Experiences.Retract(context.Background(), receipt.ID); err != nil {
 		t.Fatal(err)
 	}
 	if skill, err := store.GetArtifactByTarget(context.Background(), artifact.KindSkill,
-		task.SkillKey("project:dmemd", "")); err != nil || skill.State != artifact.StateStale {
+		task.SkillKey("project:dmemd", "")); err != nil || skill.State != artifact.StateDisabled {
 		t.Fatalf("skill after retract = %+v err=%v", skill, err)
 	}
 	for i := 0; i < 10; i++ {

@@ -84,15 +84,6 @@ func (l Layer) Known() bool {
 	}
 }
 
-// Match controls how dictionary terms in a query are combined. The zero value
-// and unknown values mean MatchAny; only MatchAll requests strict conjunction.
-type Match string
-
-const (
-	MatchAll Match = "all"
-	MatchAny Match = "any"
-)
-
 // Filters narrow a search. Zero values mean no filter. Search defaults to
 // active memories only; archived must be requested explicitly and deleted is
 // never returned by keyword or semantic retrieval.
@@ -112,7 +103,6 @@ type Filters struct {
 type Request struct {
 	Query   string
 	Mode    Mode
-	Match   Match
 	Filters Filters
 	TopK    int
 	Explain bool
@@ -130,7 +120,6 @@ type Group struct {
 // Expression is compiled only from quoted, escaped tokens and is always bound
 // as a parameter; raw user text is never used as FTS syntax.
 type Query struct {
-	Match      Match
 	Groups     []Group
 	Expression string
 	Filters    Filters
@@ -268,7 +257,6 @@ type RecallRequest struct {
 	// an explicit empty list (no layers).
 	LayersSpecified  bool
 	Mode             Mode
-	Match            Match
 	Filters          Filters
 	TopK             int
 	Explain          bool

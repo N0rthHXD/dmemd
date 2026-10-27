@@ -86,7 +86,7 @@ func memorySnapshot(item Memory) artifact.MemorySnapshot {
 		Version:  item.Version,
 		Kind:     string(item.Kind),
 		ScopeKey: item.ScopeKey,
-		Topics:   NormalizeTopics(item.Topics),
+		Topics:   CanonicalTopics(item.Topics),
 		State:    string(item.State),
 	}
 }

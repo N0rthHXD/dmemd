@@ -3,9 +3,12 @@ package memory
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/N0rthHXD/dmemd/internal/topic"
 )
 
 var (
@@ -74,9 +77,25 @@ func normalizeBound(value **time.Time, basis *TemporalBasis, name string) error 
 	return nil
 }
 
-// NormalizeCardinality validates a group cardinality.
-// MaxTopics bounds the flat topic labels stored for one atomic memory.
+// MaxTopics bounds raw labels before canonical parent expansion.
 const MaxTopics = 16
+
+func rawTopics(values []string) []string {
+	values = topic.Raw(values)
+	if len(values) > MaxTopics {
+		values = values[:MaxTopics]
+	}
+	return values
+}
+
+func sameRawTopics(left, right []string) bool {
+	return slices.Equal(left, right)
+}
+
+// CanonicalTopics expands bilingual aliases and all parent topics.
+func CanonicalTopics(values []string) []string {
+	return topic.Canonical(values)
+}
 
 // NormalizeScopeKey trims a flat scope label. An empty value means the scope is
 // unknown; it is never silently promoted to the user-global scope.
@@ -99,9 +118,6 @@ func NormalizeTopics(values []string) []string {
 		}
 		seen[topic] = struct{}{}
 		result = append(result, topic)
-		if len(result) == MaxTopics {
-			break
-		}
 	}
 	sort.Strings(result)
 	return result

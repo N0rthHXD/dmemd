@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/N0rthHXD/dmemd/internal/embedding"
+	"github.com/N0rthHXD/dmemd/internal/ingest"
 )
 
 const (
@@ -110,12 +111,15 @@ type EmbeddingConfig struct {
 	MinSimilarity float64  `json:"min_similarity"`
 }
 
-// WorkerConfig fixes the single-worker policy, protocol-failure limit and
-// transient retry schedule.
+// WorkerConfig controls attempt/call budgets, protocol-failure isolation and
+// transient retries. Ingestion still has one sequential executor.
 type WorkerConfig struct {
-	Workers     int        `json:"workers"`
-	MaxAttempts int        `json:"max_attempts"`
-	RetryDelays []Duration `json:"retry_delays"`
+	ProcessBudget     Duration   `json:"process_budget"`
+	ExtractionTimeout Duration   `json:"extraction_timeout"`
+	DecisionTimeout   Duration   `json:"decision_timeout"`
+	Workers           int        `json:"workers"`
+	MaxAttempts       int        `json:"max_attempts"`
+	RetryDelays       []Duration `json:"retry_delays"`
 }
 
 // GovernanceConfig controls the single persistent governance worker. It keeps
@@ -199,9 +203,12 @@ func DefaultConfig() Config {
 			Timeout: Duration(embedding.DefaultTimeout),
 		},
 		Worker: WorkerConfig{
-			Workers:     DefaultWorkerCount,
-			MaxAttempts: DefaultMaxAttempts,
-			RetryDelays: durations(defaultRetryDelays),
+			ProcessBudget:     Duration(ingest.DefaultProcessBudget),
+			ExtractionTimeout: Duration(ingest.DefaultExtractionTimeout),
+			DecisionTimeout:   Duration(ingest.DefaultDecisionTimeout),
+			Workers:           DefaultWorkerCount,
+			MaxAttempts:       DefaultMaxAttempts,
+			RetryDelays:       durations(defaultRetryDelays),
 		},
 		Governance: GovernanceConfig{
 			Enabled:           boolPointer(true),
@@ -314,6 +321,15 @@ func (cfg *Config) applyDefaults() {
 	if cfg.Worker.Workers == 0 {
 		cfg.Worker.Workers = defaults.Worker.Workers
 	}
+	if cfg.Worker.ProcessBudget == 0 {
+		cfg.Worker.ProcessBudget = defaults.Worker.ProcessBudget
+	}
+	if cfg.Worker.ExtractionTimeout == 0 {
+		cfg.Worker.ExtractionTimeout = defaults.Worker.ExtractionTimeout
+	}
+	if cfg.Worker.DecisionTimeout == 0 {
+		cfg.Worker.DecisionTimeout = defaults.Worker.DecisionTimeout
+	}
 	if cfg.Worker.MaxAttempts == 0 {
 		cfg.Worker.MaxAttempts = defaults.Worker.MaxAttempts
 	}
@@ -369,8 +385,11 @@ func (cfg Config) Validate() error {
 	if cfg.Worker.Workers != DefaultWorkerCount {
 		return fmt.Errorf("worker.workers 首版必须为 %d", DefaultWorkerCount)
 	}
-	if cfg.Worker.MaxAttempts != DefaultMaxAttempts {
-		return fmt.Errorf("worker.max_attempts 首版必须为 %d", DefaultMaxAttempts)
+	if cfg.Worker.MaxAttempts <= 0 {
+		return errors.New("worker.max_attempts 必须大于 0")
+	}
+	if cfg.Worker.ProcessBudget <= 0 || cfg.Worker.ExtractionTimeout <= 0 || cfg.Worker.DecisionTimeout <= 0 {
+		return errors.New("worker.process_budget、extraction_timeout 和 decision_timeout 必须大于 0")
 	}
 	if len(cfg.Worker.RetryDelays) != 3 {
 		return errors.New("worker.retry_delays 必须包含三个递增间隔")

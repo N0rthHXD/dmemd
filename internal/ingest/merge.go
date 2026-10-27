@@ -38,9 +38,10 @@ type mergeDecision struct {
 }
 
 type plannedAction struct {
-	candidate Candidate
-	decision  Decision
-	evidence  []source.Evidence
+	candidate    Candidate
+	decision     Decision
+	evidence     []source.Evidence
+	autoConverge bool
 }
 
 // mergePlan is built entirely outside the write transaction. It records the
@@ -259,6 +260,20 @@ func applyPlan(ctx context.Context, tx Tx, writer memory.Writer, plan *mergePlan
 
 func applyOne(ctx context.Context, tx Tx, writer memory.Writer, state *applyState, action plannedAction) error {
 	decision := action.decision
+	// Model action labels are not replacement evidence. The same deterministic
+	// gate applies even when the model calls an update a conflict or correction.
+	if decision.Action != ActionSkip && decision.Action != ActionSeparate && decision.Action != ActionMergeEvidence {
+		if converged, err := tryConvergence(ctx, tx, writer, state, action); err != nil {
+			return err
+		} else if converged {
+			return nil
+		}
+	}
+	if action.autoConverge {
+		// A second action in this transaction can invalidate a preplanned
+		// replacement. Never silently downgrade that plan to an accepted add.
+		return applyUnresolved(ctx, tx, writer, state, action)
+	}
 	switch decision.Action {
 	case ActionSkip:
 		state.decisions = append(state.decisions, mergeDecision{Action: "skip"})
@@ -270,9 +285,9 @@ func applyOne(ctx context.Context, tx Tx, writer memory.Writer, state *applyStat
 	case ActionEnrich:
 		return applyEnrich(ctx, tx, writer, state, action)
 	case ActionChange:
-		return applyChange(ctx, tx, writer, state, action)
+		return changeToConflict(ctx, tx, writer, state, action, memory.ConflictUncertainTime)
 	case ActionCorrect:
-		return applyCorrect(ctx, tx, writer, state, action)
+		return correctToConflict(ctx, tx, writer, state, action, memory.ConflictAmbiguousScope)
 	case ActionSeparate:
 		return applySeparate(ctx, tx, writer, state, action)
 	case ActionConflict:
@@ -421,6 +436,14 @@ func applyEnrich(ctx context.Context, tx Tx, writer memory.Writer, state *applyS
 	to := target.ValidTo
 	fromBasis := target.ValidFromBasis
 	toBasis := target.ValidToBasis
+	phase := target.Phase
+	durability := target.Durability
+	if action.candidate.Phase != "" && action.candidate.Phase != PhaseUnknown {
+		phase = memory.Phase(action.candidate.Phase)
+	}
+	if action.candidate.Durability != "" && action.candidate.Durability != DurabilityUnknown {
+		durability = memory.Durability(action.candidate.Durability)
+	}
 	if action.decision.ValidFrom != nil {
 		from = memory.UTCPointer(action.decision.ValidFrom)
 		fromBasis = normalizedBasis(action.decision.ValidFromBasis)
@@ -449,6 +472,8 @@ func applyEnrich(ctx context.Context, tx Tx, writer memory.Writer, state *applyS
 		ScopeKey:        target.ScopeKey,
 		Topics:          reviseTopics(action),
 		Evidence:        unionEvidence(currentEvidence, action.evidence),
+		Phase:           phase,
+		Durability:      durability,
 		Operation:       memory.OperationUpdate,
 		Reason:          reasonEnrich,
 	})
@@ -464,93 +489,6 @@ func applyEnrich(ctx context.Context, tx Tx, writer memory.Writer, state *applyS
 		state.warnings = append(state.warnings, WarningConflictDetected)
 	}
 	state.decisions = append(state.decisions, mergeDecision{Action: "enrich", MemoryID: revised.ID})
-	return nil
-}
-
-func applyChange(ctx context.Context, tx Tx, writer memory.Writer, state *applyState, action plannedAction) error {
-	target, err := currentTarget(ctx, tx, state.plan, action.decision.TargetMemoryIDs[0])
-	if err != nil {
-		return err
-	}
-	if target.State != memory.StateActive || target.AssertionStatus != memory.AssertionAccepted {
-		state.decisions = append(state.decisions, mergeDecision{Action: "skip-inactive-target"})
-		return nil
-	}
-	transition := action.decision.ValidFrom
-	if transition == nil {
-		transition = action.candidate.ValidFrom
-	}
-	if transition == nil || !hasVerifiedEvidence(state.plan.source, action.evidence) {
-		return changeToConflict(ctx, tx, writer, state, action, memory.ConflictUncertainTime)
-	}
-	if target.FactGroupID == "" {
-		return changeToConflict(ctx, tx, writer, state, action, memory.ConflictAmbiguousScope)
-	}
-	group, err := tx.GetFactGroup(ctx, target.FactGroupID)
-	if err != nil {
-		return err
-	}
-	if group.Cardinality != memory.CardinalitySingle {
-		return changeToConflict(ctx, tx, writer, state, action, memory.ConflictAmbiguousScope)
-	}
-	from := transition.UTC()
-	if target.ValidFrom != nil && !from.After(*target.ValidFrom) {
-		return changeToConflict(ctx, tx, writer, state, action, memory.ConflictComplexTimeline)
-	}
-	if target.ValidTo != nil {
-		return changeToConflict(ctx, tx, writer, state, action, memory.ConflictComplexTimeline)
-	}
-	members, err := tx.ListFactGroupMemories(ctx, target.FactGroupID)
-	if err != nil {
-		return err
-	}
-	for _, member := range members {
-		if member.ID == target.ID || member.State != memory.StateActive || member.AssertionStatus != memory.AssertionAccepted {
-			continue
-		}
-		if member.ValidFrom != nil && !member.ValidFrom.Before(from) {
-			return changeToConflict(ctx, tx, writer, state, action, memory.ConflictComplexTimeline)
-		}
-		if memory.Overlaps(&from, nil, member.ValidFrom, member.ValidTo) {
-			return changeToConflict(ctx, tx, writer, state, action, memory.ConflictContradictoryValue)
-		}
-	}
-	currentEvidence, err := tx.ListRevisionEvidence(ctx, target.ID, target.Version)
-	if err != nil {
-		return err
-	}
-	closed, err := writer.Revise(ctx, tx, memory.ReviseInput{
-		MemoryID:        target.ID,
-		Kind:            target.Kind,
-		Title:           target.Title,
-		Content:         target.Content,
-		ObservedAt:      target.ObservedAt,
-		ValidFrom:       target.ValidFrom,
-		ValidTo:         &from,
-		ValidFromBasis:  target.ValidFromBasis,
-		ValidToBasis:    memory.BasisInferred,
-		AssertionStatus: target.AssertionStatus,
-		FactGroupID:     target.FactGroupID,
-		ScopeKey:        target.ScopeKey,
-		Topics:          target.Topics,
-		Evidence:        currentEvidence,
-		Operation:       memory.OperationChange,
-		Reason:          reasonChange,
-	})
-	if err != nil {
-		return err
-	}
-	recordCreated(state, closed)
-	created, err := createMemory(ctx, tx, writer, state, action, memory.AssertionAccepted,
-		target.FactGroupID, decisionContent(action), action.evidence, reasonChange)
-	if err != nil {
-		return err
-	}
-	recordCreated(state, created)
-	if err := insertRelation(ctx, tx, created, closed); err != nil {
-		return err
-	}
-	state.decisions = append(state.decisions, mergeDecision{Action: "change", MemoryID: created.ID})
 	return nil
 }
 
@@ -590,82 +528,6 @@ func changeToConflict(ctx context.Context, tx Tx, writer memory.Writer, state *a
 	}
 	state.warnings = append(state.warnings, WarningConflictDetected)
 	state.decisions = append(state.decisions, mergeDecision{Action: "conflict", MemoryID: created.ID})
-	return nil
-}
-
-func applyCorrect(ctx context.Context, tx Tx, writer memory.Writer, state *applyState, action plannedAction) error {
-	target, err := currentTarget(ctx, tx, state.plan, action.decision.TargetMemoryIDs[0])
-	if err != nil {
-		return err
-	}
-	if target.State != memory.StateActive {
-		state.decisions = append(state.decisions, mergeDecision{Action: "skip-inactive-target"})
-		return nil
-	}
-	if !hasVerifiedEvidence(state.plan.source, action.evidence) {
-		return correctToConflict(ctx, tx, writer, state, action, memory.ConflictUncertainTime)
-	}
-	content := strings.TrimSpace(action.decision.Content)
-	if content == "" {
-		content = action.candidate.Content
-	}
-	from := target.ValidFrom
-	to := target.ValidTo
-	fromBasis := target.ValidFromBasis
-	toBasis := target.ValidToBasis
-	partial := false
-	if action.decision.ValidFrom != nil {
-		if target.ValidFrom != nil && action.decision.ValidFrom.After(*target.ValidFrom) {
-			partial = true
-		}
-		from = memory.UTCPointer(action.decision.ValidFrom)
-		fromBasis = normalizedBasis(action.decision.ValidFromBasis)
-	}
-	if action.decision.ValidTo != nil {
-		if target.ValidTo != nil && action.decision.ValidTo.Before(*target.ValidTo) {
-			partial = true
-		}
-		to = memory.UTCPointer(action.decision.ValidTo)
-		toBasis = normalizedBasis(action.decision.ValidToBasis)
-	}
-	if partial {
-		return correctToConflict(ctx, tx, writer, state, action, memory.ConflictComplexTimeline)
-	}
-	status := memory.AssertionAccepted
-	conflicts, reason := findGroupConflictsForRange(ctx, tx, target.FactGroupID, target.ID, from, to, content)
-	if len(conflicts) > 0 {
-		status = memory.AssertionPending
-	}
-	revised, err := writer.Revise(ctx, tx, memory.ReviseInput{
-		MemoryID:        target.ID,
-		Kind:            target.Kind,
-		Title:           target.Title,
-		Content:         content,
-		ObservedAt:      target.ObservedAt,
-		ValidFrom:       from,
-		ValidTo:         to,
-		ValidFromBasis:  fromBasis,
-		ValidToBasis:    toBasis,
-		AssertionStatus: status,
-		FactGroupID:     target.FactGroupID,
-		ScopeKey:        target.ScopeKey,
-		Topics:          reviseTopics(action),
-		Evidence:        action.evidence,
-		Operation:       memory.OperationCorrect,
-		Reason:          reasonCorrect,
-	})
-	if err != nil {
-		return err
-	}
-	recordCreated(state, revised)
-	if len(conflicts) > 0 {
-		members := append([]memory.Memory{revised}, conflicts...)
-		if _, err := recordConflict(ctx, tx, state, target.FactGroupID, reason, members); err != nil {
-			return err
-		}
-		state.warnings = append(state.warnings, WarningConflictDetected)
-	}
-	state.decisions = append(state.decisions, mergeDecision{Action: "correct", MemoryID: revised.ID})
 	return nil
 }
 
@@ -748,6 +610,9 @@ func applyConflict(ctx context.Context, tx Tx, writer memory.Writer, state *appl
 	}
 	recordCreated(state, created)
 	if len(targets) == 0 {
+		if _, err := recordConflict(ctx, tx, state, groupID, reason, []memory.Memory{created}); err != nil {
+			return err
+		}
 		state.decisions = append(state.decisions, mergeDecision{Action: "conflict-pending", MemoryID: created.ID})
 		return nil
 	}
@@ -784,11 +649,10 @@ func applyUnresolved(ctx context.Context, tx Tx, writer memory.Writer, state *ap
 		return err
 	}
 	recordCreated(state, created)
-	if len(targets) > 0 {
-		members := append([]memory.Memory{created}, targets...)
-		if _, err := recordConflict(ctx, tx, state, groupID, reason, members); err != nil {
-			return err
-		}
+	members := append([]memory.Memory{created}, targets...)
+	if conflictID, err := recordConflict(ctx, tx, state, groupID, reason, members); err != nil {
+		return err
+	} else if conflictID != "" {
 		state.warnings = append(state.warnings, WarningConflictDetected)
 	}
 	state.decisions = append(state.decisions, mergeDecision{Action: "unresolved", MemoryID: created.ID})
@@ -819,6 +683,8 @@ func createMemory(ctx context.Context, tx Tx, writer memory.Writer, state *apply
 	title := candidate.Title
 	created, err := writer.Create(ctx, tx, memory.CreateInput{
 		Kind:            candidate.Kind,
+		Phase:           memory.Phase(candidate.Phase),
+		Durability:      memory.Durability(candidate.Durability),
 		Title:           title,
 		Content:         content,
 		ObservedAt:      observedValue(candidate.ObservedAt),
@@ -991,7 +857,7 @@ func findGroupConflicts(ctx context.Context, tx Tx, groupID string, action plann
 		return nil, ""
 	}
 	group, err := tx.GetFactGroup(ctx, groupID)
-	if err != nil || group.Cardinality != memory.CardinalitySingle {
+	if err != nil || group.Cardinality == memory.CardinalityMultiple {
 		return nil, ""
 	}
 	from, to, _, _ := actionRange(action)
@@ -1003,7 +869,7 @@ func findGroupConflictsForRange(ctx context.Context, tx Tx, groupID, excludeID s
 		return nil, ""
 	}
 	group, err := tx.GetFactGroup(ctx, groupID)
-	if err != nil || group.Cardinality != memory.CardinalitySingle {
+	if err != nil || group.Cardinality == memory.CardinalityMultiple {
 		return nil, ""
 	}
 	members, err := tx.ListFactGroupMemories(ctx, groupID)
@@ -1012,6 +878,9 @@ func findGroupConflictsForRange(ctx context.Context, tx Tx, groupID, excludeID s
 	}
 	result := []memory.Memory{}
 	reason := memory.ConflictContradictoryValue
+	if group.Cardinality != memory.CardinalitySingle || group.Subject == "" || group.Predicate == "" {
+		reason = memory.ConflictAmbiguousScope
+	}
 	for _, member := range members {
 		if member.ID == excludeID || member.State != memory.StateActive {
 			continue
@@ -1025,7 +894,7 @@ func findGroupConflictsForRange(ctx context.Context, tx Tx, groupID, excludeID s
 		if !memory.Overlaps(from, to, member.ValidFrom, member.ValidTo) {
 			continue
 		}
-		if from == nil || to == nil || member.ValidFrom == nil || member.ValidTo == nil {
+		if reason != memory.ConflictAmbiguousScope && (from == nil || to == nil || member.ValidFrom == nil || member.ValidTo == nil) {
 			reason = memory.ConflictUncertainTime
 		}
 		result = append(result, member)
@@ -1035,72 +904,117 @@ func findGroupConflictsForRange(ctx context.Context, tx Tx, groupID, excludeID s
 
 func recordConflict(ctx context.Context, tx Tx, state *applyState, groupID string,
 	reason memory.ConflictReason, members []memory.Memory) (string, error) {
-	if len(members) < 2 {
+	reason = normalizeConflictReason(string(reason))
+	byID := make(map[string]memory.ConflictMember)
+	for _, member := range members {
+		byID[member.ID] = memory.ConflictMember{
+			MemoryID: member.ID, Version: member.Version, CurrentVersion: member.Version,
+		}
+	}
+	// A decision may name only one predecessor. Include every overlapping
+	// alternative in the same group, not just the model's partial target list.
+	if groupID != "" {
+		groupMembers, err := tx.ListFactGroupMemories(ctx, groupID)
+		if err != nil {
+			return "", err
+		}
+		for _, member := range groupMembers {
+			if member.State != memory.StateActive || member.AssertionStatus == memory.AssertionRejected {
+				continue
+			}
+			for _, anchor := range members {
+				if member.ScopeKey == anchor.ScopeKey && memory.Overlaps(member.ValidFrom, member.ValidTo, anchor.ValidFrom, anchor.ValidTo) {
+					byID[member.ID] = memory.ConflictMember{MemoryID: member.ID, Version: member.Version, CurrentVersion: member.Version}
+					break
+				}
+			}
+		}
+	}
+	// Compute the connected open-conflict closure. Detection reason changes do
+	// not split one contradictory fact into different, incomplete member sets.
+	existingByID := make(map[string]memory.Conflict)
+	for {
+		ids := make([]string, 0, len(byID))
+		for id := range byID {
+			ids = append(ids, id)
+		}
+		existing, err := tx.ListOpenConflictsForMemories(ctx, ids)
+		if err != nil {
+			return "", err
+		}
+		before := len(byID)
+		for _, conflict := range existing {
+			if conflict.FactGroupID != groupID {
+				continue
+			}
+			existingByID[conflict.ID] = conflict
+			for _, member := range conflict.Members {
+				if _, exists := byID[member.MemoryID]; !exists {
+					byID[member.MemoryID] = member
+				}
+			}
+		}
+		if len(byID) == before {
+			break
+		}
+	}
+	if len(byID) < 2 {
 		return "", nil
 	}
-	reason = normalizeConflictReason(string(reason))
-	versioned := make([]memory.ConflictMember, 0, len(members))
-	for _, member := range members {
-		versioned = append(versioned, memory.ConflictMember{
-			MemoryID: member.ID, Version: member.Version, CurrentVersion: member.Version,
-		})
+	versioned := make([]memory.ConflictMember, 0, len(byID))
+	for _, id := range orderedKeysOfMembers(byID) {
+		versioned = append(versioned, byID[id])
 	}
-	existing, err := tx.ListOpenConflictsForMemories(ctx, memberIDsOf(versioned))
-	if err != nil {
-		return "", err
+	existingIDs := make(map[string]struct{}, len(existingByID))
+	for id := range existingByID {
+		existingIDs[id] = struct{}{}
 	}
-	for _, conflict := range existing {
-		if conflict.ReasonCode != reason || conflict.FactGroupID != groupID {
-			continue
+	ordered := orderedKeys(existingIDs)
+	if len(ordered) > 0 {
+		conflict := existingByID[ordered[0]]
+		known := make(map[string]struct{}, len(conflict.Members))
+		for _, member := range conflict.Members {
+			known[member.MemoryID] = struct{}{}
 		}
-		changed := !sameMembers(conflict.Members, versioned)
+		changed := false
+		for _, member := range versioned {
+			if _, exists := known[member.MemoryID]; exists {
+				continue
+			}
+			changed = true
+			if err := tx.UpsertConflictMember(ctx, conflict.ID, member); err != nil {
+				return "", err
+			}
+			if err := tx.InsertConflictEvent(ctx, memory.ConflictEvent{
+				ID: idgen.NewUUID(), ConflictID: conflict.ID, Action: "members_changed",
+				MemoryID: member.MemoryID, Version: member.Version, CreatedAt: time.Now().UTC(),
+			}); err != nil {
+				return "", err
+			}
+		}
 		if changed {
-			// Extend the same open conflict with newly detected or revised
-			// members instead of creating a duplicate record for the group.
-			known := make(map[string]int, len(conflict.Members))
-			merged := append([]memory.ConflictMember(nil), conflict.Members...)
-			indexByID := make(map[string]int, len(merged))
-			for index, member := range merged {
-				known[member.MemoryID] = member.Version
-				indexByID[member.MemoryID] = index
-			}
-			for _, member := range versioned {
-				if err := tx.UpsertConflictMember(ctx, conflict.ID, member); err != nil {
-					return "", err
-				}
-				if index, exists := indexByID[member.MemoryID]; exists {
-					merged[index] = member
-				} else {
-					indexByID[member.MemoryID] = len(merged)
-					merged = append(merged, member)
-				}
-				previous, exists := known[member.MemoryID]
-				if !exists || previous != member.Version {
-					if err := tx.InsertConflictEvent(ctx, memory.ConflictEvent{
-						ID:         idgen.NewUUID(),
-						ConflictID: conflict.ID,
-						Action:     "members_changed",
-						MemoryID:   member.MemoryID,
-						Version:    member.Version,
-						CreatedAt:  time.Now().UTC(),
-					}); err != nil {
-						return "", err
-					}
-				}
-			}
-			conflict.Members = merged
-			conflict.UpdatedAt = time.Now().UTC()
 			conflict.Revision++
+			conflict.UpdatedAt = time.Now().UTC()
 			if err := tx.UpdateConflict(ctx, conflict); err != nil {
 				return "", err
 			}
-			if err := memory.QueueConflictReview(ctx, tx, conflict, 0, conflict.UpdatedAt); err != nil {
+		}
+		// Preserve historical records when overlapping open sets coalesce.
+		for _, id := range ordered[1:] {
+			old := existingByID[id]
+			if _, err := memory.CompleteConflictResolution(ctx, tx, old,
+				`{"action":"merged","conflict_id":"`+conflict.ID+`"}`, time.Now().UTC()); err != nil {
 				return "", err
 			}
 		}
-		if _, ok := state.conflictIDs[conflict.ID]; !ok {
-			state.conflictIDs[conflict.ID] = struct{}{}
+		conflict, err := tx.GetConflict(ctx, conflict.ID)
+		if err != nil {
+			return "", err
 		}
+		if err := memory.QueueConflictReview(ctx, tx, conflict, 0, conflict.UpdatedAt); err != nil {
+			return "", err
+		}
+		state.conflictIDs[conflict.ID] = struct{}{}
 		return conflict.ID, nil
 	}
 	now := time.Now().UTC()
@@ -1117,12 +1031,12 @@ func recordConflict(ctx context.Context, tx Tx, state *applyState, groupID strin
 	if err := tx.InsertConflict(ctx, conflict); err != nil {
 		return "", err
 	}
-	for _, member := range members {
+	for _, member := range versioned {
 		if err := tx.InsertConflictEvent(ctx, memory.ConflictEvent{
 			ID:         idgen.NewUUID(),
 			ConflictID: conflict.ID,
 			Action:     "detected",
-			MemoryID:   member.ID,
+			MemoryID:   member.MemoryID,
 			Version:    member.Version,
 			CreatedAt:  now,
 		}); err != nil {
@@ -1134,6 +1048,14 @@ func recordConflict(ctx context.Context, tx Tx, state *applyState, groupID strin
 	}
 	state.conflictIDs[conflict.ID] = struct{}{}
 	return conflict.ID, nil
+}
+
+func orderedKeysOfMembers(members map[string]memory.ConflictMember) []string {
+	keys := make(map[string]struct{}, len(members))
+	for id := range members {
+		keys[id] = struct{}{}
+	}
+	return orderedKeys(keys)
 }
 
 func insertRelation(ctx context.Context, tx Tx, from, to memory.Memory) error {
@@ -1255,30 +1177,6 @@ func unionEvidence(left, right []source.Evidence) []source.Evidence {
 		}
 		seen[item.ID] = struct{}{}
 		result = append(result, item)
-	}
-	return result
-}
-
-func sameMembers(left, right []memory.ConflictMember) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	index := make(map[string]int, len(left))
-	for _, member := range left {
-		index[member.MemoryID] = member.Version
-	}
-	for _, member := range right {
-		if version, ok := index[member.MemoryID]; !ok || version != member.Version {
-			return false
-		}
-	}
-	return true
-}
-
-func memberIDsOf(members []memory.ConflictMember) []string {
-	result := make([]string, 0, len(members))
-	for _, member := range members {
-		result = append(result, member.MemoryID)
 	}
 	return result
 }

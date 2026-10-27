@@ -144,11 +144,13 @@
         {
           "kind": "preference",
           "title": "回答语言",
+          "durability": "durable",
           "content": "用户默认使用中文回答。"
         },
         {
           "kind": "procedure",
           "title": "修改后验证",
+          "durability": "durable",
           "content": "修改后运行 go test。"
         },
         {

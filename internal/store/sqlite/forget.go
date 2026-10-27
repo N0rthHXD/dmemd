@@ -3,10 +3,68 @@ package sqlite
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/N0rthHXD/dmemd/internal/governance"
+	"github.com/N0rthHXD/dmemd/internal/governance/task"
+	"github.com/N0rthHXD/dmemd/internal/memory"
 	"github.com/N0rthHXD/dmemd/internal/source"
 )
+
+// DeleteForgetConflicts removes the entire dependent conflict, including
+// resolved audit history. Pruning only its membership would retain an audit of
+// the forgotten assertion and leave running review jobs able to commit.
+func (t *Tx) DeleteForgetConflicts(ctx context.Context, memoryID string, now time.Time) error {
+	rows, err := t.tx.QueryContext(ctx, `SELECT conflict_id FROM memory_conflict_members WHERE memory_id = ?
+		UNION SELECT conflict_id FROM memory_conflict_events WHERE memory_id = ? ORDER BY 1`, memoryID, memoryID)
+	if err != nil {
+		return fmt.Errorf("读取遗忘冲突 %s: %w", memoryID, err)
+	}
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	_ = rows.Close()
+	for _, id := range ids {
+		if _, err := t.CancelJob(ctx, task.KindReviewConflict, task.ConflictKey(id), now); err != nil {
+			return err
+		}
+		if _, err := t.tx.ExecContext(ctx, `DELETE FROM memory_conflicts WHERE id = ?`, id); err != nil {
+			return fmt.Errorf("清除遗忘冲突 %s: %w", id, err)
+		}
+	}
+	return nil
+}
+
+// ListForgetGroupMemories deliberately includes deleted tombstones: permanent
+// forget must not leave restorable copies behind. Unlike reasoning scans it has
+// no visibility filter or result limit.
+func (t *Tx) ListForgetGroupMemories(ctx context.Context, groupID string) ([]memory.Memory, error) {
+	rows, err := t.tx.QueryContext(ctx, `SELECT `+memoryColumns+` FROM memories
+		WHERE fact_group_id = ? ORDER BY id ASC`, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("读取遗忘事实组 %s: %w", groupID, err)
+	}
+	defer rows.Close()
+	items := []memory.Memory{}
+	for rows.Next() {
+		item, err := scanMemory(rows)
+		if err != nil {
+			return nil, fmt.Errorf("读取遗忘事实组 %s: %w", groupID, err)
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
 
 // ListMemoryIDsForSource returns every atomic memory associated with a source,
 // including memories that only keep the source in a historical revision or an

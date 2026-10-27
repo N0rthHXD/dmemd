@@ -12,9 +12,9 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/source"
 )
 
-const memoryColumns = `id, kind, title, content, state, assertion_status, version, observed_at,
+const memoryColumns = `id, kind, phase, durability, title, content, state, assertion_status, version, observed_at,
 	valid_from, valid_to, valid_from_basis, valid_to_basis, fact_group_id,
-	created_at, updated_at, created_by_app, origin_source_id, scope_key, topics_json`
+	created_at, updated_at, created_by_app, origin_source_id, scope_key, topics_json, raw_topics_json`
 
 var _ memory.Reader = (*Store)(nil)
 
@@ -53,18 +53,20 @@ func getMemory(ctx context.Context, q interface {
 
 func scanMemory(row rowScanner) (memory.Memory, error) {
 	var item memory.Memory
-	var kind, state, assertion, observedAt, createdAt, updatedAt string
+	var kind, phase, durability, state, assertion, observedAt, createdAt, updatedAt string
 	var fromBasis, toBasis string
 	var validFrom, validTo, origin, group sql.NullString
-	var topicsJSON string
+	var topicsJSON, rawTopicsJSON string
 	if err := row.Scan(
-		&item.ID, &kind, &item.Title, &item.Content, &state, &assertion, &item.Version,
+		&item.ID, &kind, &phase, &durability, &item.Title, &item.Content, &state, &assertion, &item.Version,
 		&observedAt, &validFrom, &validTo, &fromBasis, &toBasis, &group,
-		&createdAt, &updatedAt, &item.CreatedByApp, &origin, &item.ScopeKey, &topicsJSON,
+		&createdAt, &updatedAt, &item.CreatedByApp, &origin, &item.ScopeKey, &topicsJSON, &rawTopicsJSON,
 	); err != nil {
 		return memory.Memory{}, err
 	}
 	item.Kind = memory.Kind(kind)
+	item.Phase = memory.Phase(phase)
+	item.Durability = memory.Durability(durability)
 	item.State = memory.State(state)
 	item.AssertionStatus = memory.AssertionStatus(assertion)
 	item.ValidFromBasis = memory.TemporalBasis(fromBasis)
@@ -78,6 +80,9 @@ func scanMemory(row rowScanner) (memory.Memory, error) {
 	var err error
 	if item.Topics, err = decodeTopics(topicsJSON); err != nil {
 		return memory.Memory{}, fmt.Errorf("读取记忆 %s 的主题: %w", item.ID, err)
+	}
+	if item.RawTopics, err = decodeTopics(rawTopicsJSON); err != nil {
+		return memory.Memory{}, err
 	}
 	if item.ObservedAt, err = parseTime(observedAt); err != nil {
 		return memory.Memory{}, err
@@ -105,13 +110,17 @@ func (t *Tx) InsertMemory(ctx context.Context, item memory.Memory) error {
 	if err != nil {
 		return err
 	}
-	_, err = t.tx.ExecContext(ctx, `INSERT INTO memories(`+memoryColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		item.ID, string(item.Kind), item.Title, item.Content, string(item.State),
+	rawTopics, err := encodeTopics(item.RawTopics)
+	if err != nil {
+		return err
+	}
+	_, err = t.tx.ExecContext(ctx, `INSERT INTO memories(`+memoryColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		item.ID, string(item.Kind), string(item.Phase), string(item.Durability), item.Title, item.Content, string(item.State),
 		string(item.AssertionStatus), item.Version, formatTime(item.ObservedAt),
 		timeValue(item.ValidFrom), timeValue(item.ValidTo),
 		string(item.ValidFromBasis), string(item.ValidToBasis), nullableString(item.FactGroupID),
 		formatTime(item.CreatedAt), formatTime(item.UpdatedAt),
-		item.CreatedByApp, nullableString(item.OriginSourceID), item.ScopeKey, topics,
+		item.CreatedByApp, nullableString(item.OriginSourceID), item.ScopeKey, topics, rawTopics,
 	)
 	if err != nil {
 		return fmt.Errorf("写入记忆 %s: %w", item.ID, err)
@@ -130,6 +139,10 @@ func (t *Tx) UpdateMemory(ctx context.Context, item memory.Memory) error {
 		return err
 	}
 	var previousGroup sql.NullString
+	rawTopics, err := encodeTopics(item.RawTopics)
+	if err != nil {
+		return err
+	}
 	if err := t.tx.QueryRowContext(ctx,
 		`SELECT fact_group_id FROM memories WHERE id = ?`, item.ID).Scan(&previousGroup); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -138,17 +151,17 @@ func (t *Tx) UpdateMemory(ctx context.Context, item memory.Memory) error {
 		return fmt.Errorf("读取记忆 %s 的旧事实组: %w", item.ID, err)
 	}
 	result, err := t.tx.ExecContext(ctx, `UPDATE memories SET
-		kind = ?, title = ?, content = ?, state = ?, assertion_status = ?, version = ?,
+		kind = ?, phase = ?, durability = ?, title = ?, content = ?, state = ?, assertion_status = ?, version = ?,
 		observed_at = ?, valid_from = ?, valid_to = ?, valid_from_basis = ?, valid_to_basis = ?,
 		fact_group_id = ?, created_at = ?, updated_at = ?, created_by_app = ?, origin_source_id = ?,
-		scope_key = ?, topics_json = ?
+		scope_key = ?, topics_json = ?, raw_topics_json = ?
 		WHERE id = ?`,
-		string(item.Kind), item.Title, item.Content, string(item.State),
+		string(item.Kind), string(item.Phase), string(item.Durability), item.Title, item.Content, string(item.State),
 		string(item.AssertionStatus), item.Version, formatTime(item.ObservedAt),
 		timeValue(item.ValidFrom), timeValue(item.ValidTo),
 		string(item.ValidFromBasis), string(item.ValidToBasis), nullableString(item.FactGroupID),
 		formatTime(item.CreatedAt), formatTime(item.UpdatedAt),
-		item.CreatedByApp, nullableString(item.OriginSourceID), item.ScopeKey, topics, item.ID,
+		item.CreatedByApp, nullableString(item.OriginSourceID), item.ScopeKey, topics, rawTopics, item.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("更新记忆 %s: %w", item.ID, err)
@@ -184,9 +197,9 @@ func (t *Tx) bumpFactGroupGeneration(ctx context.Context, groupID string, now ti
 	return nil
 }
 
-const revisionColumns = `memory_id, version, operation, reason, kind, title, content, state,
+const revisionColumns = `memory_id, version, operation, reason, kind, title, content, state, phase, durability,
 	assertion_status, observed_at, valid_from, valid_to, valid_from_basis, valid_to_basis,
-	fact_group_id, created_at, updated_at, created_by_app, origin_source_id, scope_key, topics_json`
+	fact_group_id, created_at, updated_at, created_by_app, origin_source_id, scope_key, topics_json, raw_topics_json`
 
 // InsertRevision stores one complete historical snapshot. Its revision time is
 // the snapshot's updated_at.
@@ -196,16 +209,20 @@ func (t *Tx) InsertRevision(ctx context.Context, revision memory.Revision) error
 	if err != nil {
 		return err
 	}
+	rawTopics, err := encodeTopics(snapshot.RawTopics)
+	if err != nil {
+		return err
+	}
 	_, err = t.tx.ExecContext(ctx, `INSERT INTO memory_revisions(`+revisionColumns+`) VALUES
-		(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		revision.MemoryID, revision.Version, string(revision.Operation), revision.Reason,
-		string(snapshot.Kind), snapshot.Title, snapshot.Content, string(snapshot.State),
+		string(snapshot.Kind), snapshot.Title, snapshot.Content, string(snapshot.State), string(snapshot.Phase), string(snapshot.Durability),
 		string(snapshot.AssertionStatus), formatTime(snapshot.ObservedAt),
 		timeValue(snapshot.ValidFrom), timeValue(snapshot.ValidTo),
 		string(snapshot.ValidFromBasis), string(snapshot.ValidToBasis),
 		nullableString(snapshot.FactGroupID), formatTime(snapshot.CreatedAt),
 		formatTime(snapshot.UpdatedAt), snapshot.CreatedByApp, nullableString(snapshot.OriginSourceID),
-		snapshot.ScopeKey, topics,
+		snapshot.ScopeKey, topics, rawTopics,
 	)
 	if err != nil {
 		return fmt.Errorf("写入记忆版本 %s@%d: %w", revision.MemoryID, revision.Version, err)
@@ -284,15 +301,15 @@ func listRevisions(ctx context.Context, q revisionQueryer, memoryID string, limi
 
 func scanRevision(row rowScanner) (memory.Revision, error) {
 	var item memory.Revision
-	var operation, kind, state, assertion, fromBasis, toBasis string
-	var observedAt, createdAt, updatedAt, topicsJSON string
+	var operation, kind, state, phase, durability, assertion, fromBasis, toBasis string
+	var observedAt, createdAt, updatedAt, topicsJSON, rawTopicsJSON string
 	var validFrom, validTo, origin, group sql.NullString
 	if err := row.Scan(
 		&item.MemoryID, &item.Version, &operation, &item.Reason,
-		&kind, &item.Snapshot.Title, &item.Snapshot.Content, &state, &assertion,
+		&kind, &item.Snapshot.Title, &item.Snapshot.Content, &state, &phase, &durability, &assertion,
 		&observedAt, &validFrom, &validTo, &fromBasis, &toBasis, &group,
 		&createdAt, &updatedAt, &item.Snapshot.CreatedByApp, &origin,
-		&item.Snapshot.ScopeKey, &topicsJSON,
+		&item.Snapshot.ScopeKey, &topicsJSON, &rawTopicsJSON,
 	); err != nil {
 		return memory.Revision{}, err
 	}
@@ -300,6 +317,8 @@ func scanRevision(row rowScanner) (memory.Revision, error) {
 	item.Snapshot.ID = item.MemoryID
 	item.Snapshot.Version = item.Version
 	item.Snapshot.Kind = memory.Kind(kind)
+	item.Snapshot.Phase = memory.Phase(phase)
+	item.Snapshot.Durability = memory.Durability(durability)
 	item.Snapshot.State = memory.State(state)
 	item.Snapshot.AssertionStatus = memory.AssertionStatus(assertion)
 	item.Snapshot.ValidFromBasis = memory.TemporalBasis(fromBasis)
@@ -313,6 +332,9 @@ func scanRevision(row rowScanner) (memory.Revision, error) {
 	var err error
 	if item.Snapshot.Topics, err = decodeTopics(topicsJSON); err != nil {
 		return memory.Revision{}, fmt.Errorf("读取记忆版本 %s@%d 的主题: %w", item.MemoryID, item.Version, err)
+	}
+	if item.Snapshot.RawTopics, err = decodeTopics(rawTopicsJSON); err != nil {
+		return memory.Revision{}, err
 	}
 	if item.Snapshot.ObservedAt, err = parseTime(observedAt); err != nil {
 		return memory.Revision{}, err
@@ -654,8 +676,17 @@ func placeholders(count int) string {
 // constraints. The memory write service already normalizes these fields; this
 // guard keeps direct storage callers honest as well.
 func normalizedStoredMemory(item memory.Memory) memory.Memory {
+	if item.Phase == "" {
+		item.Phase = memory.PhaseUnknown
+	}
+	if item.Durability == "" {
+		item.Durability = memory.DurabilityUnknown
+	}
 	item.ScopeKey = memory.NormalizeScopeKey(item.ScopeKey)
-	item.Topics = memory.NormalizeTopics(item.Topics)
+	if item.RawTopics == nil {
+		item.RawTopics = item.Topics
+	}
+	item.Topics = memory.CanonicalTopics(item.Topics)
 	if item.AssertionStatus == "" {
 		item.AssertionStatus = memory.AssertionAccepted
 	}

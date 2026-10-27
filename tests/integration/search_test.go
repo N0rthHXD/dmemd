@@ -145,43 +145,31 @@ func TestChineseKeywordSearchContract(t *testing.T) {
 	if result := f.run(t, retrieval.Request{Query: "终端"}); !slices.Equal(searchIDs(result), searchSet(procedure.ID)) {
 		t.Fatalf("two-character content query = %+v", searchIDs(result))
 	}
-	if result := f.run(t, retrieval.Request{Query: "运行服务", Match: retrieval.MatchAll}); !slices.Equal(searchIDs(result), searchSet(procedure.ID)) {
+	if result := f.run(t, retrieval.Request{Query: "运行服务"}); !sameMembers(searchIDs(result), procedure.ID, aiMemory.ID) {
 		t.Fatalf("multi-term Chinese query = %+v", searchIDs(result))
 	}
-	if result := f.run(t, retrieval.Request{Query: "部署步骤", Match: retrieval.MatchAll}); !slices.Equal(searchIDs(result), searchSet(procedure.ID)) {
+	if result := f.run(t, retrieval.Request{Query: "部署步骤"}); !slices.Equal(searchIDs(result), searchSet(procedure.ID)) {
 		t.Fatalf("long Chinese title query = %+v", searchIDs(result))
 	}
-	if result := f.run(t, retrieval.Request{Query: "记忆检索", Match: retrieval.MatchAll}); !slices.Equal(searchIDs(result), searchSet(memoryResult.ID)) {
-		t.Fatalf("phrase query = %+v", searchIDs(result))
+	if result := f.run(t, retrieval.Request{Query: "记忆检索"}); !sameMembers(searchIDs(result), memoryResult.ID, aiMemory.ID) {
+		t.Fatalf("dictionary-term query = %+v", searchIDs(result))
 	}
 	if result := f.run(t, retrieval.Request{Query: "记忆"}); !sameMembers(searchIDs(result), memoryResult.ID, aiMemory.ID) {
 		t.Fatalf("two-character query = %+v", searchIDs(result))
 	}
-	if result := f.run(t, retrieval.Request{Query: "AI记忆", Match: retrieval.MatchAll}); !slices.Equal(searchIDs(result), searchSet(aiMemory.ID)) {
+	if result := f.run(t, retrieval.Request{Query: "AI记忆"}); !sameMembers(searchIDs(result), aiMemory.ID, memoryResult.ID, meeting.ID) {
 		t.Fatalf("mixed query = %+v", searchIDs(result))
 	}
 	if result := f.run(t, retrieval.Request{Query: "MEMORY"}); !slices.Equal(searchIDs(result), searchSet(meeting.ID)) {
 		t.Fatalf("case-insensitive English query = %+v", searchIDs(result))
 	}
-	if result := f.run(t, retrieval.Request{Query: "终端，运行", Match: retrieval.MatchAll}); !slices.Equal(searchIDs(result), searchSet(procedure.ID)) {
+	if result := f.run(t, retrieval.Request{Query: "终端，运行"}); !slices.Equal(searchIDs(result), searchSet(procedure.ID)) {
 		t.Fatalf("punctuation boundary query = %+v", searchIDs(result))
 	}
 
-	all := f.run(t, retrieval.Request{Query: "回答 语言", Match: retrieval.MatchAll})
-	if !slices.Equal(searchIDs(all), searchSet(answer.ID)) {
-		t.Fatalf("match=all result = %+v", searchIDs(all))
-	}
-	anyResult := f.run(t, retrieval.Request{Query: "回答 语言", Match: retrieval.MatchAny})
+	anyResult := f.run(t, retrieval.Request{Query: "回答 语言"})
 	if !sameMembers(searchIDs(anyResult), answer.ID, format.ID, longSnippet.ID) {
-		t.Fatalf("match=any result = %+v", searchIDs(anyResult))
-	}
-	defaultAny := f.run(t, retrieval.Request{Query: "回答 语言"})
-	if !sameMembers(searchIDs(defaultAny), answer.ID, format.ID, longSnippet.ID) {
-		t.Fatalf("default match result = %+v", searchIDs(defaultAny))
-	}
-	unknownAny := f.run(t, retrieval.Request{Query: "回答 语言", Match: "unknown"})
-	if !sameMembers(searchIDs(unknownAny), answer.ID, format.ID, longSnippet.ID) {
-		t.Fatalf("unknown match result = %+v", searchIDs(unknownAny))
+		t.Fatalf("unified any result = %+v", searchIDs(anyResult))
 	}
 	for _, item := range anyResult.Items {
 		switch item.Memory.ID {
@@ -201,7 +189,7 @@ func TestChineseKeywordSearchContract(t *testing.T) {
 	if len(answerEvidence.ID) == 0 {
 		t.Fatal("test evidence missing")
 	}
-	answerItem := searchItem(t, all, answer.ID)
+	answerItem := searchItem(t, anyResult, answer.ID)
 	if len(answerItem.EvidenceRefs) != 1 || answerItem.EvidenceRefs[0].ID != answerEvidence.ID ||
 		answerItem.EvidenceRefs[0].SourceID != f.source.ID {
 		t.Fatalf("evidence_refs = %+v", answerItem.EvidenceRefs)
@@ -256,8 +244,8 @@ func TestChineseKeywordSearchContract(t *testing.T) {
 		t.Fatalf("deleted state was not removed from active search: %+v", searchIDs(result))
 	}
 
-	longResult := f.run(t, retrieval.Request{Query: "关键回答", Match: retrieval.MatchAll})
-	if !slices.Equal(searchIDs(longResult), searchSet(longSnippet.ID)) {
+	longResult := f.run(t, retrieval.Request{Query: "关键回答"})
+	if !sameMembers(searchIDs(longResult), longSnippet.ID, answer.ID, format.ID) {
 		t.Fatalf("long snippet result = %+v", searchIDs(longResult))
 	}
 	item := searchItem(t, longResult, longSnippet.ID)
@@ -268,10 +256,13 @@ func TestChineseKeywordSearchContract(t *testing.T) {
 		t.Fatalf("snippet rune count = %d", len([]rune(item.Snippet)))
 	}
 
-	for _, query := range []string{"", " ，。！？ ", "*", `记忆" OR * (NEAR)`} {
-		if result := f.run(t, retrieval.Request{Query: query, Match: retrieval.MatchAll}); len(result.Items) != 0 {
+	for _, query := range []string{"", " ，。！？ ", "*", "的 是 什么", "what is the", `" OR * (NEAR)`} {
+		if result := f.run(t, retrieval.Request{Query: query}); len(result.Items) != 0 {
 			t.Fatalf("query %q returned %+v", query, searchIDs(result))
 		}
+	}
+	if result := f.run(t, retrieval.Request{Query: `记忆" OR * (NEAR)`}); !sameMembers(searchIDs(result), memoryResult.ID, aiMemory.ID) {
+		t.Fatalf("literal operator query = %+v", searchIDs(result))
 	}
 }
 
@@ -282,17 +273,17 @@ func TestChineseDictionaryTermsMatchIndependently(t *testing.T) {
 		Content: "Jon工作的时候失去银行职员身份，是什么？",
 	})
 	f.advance(time.Minute)
-	f.create(t, memory.CreateInput{
+	partial := f.create(t, memory.CreateInput{
 		Kind: memory.KindEvent, Title: "缺少银行职员", Content: "Jon失去工作。",
 	})
 
 	query := "Jon是什么时候失去银行职员工作的？"
-	result := f.run(t, retrieval.Request{Query: query, Match: retrieval.MatchAll})
-	if !slices.Equal(searchIDs(result), searchSet(reordered.ID)) {
+	result := f.run(t, retrieval.Request{Query: query})
+	if !sameMembers(searchIDs(result), reordered.ID, partial.ID) {
 		t.Fatalf("long Chinese query = %+v", searchIDs(result))
 	}
 	item := searchItem(t, result, reordered.ID)
-	wantTerms := []string{"jon", "是", "什么", "时候", "失去", "银行职员", "工作", "的"}
+	wantTerms := []string{"jon", "失去", "银行职员", "工作"}
 	if !slices.Equal(item.MatchedTerms, wantTerms) {
 		t.Fatalf("matched_terms = %#v, want %#v", item.MatchedTerms, wantTerms)
 	}
@@ -342,9 +333,9 @@ func TestKeywordTermSelectionAndCoverageRerank(t *testing.T) {
 		t.Fatalf("low-coverage matched_terms = %#v", got)
 	}
 
-	strict := f.run(t, retrieval.Request{Query: "jon 失去 银行职员 工作", Match: retrieval.MatchAll})
-	if !slices.Equal(searchIDs(strict), searchSet(exact.ID)) {
-		t.Fatalf("explicit all result = %+v", searchIDs(strict))
+	keywords := f.run(t, retrieval.Request{Query: "jon 失去 银行职员 工作"})
+	if !slices.Equal(searchIDs(keywords), searchIDs(result)) {
+		t.Fatalf("keywords and question differ: %+v vs %+v", searchIDs(keywords), searchIDs(result))
 	}
 }
 
@@ -362,6 +353,95 @@ func TestNormalizationEquivalentInputs(t *testing.T) {
 		}
 		if len(result.Items[0].MatchedTerms) == 0 {
 			t.Fatalf("query %q returned no matched_terms", query)
+		}
+	}
+}
+
+func TestNaturalLanguageAndKeywordsUseAnySemantics(t *testing.T) {
+	f := newSearchFixture(t)
+	daughter := f.create(t, memory.CreateInput{Kind: memory.KindEvent, Title: "入学", Content: "女儿将于2027年入读小学。"})
+	allergy := f.create(t, memory.CreateInput{Kind: memory.KindFact, Title: "饮食限制", Content: "花生过敏。"})
+	f.create(t, memory.CreateInput{Kind: memory.KindFact, Title: "疑问词", Content: "我 对 什么 什么时候 the is what"})
+	f.create(t, memory.CreateInput{Kind: memory.KindFact, Title: "无关记录", Content: "办公室使用蓝色桌子。"})
+	for _, test := range []struct {
+		queries []string
+		want    string
+	}{
+		{queries: []string{"女儿什么时候上小学？", "女儿 小学", "小学 不存在的词"}, want: daughter.ID},
+		{queries: []string{"我对什么过敏？", "过敏", "过敏 不存在的词"}, want: allergy.ID},
+	} {
+		for _, mode := range []retrieval.Mode{retrieval.ModeKeyword, retrieval.ModeHybrid} {
+			for _, query := range test.queries {
+				result := f.run(t, retrieval.Request{Query: query, Mode: mode})
+				if !slices.Equal(searchIDs(result), []string{test.want}) {
+					t.Fatalf("mode=%s query=%q result=%v", mode, query, searchIDs(result))
+				}
+			}
+		}
+	}
+	for _, query := range []string{"我 对 什么", "什么时候", "the is what", "火星殖民地"} {
+		for _, mode := range []retrieval.Mode{retrieval.ModeKeyword, retrieval.ModeHybrid} {
+			if result := f.run(t, retrieval.Request{Query: query, Mode: mode}); len(result.Items) != 0 {
+				t.Fatalf("negative query=%q mode=%s result=%v", query, mode, searchIDs(result))
+			}
+		}
+	}
+}
+
+func TestAnySearchPreservesStructuredFilters(t *testing.T) {
+	f := newSearchFixture(t)
+	ctx := context.Background()
+	transition := searchBaseTime.Add(time.Hour)
+	current := f.create(t, memory.CreateInput{
+		Kind: memory.KindFact, Title: "本项目", Content: "项目使用 SQLite。", ScopeKey: "project:dmemd",
+		ValidFrom: &transition, ValidFromBasis: memory.BasisExplicit,
+	})
+	historical := f.create(t, memory.CreateInput{
+		Kind: memory.KindFact, Title: "旧数据库", Content: "项目使用 MySQL。", ScopeKey: "project:dmemd",
+		ValidTo: &transition, ValidToBasis: memory.BasisExplicit,
+	})
+	global := f.create(t, memory.CreateInput{Kind: memory.KindPreference, Content: "偏好 SQLite。", ScopeKey: "user"})
+	f.create(t, memory.CreateInput{Kind: memory.KindFact, Content: "SQLite 用于其他项目。", ScopeKey: "project:other"})
+	pending := f.create(t, memory.CreateInput{
+		Kind: memory.KindFact, Content: "SQLite 未确认。", ScopeKey: "project:dmemd", AssertionStatus: memory.AssertionPending,
+	})
+	f.create(t, memory.CreateInput{
+		Kind: memory.KindFact, Content: "SQLite 错误记录。", ScopeKey: "project:dmemd", AssertionStatus: memory.AssertionRejected,
+	})
+	archived := f.create(t, memory.CreateInput{Kind: memory.KindFact, Content: "SQLite 归档。", ScopeKey: "project:dmemd"})
+	if _, err := f.memories.UpdateState(ctx, archived.ID, memory.StateArchived); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []retrieval.Mode{retrieval.ModeKeyword, retrieval.ModeHybrid} {
+		for _, test := range []struct {
+			name    string
+			filters retrieval.Filters
+			want    []string
+		}{
+			{name: "current scope", filters: retrieval.Filters{ScopeKey: "project:dmemd", AsOf: timePtr(transition)}, want: []string{current.ID, global.ID, pending.ID}},
+			{name: "historical scope", filters: retrieval.Filters{ScopeKey: "project:dmemd", AsOf: timePtr(searchBaseTime)}, want: []string{historical.ID, global.ID, pending.ID}},
+			{name: "unknown scope", filters: retrieval.Filters{ScopeKey: "project:unknown", AsOf: timePtr(transition)}, want: []string{global.ID}},
+			{name: "kind", filters: retrieval.Filters{ScopeKey: "project:dmemd", AsOf: timePtr(transition), Kinds: []memory.Kind{memory.KindFact}}, want: []string{current.ID, pending.ID}},
+			{name: "archive", filters: retrieval.Filters{ScopeKey: "project:dmemd", AsOf: timePtr(transition), States: []memory.State{memory.StateArchived}}, want: []string{archived.ID}},
+		} {
+			// Each eligible memory matches only a subset of these query terms.
+			result := f.run(t, retrieval.Request{Query: "什么 SQLite MySQL 不存在的词", Mode: mode, Filters: test.filters})
+			if !sameMembers(searchIDs(result), test.want...) {
+				t.Fatalf("mode=%s %s = %v, want %v", mode, test.name, searchIDs(result), test.want)
+			}
+		}
+	}
+}
+
+func TestNegationOnlyTermsRemainSearchable(t *testing.T) {
+	f := newSearchFixture(t)
+	for _, term := range []string{"不", "没", "无", "not", "never"} {
+		created := f.create(t, memory.CreateInput{Kind: memory.KindFact, Title: "否定", Content: term})
+		for _, mode := range []retrieval.Mode{retrieval.ModeKeyword, retrieval.ModeHybrid} {
+			result := f.run(t, retrieval.Request{Query: "什么 " + term, Mode: mode})
+			if !slices.Equal(searchIDs(result), []string{created.ID}) || !slices.Equal(result.Items[0].MatchedTerms, []string{term}) {
+				t.Fatalf("negation %q mode=%s = %+v", term, mode, result.Items)
+			}
 		}
 	}
 }
@@ -585,7 +665,7 @@ func TestRelatedContext(t *testing.T) {
 	unrelated := f.create(t, memory.CreateInput{
 		Kind: memory.KindFact, Title: "部署步骤", Content: "打开终端运行服务。",
 	})
-	stopwordOnly := f.create(t, memory.CreateInput{
+	f.create(t, memory.CreateInput{
 		Kind: memory.KindFact, Title: "疑问词", Content: "什么",
 	})
 
@@ -619,8 +699,8 @@ func TestRelatedContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !sameMembers(searchMemoryIDs(related.Memories), answer.ID, archived.ID, stopwordOnly.ID) {
-		t.Fatalf("related context kept original terms = %+v", searchMemoryIDs(related.Memories))
+	if !sameMembers(searchMemoryIDs(related.Memories), answer.ID, archived.ID) {
+		t.Fatalf("related context term selection = %+v", searchMemoryIDs(related.Memories))
 	}
 	if result := f.run(t, retrieval.Request{Query: "回答 什么"}); !slices.Equal(searchIDs(result), searchSet(answer.ID)) {
 		t.Fatalf("public any term selection = %+v", searchIDs(result))

@@ -157,6 +157,8 @@ func (s *Service) Create(ctx context.Context, tx Tx, input CreateInput) (Memory,
 	item := Memory{
 		ID:              idgen.NewUUID(),
 		Kind:            kind,
+		Phase:           normalizePhase(input.Phase),
+		Durability:      normalizeDurability(input.Durability),
 		Title:           input.Title,
 		Content:         input.Content,
 		State:           StateActive,
@@ -173,7 +175,8 @@ func (s *Service) Create(ctx context.Context, tx Tx, input CreateInput) (Memory,
 		CreatedByApp:    input.CreatedByApp,
 		OriginSourceID:  input.OriginSourceID,
 		ScopeKey:        NormalizeScopeKey(input.ScopeKey),
-		Topics:          NormalizeTopics(input.Topics),
+		Topics:          CanonicalTopics(rawTopics(input.Topics)),
+		RawTopics:       rawTopics(input.Topics),
 	}
 	if err := validateFactGroupReference(ctx, tx, item.FactGroupID); err != nil {
 		return Memory{}, err
@@ -226,6 +229,12 @@ func (s *Service) Revise(ctx context.Context, tx Tx, input ReviseInput) (Memory,
 		if candidate.Kind == "" {
 			candidate.Kind = current.Kind
 		}
+		if input.Phase != "" {
+			candidate.Phase = normalizePhase(input.Phase)
+		}
+		if input.Durability != "" {
+			candidate.Durability = normalizeDurability(input.Durability)
+		}
 		candidate.Title = input.Title
 		candidate.Content = input.Content
 		candidate.ObservedAt = normalizeObservedAt(input.ObservedAt, current.ObservedAt)
@@ -257,7 +266,8 @@ func (s *Service) Revise(ctx context.Context, tx Tx, input ReviseInput) (Memory,
 			candidate.ScopeKey = scope
 		}
 		if input.Topics != nil {
-			candidate.Topics = NormalizeTopics(input.Topics)
+			candidate.Topics = CanonicalTopics(rawTopics(input.Topics))
+			candidate.RawTopics = rawTopics(input.Topics)
 		}
 	}
 
@@ -270,9 +280,12 @@ func (s *Service) Revise(ctx context.Context, tx Tx, input ReviseInput) (Memory,
 		candidate.ScopeKey != current.ScopeKey
 	if classificationInputChanged && input.Operation != OperationAddEvidence && input.Topics == nil {
 		candidate.Topics = []string{}
+		candidate.RawTopics = []string{}
 	}
 
 	contentUnchanged := candidate.Kind == current.Kind &&
+		candidate.Phase == current.Phase &&
+		candidate.Durability == current.Durability &&
 		candidate.Title == current.Title &&
 		candidate.Content == current.Content &&
 		candidate.ObservedAt.Equal(current.ObservedAt) &&
@@ -280,7 +293,8 @@ func (s *Service) Revise(ctx context.Context, tx Tx, input ReviseInput) (Memory,
 		candidate.AssertionStatus == current.AssertionStatus &&
 		candidate.FactGroupID == current.FactGroupID &&
 		candidate.ScopeKey == current.ScopeKey &&
-		SameTopics(candidate.Topics, current.Topics)
+		SameTopics(candidate.Topics, current.Topics) &&
+		sameRawTopics(candidate.RawTopics, current.RawTopics)
 
 	currentEvidence, err := tx.ListRevisionEvidence(ctx, current.ID, current.Version)
 	if err != nil {
@@ -333,6 +347,30 @@ func (s *Service) Revise(ctx context.Context, tx Tx, input ReviseInput) (Memory,
 	return candidate, nil
 }
 
+func normalizePhase(value Phase) Phase {
+	if value == "" {
+		return PhaseUnknown
+	}
+	switch value {
+	case PhaseUnknown, PhaseScheduled, PhaseInProgress, PhaseCompleted, PhaseCancelled, PhasePostponed:
+		return value
+	default:
+		return PhaseUnknown
+	}
+}
+
+func normalizeDurability(value Durability) Durability {
+	if value == "" {
+		return DurabilityUnknown
+	}
+	switch value {
+	case DurabilityUnknown, DurabilityDurable, DurabilityEpisodic, DurabilityTemporary:
+		return value
+	default:
+		return DurabilityUnknown
+	}
+}
+
 // Classify applies a classification result without registering another
 // classify task. Classification-only revisions are never an input change for
 // themselves; aggregation tasks consume the new labels.
@@ -345,8 +383,9 @@ func (s *Service) Classify(ctx context.Context, tx Tx, input ClassificationInput
 	if scope := NormalizeScopeKey(input.ScopeKey); scope != "" {
 		candidate.ScopeKey = scope
 	}
-	candidate.Topics = NormalizeTopics(input.Topics)
-	if candidate.ScopeKey == current.ScopeKey && SameTopics(candidate.Topics, current.Topics) {
+	candidate.Topics = CanonicalTopics(rawTopics(input.Topics))
+	candidate.RawTopics = rawTopics(input.Topics)
+	if candidate.ScopeKey == current.ScopeKey && SameTopics(candidate.Topics, current.Topics) && sameRawTopics(candidate.RawTopics, current.RawTopics) {
 		return current, nil
 	}
 	candidate.Version = current.Version + 1
@@ -393,6 +432,7 @@ func classifyInputHash(item Memory) string {
 		item.Content,
 		item.ScopeKey,
 		strings.Join(NormalizeTopics(item.Topics), "\x00"),
+		strings.Join(item.RawTopics, "\x00"),
 		item.OriginSourceID,
 	}
 	return task.InputHash(parts...)

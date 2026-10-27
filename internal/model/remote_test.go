@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -14,6 +15,74 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/source"
 	"github.com/N0rthHXD/dmemd/internal/testutil"
 )
+
+type deadlineTransport func(*http.Request) (*http.Response, error)
+
+func (f deadlineTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+func TestProviderOperationTimeoutsOverrideGenericTimeout(t *testing.T) {
+	var expected time.Duration
+	var reply string
+	provider, err := NewProvider(Config{
+		BaseURL: "http://model.invalid/v1", Timeout: 10 * time.Millisecond,
+		ExtractionTimeout: 180 * time.Second, DecisionTimeout: 300 * time.Second,
+		HTTPClient: &http.Client{Transport: deadlineTransport(func(request *http.Request) (*http.Response, error) {
+			deadline, ok := request.Context().Deadline()
+			remaining := time.Until(deadline)
+			if !ok || remaining < expected-time.Second || remaining > expected {
+				t.Errorf("remaining=%v expected=%v", remaining, expected)
+			}
+			body, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": reply}}}})
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(string(body))), Header: make(http.Header)}, nil
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, reply = 180*time.Second, `{"candidates":[]}`
+	if _, err := provider.Extract(context.Background(), ingest.ExtractionRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.RepairExtraction(context.Background(), ingest.ExtractionRepairRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	expected, reply = 300*time.Second, `{"decisions":[]}`
+	if _, err := provider.Decide(context.Background(), ingest.DecisionRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.RepairDecision(context.Background(), ingest.DecisionRepairRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	expected, reply = time.Minute, `{"decisions":[]}`
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if _, err := provider.Decide(ctx, ingest.DecisionRequest{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDecisionRepairRequestIncludesTargetedDiagnostics(t *testing.T) {
+	fake := testutil.NewFakeModel(t)
+	fake.EnqueueContent(`{"decisions":[{"candidate_id":"c2","action":"unresolved"}]}`)
+	provider, err := NewProvider(Config{BaseURL: fake.URL(), Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = provider.RepairDecision(context.Background(), ingest.DecisionRepairRequest{
+		DecisionRequest: ingest.DecisionRequest{Candidates: []ingest.Candidate{{CandidateID: "c2"}}},
+		Decisions:       []ingest.Decision{{CandidateID: "c2", Action: ingest.ActionChange, TargetMemoryIDs: []string{"a", "b"}}},
+		Issues:          []ingest.DecisionIssue{{CandidateID: "c2", Code: "change_target_cardinality"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(fake.Requests()[0].Body)
+	if !strings.Contains(body, "change_target_cardinality") || !strings.Contains(body, "invalid_decisions") || !strings.Contains(body, "never guess a target") {
+		t.Fatalf("missing repair constraints: %s", body)
+	}
+}
 
 func TestProviderMapsRequestsAndResponses(t *testing.T) {
 	fake := testutil.NewFakeModel(t)

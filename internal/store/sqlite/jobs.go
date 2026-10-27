@@ -11,7 +11,7 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/ingest"
 )
 
-const jobColumns = `id, source_id, status, attempts, protocol_failures, wait_reason,
+const jobColumns = `id, source_id, status, attempts, protocol_failures, wait_reason, stage, reason_code,
 	next_attempt_at, error, memory_ids, conflict_ids, pending_memory_ids, warnings,
 	created_at, updated_at, started_at, finished_at`
 
@@ -43,6 +43,7 @@ func scanJob(row rowScanner) (ingest.Job, error) {
 	var nextAttempt, startedAt, finishedAt sql.NullString
 	if err := row.Scan(
 		&item.ID, &item.SourceID, &status, &item.Attempts, &item.ProtocolFailures, &item.WaitReason,
+		&item.Stage, &item.ReasonCode,
 		&nextAttempt, &item.Error,
 		&memoryIDs, &conflictIDs, &pendingIDs, &warnings,
 		&createdAt, &updatedAt, &startedAt, &finishedAt,
@@ -111,9 +112,9 @@ func (t *Tx) InsertJob(ctx context.Context, item ingest.Job) error {
 		return err
 	}
 	_, err = t.tx.ExecContext(ctx, `INSERT INTO ingest_jobs(`+jobColumns+`) VALUES
-		(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		item.ID, item.SourceID, string(item.Status), item.Attempts, item.ProtocolFailures,
-		item.WaitReason, timeValue(item.NextAttemptAt),
+		item.WaitReason, item.Stage, item.ReasonCode, timeValue(item.NextAttemptAt),
 		item.Error, memoryIDs, conflictIDs, pendingIDs, warnings,
 		formatTime(item.CreatedAt), formatTime(item.UpdatedAt),
 		timeValue(item.StartedAt), timeValue(item.FinishedAt),
@@ -132,12 +133,13 @@ func (t *Tx) UpdateJob(ctx context.Context, item ingest.Job) error {
 		return err
 	}
 	result, err := t.tx.ExecContext(ctx, `UPDATE ingest_jobs SET
-		source_id = ?, status = ?, attempts = ?, protocol_failures = ?, wait_reason = ?,
+		source_id = ?, status = ?, attempts = ?, protocol_failures = ?, wait_reason = ?, stage = ?, reason_code = ?,
 		next_attempt_at = ?, error = ?,
 		memory_ids = ?, conflict_ids = ?, pending_memory_ids = ?, warnings = ?,
 		updated_at = ?, started_at = ?, finished_at = ?
 		WHERE id = ?`,
 		item.SourceID, string(item.Status), item.Attempts, item.ProtocolFailures, item.WaitReason,
+		item.Stage, item.ReasonCode,
 		timeValue(item.NextAttemptAt), item.Error, memoryIDs, conflictIDs, pendingIDs, warnings,
 		formatTime(item.UpdatedAt), timeValue(item.StartedAt),
 		timeValue(item.FinishedAt), item.ID,
@@ -174,7 +176,7 @@ func (t *Tx) ClaimNextJob(ctx context.Context, now time.Time) (ingest.Job, bool,
 	}
 
 	result, err := t.tx.ExecContext(ctx, `UPDATE ingest_jobs SET
-		status = ?, attempts = attempts + 1, next_attempt_at = NULL, wait_reason = '',
+		status = ?, attempts = attempts + 1, next_attempt_at = NULL, wait_reason = '', stage = '', reason_code = '',
 		updated_at = ?, started_at = COALESCE(started_at, ?), finished_at = NULL
 		WHERE id = ? AND (status = ? OR (status = ? AND wait_reason <> ?))`,
 		string(ingest.JobRunning), formatTime(now), formatTime(now),

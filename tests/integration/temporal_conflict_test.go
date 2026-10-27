@@ -49,12 +49,12 @@ func TestTemporalChangeAndAsOfRecall(t *testing.T) {
 	f.advance(time.Minute)
 	f.fake.EnqueueCandidates([]any{map[string]any{
 		"kind": "fact", "content": "用户常住北京。",
+		"valid_from": "2026-06-15T02:00:00Z", "valid_from_basis": "inferred",
 		"fact_group": map[string]any{
 			"subject": "用户", "predicate": "常住城市", "cardinality": "single",
 		},
 		"evidence": []any{map[string]any{"message_id": "m2", "quote": "搬到北京"}},
 	}})
-	f.fake.EnqueueContent(`{"decisions":[{"candidate_id":"c1","action":"change","target_memory_ids":["` + oldID + `"],"content":"用户常住北京。","valid_from":"2026-06-15T02:00:00Z","valid_from_basis":"explicit","valid_to_basis":"unknown","reason_code":"explicit_transition","evidence_refs":[{"candidate_id":"c1","evidence_index":0}]}]}`)
 	second := f.submit(t, `{"messages":[{"id":"m2","content":"用户 常住城市 搬到北京。"}]}`)
 	if !f.processOne(t) {
 		t.Fatal("second job not processed")
@@ -151,7 +151,7 @@ func TestPendingConflictDiscoveryAndResolution(t *testing.T) {
 		"fact_group": map[string]any{
 			"subject": "用户", "predicate": "常住城市", "cardinality": "single",
 		},
-		"evidence": []any{map[string]any{"message_id": "m2", "quote": "用户常住北京"}},
+		"evidence": []any{map[string]any{"message_id": "m2", "quote": "用户 常住城市 北京。"}},
 	}})
 	f.fake.EnqueueContent(`{"decisions":[{"candidate_id":"c1","action":"conflict","target_memory_ids":["` + acceptedID + `"],"content":"用户常住北京。","reason_code":"contradictory_value","evidence_refs":[{"candidate_id":"c1","evidence_index":0}]}]}`)
 	second := f.submit(t, `{"messages":[{"id":"m2","content":"用户 常住城市 北京。"}]}`)
@@ -191,8 +191,9 @@ func TestPendingConflictDiscoveryAndResolution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(normal.Items) != 1 || normal.Items[0].Memory.ID != acceptedID {
-		t.Fatalf("ordinary recall mixed pending items: %+v", normal.Items)
+	if len(normal.Items) != 2 || normal.Items[0].Memory.ID != acceptedID || normal.Items[1].Memory.ID != pendingID ||
+		normal.Items[1].Memory.AssertionStatus != memory.AssertionPending || len(normal.Items[1].ConflictRefs) != 1 {
+		t.Fatalf("ordinary recall must rank accepted before labelled pending: %+v", normal.Items)
 	}
 	if len(normal.Items[0].ConflictRefs) != 1 || normal.Items[0].ConflictRefs[0].ID != conflictID {
 		t.Fatalf("item conflict refs = %+v", normal.Items[0].ConflictRefs)
@@ -202,6 +203,20 @@ func TestPendingConflictDiscoveryAndResolution(t *testing.T) {
 	}
 	if len(normal.Warnings) != 1 || normal.Warnings[0] != retrieval.WarningFactConflict {
 		t.Fatalf("warnings = %+v", normal.Warnings)
+	}
+	for _, mode := range []retrieval.Mode{retrieval.ModeKeyword, retrieval.ModeHybrid} {
+		acceptedFirst, err := f.search.Search(ctx, retrieval.Request{Query: "常住城市 北京", Mode: mode, TopK: 1})
+		if err != nil || len(acceptedFirst.Items) != 1 || acceptedFirst.Items[0].Memory.ID != acceptedID {
+			t.Fatalf("pending displaced accepted under Top-K mode=%s result=%+v err=%v", mode, acceptedFirst, err)
+		}
+		pendingOnly, err := f.search.Search(ctx, retrieval.Request{Query: "什么 北京 未命中的词", Mode: mode})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(pendingOnly.Items) != 1 || pendingOnly.Items[0].Memory.ID != pendingID || len(pendingOnly.Conflicts) != 1 || pendingOnly.Conflicts[0].ID != conflictID ||
+			!contains(pendingOnly.Warnings, retrieval.WarningFactConflict) {
+			t.Fatalf("pending-only any conflict discovery mode=%s = %+v", mode, pendingOnly)
+		}
 	}
 
 	if _, err := f.memories.Resolve(ctx, memory.ResolveInput{
@@ -366,8 +381,8 @@ func TestPendingOnlyConflictDiscovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Items) != 0 {
-		t.Fatalf("pending-only recall returned items: %+v", result.Items)
+	if len(result.Items) != 2 || result.Items[0].Memory.AssertionStatus != memory.AssertionPending || result.Items[1].Memory.AssertionStatus != memory.AssertionPending {
+		t.Fatalf("pending-only recall must expose labelled candidates: %+v", result.Items)
 	}
 	if len(result.Conflicts) != 1 || result.Conflicts[0].ID != "conflict-pending-only" || result.Conflicts[0].HasAccepted {
 		t.Fatalf("pending-only conflicts = %+v", result.Conflicts)

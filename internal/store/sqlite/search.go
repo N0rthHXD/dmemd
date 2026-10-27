@@ -83,7 +83,8 @@ func (s *Store) Search(ctx context.Context, query retrieval.Query) ([]retrieval.
 		JOIN memory_search_docs d ON d.row_id = memory_fts.rowid
 		JOIN memories m ON m.id = d.memory_id
 		WHERE ` + strings.Join(conditions, " AND ") + `
-		ORDER BY rank ASC, m.updated_at DESC, m.id ASC
+		ORDER BY CASE m.assertion_status WHEN 'accepted' THEN 0 ELSE 1 END,
+			rank ASC, m.updated_at DESC, m.id ASC
 		LIMIT ?`
 
 	rows, err := s.reader.QueryContext(ctx, statement, args...)

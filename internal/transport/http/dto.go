@@ -26,6 +26,8 @@ type submitResponse struct {
 type memoryDTO struct {
 	ID              string     `json:"id"`
 	Kind            string     `json:"kind"`
+	Phase           string     `json:"phase"`
+	Durability      string     `json:"durability"`
 	Title           string     `json:"title"`
 	Content         string     `json:"content"`
 	State           string     `json:"state"`
@@ -43,6 +45,7 @@ type memoryDTO struct {
 	OriginSourceID  string     `json:"origin_source_id,omitempty"`
 	ScopeKey        string     `json:"scope_key,omitempty"`
 	Topics          []string   `json:"topics"`
+	RawTopics       []string   `json:"raw_topics"`
 }
 
 type memoryListResponse struct {
@@ -196,6 +199,7 @@ type artifactItemDTO struct {
 }
 
 type artifactMetaDTO struct {
+	ReasonCode     string    `json:"reason_code,omitempty"`
 	ID             string    `json:"id"`
 	Kind           string    `json:"kind"`
 	TargetKey      string    `json:"target_key"`
@@ -207,19 +211,23 @@ type artifactMetaDTO struct {
 }
 
 type artifactRevisionDTO struct {
-	ArtifactID      string                 `json:"artifact_id"`
-	Version         int                    `json:"version"`
-	Title           string                 `json:"title"`
-	Content         string                 `json:"content"`
-	Payload         json.RawMessage        `json:"payload,omitempty"`
-	ContentHash     string                 `json:"content_hash"`
-	Generator       string                 `json:"generator"`
-	ProtocolVersion string                 `json:"protocol_version"`
-	ReasonCode      string                 `json:"reason_code,omitempty"`
-	Truncated       bool                   `json:"truncated"`
-	MemoryRefs      []artifactMemoryRefDTO `json:"memory_refs"`
-	RunRefs         []artifactRunRefDTO    `json:"run_refs"`
-	CreatedAt       time.Time              `json:"created_at"`
+	TaxonomyVersion  string                 `json:"taxonomy_version"`
+	GeneratorVersion string                 `json:"generator_version"`
+	RunID            string                 `json:"run_id"`
+	Provenance       json.RawMessage        `json:"provenance"`
+	ArtifactID       string                 `json:"artifact_id"`
+	Version          int                    `json:"version"`
+	Title            string                 `json:"title"`
+	Content          string                 `json:"content"`
+	Payload          json.RawMessage        `json:"payload,omitempty"`
+	ContentHash      string                 `json:"content_hash"`
+	Generator        string                 `json:"generator"`
+	ProtocolVersion  string                 `json:"protocol_version"`
+	ReasonCode       string                 `json:"reason_code,omitempty"`
+	Truncated        bool                   `json:"truncated"`
+	MemoryRefs       []artifactMemoryRefDTO `json:"memory_refs"`
+	RunRefs          []artifactRunRefDTO    `json:"run_refs"`
+	CreatedAt        time.Time              `json:"created_at"`
 }
 
 type artifactDetailResponse struct {
@@ -276,9 +284,11 @@ type redactResponse struct {
 }
 
 type forgetResponse struct {
-	MemoryIDs     []string `json:"memory_ids"`
-	SourceIDs     []string `json:"source_ids"`
-	ExperienceIDs []string `json:"experience_ids"`
+	MemoryIDs                []string `json:"memory_ids"`
+	SourceIDs                []string `json:"source_ids"`
+	ExperienceIDs            []string `json:"experience_ids"`
+	Warnings                 []string `json:"warnings,omitempty"`
+	RetainedRelatedMemoryIDs []string `json:"retained_related_memory_ids,omitempty"`
 }
 
 type jobDTO struct {
@@ -288,6 +298,8 @@ type jobDTO struct {
 	Attempts         int        `json:"attempts"`
 	ProtocolFailures int        `json:"protocol_failures"`
 	WaitReason       string     `json:"wait_reason,omitempty"`
+	Stage            string     `json:"stage,omitempty"`
+	ReasonCode       string     `json:"reason_code,omitempty"`
 	NextAttemptAt    *time.Time `json:"next_attempt_at,omitempty"`
 	Error            string     `json:"error,omitempty"`
 	MemoryIDs        []string   `json:"memory_ids"`
@@ -335,6 +347,8 @@ func memoryFromDomain(item memory.Memory) memoryDTO {
 	return memoryDTO{
 		ID:              item.ID,
 		Kind:            string(item.Kind),
+		Phase:           string(item.Phase),
+		Durability:      string(item.Durability),
 		Title:           item.Title,
 		Content:         item.Content,
 		State:           string(item.State),
@@ -352,6 +366,7 @@ func memoryFromDomain(item memory.Memory) memoryDTO {
 		OriginSourceID:  item.OriginSourceID,
 		ScopeKey:        item.ScopeKey,
 		Topics:          nonNilStrings(item.Topics),
+		RawTopics:       nonNilStrings(item.RawTopics),
 	}
 }
 
@@ -568,6 +583,7 @@ func artifactMetaFromDomain(item artifact.Artifact) artifactMetaDTO {
 		Topic:          item.Topic,
 		CurrentVersion: item.CurrentVersion,
 		State:          string(item.State),
+		ReasonCode:     item.ReasonCode,
 		UpdatedAt:      item.UpdatedAt.UTC(),
 	}
 }
@@ -578,19 +594,23 @@ func artifactRevisionFromDomain(item artifact.Revision) artifactRevisionDTO {
 		payload = nil
 	}
 	return artifactRevisionDTO{
-		ArtifactID:      item.ArtifactID,
-		Version:         item.Version,
-		Title:           item.Title,
-		Content:         item.Content,
-		Payload:         payload,
-		ContentHash:     item.ContentHash,
-		Generator:       item.Generator,
-		ProtocolVersion: item.ProtocolVersion,
-		ReasonCode:      item.ReasonCode,
-		Truncated:       item.Truncated,
-		MemoryRefs:      memoryRefsFromDomain(item.MemoryRefs),
-		RunRefs:         runRefsFromDomain(item.RunRefs),
-		CreatedAt:       item.CreatedAt.UTC(),
+		ArtifactID:       item.ArtifactID,
+		Version:          item.Version,
+		Title:            item.Title,
+		Content:          item.Content,
+		Payload:          payload,
+		ContentHash:      item.ContentHash,
+		Generator:        item.Generator,
+		ProtocolVersion:  item.ProtocolVersion,
+		TaxonomyVersion:  item.TaxonomyVersion,
+		GeneratorVersion: item.GeneratorVersion,
+		RunID:            item.RunID,
+		Provenance:       item.Provenance,
+		ReasonCode:       item.ReasonCode,
+		Truncated:        item.Truncated,
+		MemoryRefs:       memoryRefsFromDomain(item.MemoryRefs),
+		RunRefs:          runRefsFromDomain(item.RunRefs),
+		CreatedAt:        item.CreatedAt.UTC(),
 	}
 }
 
@@ -656,6 +676,8 @@ func jobFromDomain(item ingest.Job) jobDTO {
 		Attempts:         item.Attempts,
 		ProtocolFailures: item.ProtocolFailures,
 		WaitReason:       item.WaitReason,
+		Stage:            item.Stage,
+		ReasonCode:       item.ReasonCode,
 		NextAttemptAt:    utcPointer(item.NextAttemptAt),
 		Error:            item.Error,
 		MemoryIDs:        memoryIDs,

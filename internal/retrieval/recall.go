@@ -47,7 +47,6 @@ func (s *Service) Recall(ctx context.Context, request RecallRequest) (RecallResu
 		searchRequest := Request{
 			Query: request.Query,
 			Mode:  mode,
-			Match: request.Match,
 			Filters: Filters{
 				Kinds:         filters.Kinds,
 				States:        filters.States,
@@ -77,13 +76,9 @@ func (s *Service) Recall(ctx context.Context, request RecallRequest) (RecallResu
 		derivedRequested = false
 	}
 	if derivedRequested {
-		groups := dedupeGroups(Groups(request.Query))
-		match := normalizeMatch(request.Match)
-		if mode == ModeKeyword && match == MatchAny {
-			groups = selectQueryTerms(groups)
-		}
+		groups := queryGroups(request.Query)
 		if len(groups) > 0 && s.artifacts != nil {
-			expression, err := Compile(groups, match)
+			expression, err := Compile(groups)
 			if err != nil {
 				return RecallResult{}, err
 			}

@@ -245,6 +245,13 @@ func (w *Worker) handleFailure(ctx context.Context, claimed Job, cause error) er
 		current.Error = summary
 		current.NextAttemptAt = nil
 		current.WaitReason = ""
+		current.Stage = "processing"
+		current.ReasonCode = kind
+		var diagnostic *ProcessingError
+		if errors.As(cause, &diagnostic) {
+			current.Stage = diagnostic.Stage
+			current.ReasonCode = diagnostic.Code
+		}
 		current.FinishedAt = nil
 		switch kind {
 		case "configuration":
@@ -368,7 +375,10 @@ func safeErrorSummary(err error) string {
 		return ""
 	}
 	var provider *ProviderError
+	var diagnostic *ProcessingError
 	switch {
+	case errors.As(err, &diagnostic):
+		return truncateSummary(diagnostic.Error() + ": " + safeErrorSummary(diagnostic.Err))
 	case errors.As(err, &provider):
 		message := provider.Operation
 		if message == "" {

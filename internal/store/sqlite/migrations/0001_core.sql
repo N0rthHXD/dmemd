@@ -23,11 +23,15 @@ CREATE TABLE schema_meta (
     value TEXT NOT NULL
 );
 
-INSERT INTO schema_meta(key, value) VALUES ('contract', 'dmemd-s3-2026-10-22');
+INSERT INTO schema_meta(key, value) VALUES ('contract', 'dmemd-p2-2026-10-26');
 
 CREATE TABLE memories (
     id                TEXT NOT NULL PRIMARY KEY,
     kind              TEXT NOT NULL,
+    phase             TEXT NOT NULL DEFAULT 'unknown'
+                      CHECK (phase IN ('unknown', 'scheduled', 'in_progress', 'completed', 'cancelled', 'postponed')),
+    durability        TEXT NOT NULL DEFAULT 'unknown'
+                      CHECK (durability IN ('unknown', 'durable', 'episodic', 'temporary')),
     title             TEXT NOT NULL DEFAULT '',
     content           TEXT NOT NULL DEFAULT '',
     state             TEXT NOT NULL CHECK (state IN ('active', 'archived', 'deleted')),
@@ -48,6 +52,7 @@ CREATE TABLE memories (
     origin_source_id  TEXT REFERENCES sources(id) ON DELETE SET NULL,
     scope_key         TEXT NOT NULL DEFAULT '',
     topics_json       TEXT NOT NULL DEFAULT '[]',
+    raw_topics_json   TEXT NOT NULL DEFAULT '[]',
     CHECK (version >= 1),
     CHECK ((valid_from IS NULL) = (valid_from_basis = 'unknown')),
     CHECK ((valid_to IS NULL) = (valid_to_basis = 'unknown')),
@@ -72,6 +77,10 @@ CREATE TABLE memory_revisions (
     operation         TEXT NOT NULL,
     reason            TEXT NOT NULL DEFAULT '',
     kind              TEXT NOT NULL,
+    phase             TEXT NOT NULL DEFAULT 'unknown'
+                      CHECK (phase IN ('unknown', 'scheduled', 'in_progress', 'completed', 'cancelled', 'postponed')),
+    durability        TEXT NOT NULL DEFAULT 'unknown'
+                      CHECK (durability IN ('unknown', 'durable', 'episodic', 'temporary')),
     title             TEXT NOT NULL DEFAULT '',
     content           TEXT NOT NULL DEFAULT '',
     state             TEXT NOT NULL CHECK (state IN ('active', 'archived', 'deleted')),
@@ -91,6 +100,7 @@ CREATE TABLE memory_revisions (
     origin_source_id  TEXT,
     scope_key         TEXT NOT NULL DEFAULT '',
     topics_json       TEXT NOT NULL DEFAULT '[]',
+    raw_topics_json   TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (memory_id, version),
     FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE,
     CHECK ((valid_from IS NULL) = (valid_from_basis = 'unknown')),
@@ -135,6 +145,8 @@ CREATE TABLE ingest_jobs (
     attempts        INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     protocol_failures INTEGER NOT NULL DEFAULT 0 CHECK (protocol_failures >= 0),
     wait_reason     TEXT NOT NULL DEFAULT '',
+	stage           TEXT NOT NULL DEFAULT '',
+	reason_code     TEXT NOT NULL DEFAULT '',
     next_attempt_at TEXT,
     error           TEXT NOT NULL DEFAULT '',
     memory_ids      TEXT NOT NULL DEFAULT '[]',

@@ -39,7 +39,9 @@ func TestArtifactReadRoutesReturnCurrentAndHistoricalRevisions(t *testing.T) {
 		},
 		Revision: &artifact.Revision{
 			ArtifactID: "artifact-1", Version: 2, Title: "摘要", Content: "内容",
-			MemoryRefs: []artifact.MemoryRef{{MemoryID: "memory-1", Version: 3}},
+			MemoryRefs:      []artifact.MemoryRef{{MemoryID: "memory-1", Version: 3}},
+			TaxonomyVersion: "taxonomy-v1", GeneratorVersion: "generator-v2", RunID: "job:1",
+			Provenance: json.RawMessage(`{"memory_refs":[{"memory_id":"memory-1","version":3}]}`),
 			CreatedAt:  created,
 		},
 	}
@@ -71,6 +73,9 @@ func TestArtifactReadRoutesReturnCurrentAndHistoricalRevisions(t *testing.T) {
 		len(decoded.Revision.MemoryRefs) != 1 || decoded.Revision.MemoryRefs[0].Version != 3 {
 		t.Fatalf("current detail = %+v", decoded)
 	}
+	if decoded.Revision.TaxonomyVersion != "taxonomy-v1" || decoded.Revision.GeneratorVersion != "generator-v2" || decoded.Revision.RunID != "job:1" || len(decoded.Revision.Provenance) == 0 {
+		t.Fatalf("audit metadata = %+v", decoded.Revision)
+	}
 
 	response = serve(t, services, nil, httptest.NewRequest(http.MethodGet, "/v1/artifacts/artifact-1/history/1", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"version":1`) {
@@ -92,6 +97,16 @@ func TestArtifactReadRoutesReturnCurrentAndHistoricalRevisions(t *testing.T) {
 	response = serve(t, missing, nil, httptest.NewRequest(http.MethodGet, "/v1/artifacts/missing/history/0", nil))
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("invalid history version = %d", response.Code)
+	}
+}
+
+func TestArtifactDisabledDiagnosticWithoutRevision(t *testing.T) {
+	services := Services{Artifacts: stubArtifacts{get: func(context.Context, string) (artifact.Detail, error) {
+		return artifact.Detail{Artifact: artifact.Artifact{ID: "skill-1", Kind: artifact.KindSkill, State: artifact.StateDisabled, ReasonCode: "no_procedure_input"}}, nil
+	}}}
+	response := serve(t, services, nil, httptest.NewRequest(http.MethodGet, "/v1/artifacts/skill-1", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"reason_code":"no_procedure_input"`) {
+		t.Fatalf("diagnostic = %d %s", response.Code, response.Body.String())
 	}
 }
 

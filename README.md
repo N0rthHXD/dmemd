@@ -6,12 +6,12 @@ HTTP/1.1 JSON API，支持关键词检索与基于 Embedding 的语义混合检�
 ## 功能概览
 
 - 统一异步接收文本、对话和结构化内容，模型提取与记忆合并由后台单 Worker 完成。
-- 原子记忆保存平面 `scope_key` 与规范化 `topics`；持久化治理 Worker 自动补全分类并周期性对账，
+- 原子记忆保存平面 `scope_key`、带中英文别名和父主题继承的 canonical `topics` 与审计用 `raw_topics`；治理 Worker 自动补全分类并周期性对账，
   分类结果无变化时不生成新版本。
 - 治理 Worker 自动生成有直接原子依据的主题摘要、作用域画像、经验案例和指导型 Skill，
   保存不可变派生版本、直接来源和 FTS。原子依据或运行结果变化时同步失效；
   `POST /v1/memories/recall` 按 `layers` 统一返回原子、摘要、经验与 Skill 分区。
-- 应用可提交完成结果反馈（success/failure/unknown，均视为应用报告而非执行验证），
+- 应用可提交完成结果反馈（success/failure/unknown/partial_success，均视为应用报告而非执行验证），
   可选 `run_id` 去重；失败反馈自动使相关 Skill 失效并后台重建，撤销结果同步阻断依赖使用。
   Skill 自动启用并保留来源，`GET /v1/skills/{id}/content` 返回带 frontmatter 的 SKILL.md。
 - 记忆具有完整版本、证据和生命周期：创建、更正、补证、归档、删除、历史恢复与永久清除。
@@ -20,7 +20,11 @@ HTTP/1.1 JSON API，支持关键词检索与基于 Embedding 的语义混合检�
 - 两阶段模型整理：先提取独立事实，再按候选选择有限冲突上下文并按需调用决策模型；支持
   重复、补充、变化、更正、场景分离和未决冲突，非法目标不再降级为新增。
 - 断言状态（accepted/pending/rejected）、事实组、版本关系和冲突审计独立持久化。普通召回
-  只返回 accepted；未决冲突通过 `conflicts` 摘要和 `fact_conflict` 警告提示。
+  优先返回 accepted，再展示明确标记的 pending；未决冲突通过 `conflict_refs`、`conflicts`
+  摘要和 `fact_conflict` 警告提示，rejected 不参与召回。
+- 同主体、谓词和作用域的单值事实，有当前来源的明确更正/替换证据且时间顺序可确认时，
+  自动生成 accepted 后继，关闭旧区间或拒绝旧事实，写入 `supersedes` 和 resolved 审计；
+  证据、时间、单值属性或作用域不明确时保持 pending。
 - 冲突管理接口支持查看 open/resolved 冲突与成员检测版本，并通过
   `choose/timeline/separate_scope/reject_all` 显式裁决；版本变化返回 409。
 - 关键词检索使用 NFC/大小写规范化与中文词典分词，基于 SQLite FTS5/BM25，支持过滤、
@@ -30,8 +34,10 @@ HTTP/1.1 JSON API，支持关键词检索与基于 Embedding 的语义混合检�
 - 提供架构规定的全部本地 HTTP API、用户数据目录单实例锁和优雅关闭。
 - 当前没有认证、分页、幂等键、条件请求或独立前端。
 
-默认关键词检索会过滤受控停用词，并按 BM25 名次与词项覆盖率做有界重排，不设置最低命中
-过滤；显式 `match=all` 保持严格合取。没有可用向量时仍按 hybrid 执行，只返回关键词候选。
+所有关键词查询统一使用 any 语义：按词典分词、过滤受控停用词并保留否定词，命中任一有效词
+即可召回。原子层、派生层、相关事实选择及 hybrid 的关键词分支使用相同预处理；无有效词时
+返回空结果，不执行无约束查询。关键词模式按 BM25 名次与词项覆盖率做有界重排，不设置最低
+命中数过滤。语义不可用时 hybrid 降级为关键词结果，并返回 `semantic_unavailable` 等警告。
 关键词索引在记忆写入事务中同步维护，向量由独立后台 Worker 异步生成。
 
 ## 环境
@@ -84,9 +90,17 @@ HTTP 端口冲突；进程崩溃后锁由操作系统释放，可直接重新启
 
 模型地址不可用时服务仍可启动，已有记忆的查询、检索和管理保持可用；新提交仍返回
 `202`。暂时性网络、超时和限流错误进入 `waiting` 并按 5 秒、30 秒、2 分钟递增延期，
-之后最长每 30 分钟重试，模型恢复后自动继续，无需重新提交。连续三次解析/协议错误才进入
+之后最长每 30 分钟重试，模型恢复后自动继续，无需重新提交。局部修复后仍连续失败达到
+`worker.max_attempts`（默认 3）次解析/协议错误才进入
 `failed`；凭据或请求配置错误保持等待并在重启后重评。协议失败任务在进程重启后也会按新的
 模型/协议版本重新评估一次。失败原因通过任务查询返回。
+
+`worker.process_budget` 默认 `600s`，覆盖一次完整处理尝试；`worker.extraction_timeout`
+默认 `180s`，`worker.decision_timeout` 默认 `300s`，分别限制每次提取/决策及其修复调用。
+调用同时受剩余处理预算约束，摄取调用不会再被治理使用的 `model.timeout`（默认 `60s`）截短。
+waiting/failed 任务返回稳定的 `stage` 和 `reason_code`，例如 `extraction` +
+`process_budget_exceeded` 或 `decision` + `model_timeout`。`separate` 的非法目标字段直接移除；
+`change` 的多目标结果仅定向修复一次，不猜测目标，也不重做已通过的同批决策。
 
 分类、主题摘要、作用域画像和周期性对账由一个独立治理 Worker 执行；治理故障只降级后台
 整理，不关闭 HTTP、原子查询或输入持久化。`governance.enabled=false` 只停止后台整理，原子
@@ -94,6 +108,12 @@ HTTP 端口冲突；进程崩溃后锁由操作系统释放，可直接重新启
 上限 64 条，治理模型调用受进程内软限速（默认最少间隔 2 分钟、每小时约 30 次）约束。配置
 只有 `enabled`、`debounce`、`reconcile_interval`、`min_call_interval`、`max_inputs` 五个
 治理项，示例见 `configs/dmemd.example.json`。
+
+治理领取任务时让位于正在运行或已到期的摄取任务；摄取退避/等待配置期间不阻塞治理。
+分类和冲突复查优先于 aggregate/Skill 批量生成。同一 scope/topic 只有一个待办目标，新的
+原子版本在同一事务中替代旧待办 revision 并重新 debounce，旧 revision 不再执行或提交。
+已发出的治理模型请求不抢占取消。日志按 `topic_summary`、`profile`、`skill` 独立记录调用数、
+失败数和耗时，沿用共享治理限流预算，不记录原文或模型响应。
 
 有新的相关版本或证据时，治理 Worker 会自动复查未决冲突；只有当前成员集合本身足以证明结果
 时才自动裁决，复杂重叠和未知边界保持隔离。未决冲突成员不会进入摘要、经验案例或 Skill
@@ -106,6 +126,38 @@ HTTP 端口冲突；进程崩溃后锁由操作系统释放，可直接重新启
 保存直接原子/运行依据；依据修改、归档、删除或结果撤销时旧内容同步退出默认召回，随后
 后台重算。历史可通过 `GET /v1/artifacts/{id}` 和 `/history/{version}` 查看。经验结果来自
 应用报告，Skill 只提供可修正的指导文本，不提供真实性、执行成功或安全认证。
+
+### 派生质量与来源审计
+
+内置 `taxonomy-v1` 包含 containers → kubernetes/docker/oom/deployment、work →
+studio/course/training/project、travel → hong-kong/wuhan/guangzhou/itinerary。
+例如 `K8s`、`节点内存耗尽` 会保存为 `topics=[containers,kubernetes,oom]`，原始拼写保留在
+`raw_topics`。父主题摘要直接聚合子主题的原子事实，不再聚合子摘要；未知业务标签保留为扩展叶子。
+
+- Profile 只接收 `durability=durable`、无事件 phase、无结束边界的 fact/preference/procedure，
+  未知持久性、一次性事件、临时进度和单次行程不进入画像。
+- 摘要输入受条数、单条字数和总字数限制，超限持久化 `truncated=true`。不能确定正文逐条覆盖时，
+  正文添加子集覆盖声明，payload 记录 `coverage=full/subset`，不把“生成成功”等同于“完整覆盖”。
+- 经验案例正文始终附带“这是应用报告，不代表独立验证”，结果状态由服务保留，不能被模型升级。
+- Skill 必须有 procedure 输入；没有 procedure 时保存 `disabled/no_procedure_input`，同 scope 下
+  存在 procedure 但 topic 不匹配时保存 `topic_mismatch`。模型未配置、生成失败和无效输出分别记录
+  `model_unavailable`、`model_generation_failed`、`invalid_model_output`，原有任务重试策略继续生效。
+  诊断由 `GET /v1/artifacts/{id}` 的 `artifact.reason_code` 返回，不需要已有可用 revision。
+- 每个 revision 保存精确 memory/version、应用结果引用、生成 `run_id`、taxonomy/generator/protocol
+  version、截断标记及内容 hash；独立的不可变 `provenance` 清单可发现数据库依赖丢失。
+  正文、kind、时间、断言、fact group、主题或生命周期变化立即使依赖及旧/新主题目标 stale，
+  新增事实也会使对应父摘要失效；补证但断言不变时保留已有历史版本引用。
+
+服务停止后可对同一配置的数据库执行只读审计（持有相同单实例锁，不启动 HTTP 或模型）：
+
+```sh
+./bin/dmemd --config ~/.config/dmemd/config.json --artifact-integrity-check
+# {"checked":12,"issues":[]}
+```
+
+检查来源版本与删除引用、序列化清单/依赖表、截断标记、生成元数据、内容 hash 和搜索文档版本；
+发现问题输出 artifact/version/固定错误码并以非零状态退出，不自动修复或回填。
+项目尚未发布，schema 直接更新；本次实现只面向全新数据库，不提供旧库迁移。
 
 `embedding.enabled=true` 时需配置端点、模型版本、维数和超时；`min_similarity` 应按
 模型用相关/不相关样例校准。配置只包含这些必要项，不提供输入前缀、重试或查询预算的
@@ -189,17 +241,17 @@ curl -sS -X POST http://127.0.0.1:18432/v1/memory-conflicts/<conflict-id>/resolv
 # 默认返回最近更新的 50 条 active/archived 记忆，无分页
 curl -sS 'http://127.0.0.1:18432/v1/memories?limit=20'
 
-# 关键词召回；按词典分词，默认 match=any、top_k=20、仅 active
+# 关键词召回；统一 any 语义，默认 top_k=20、仅 active
 curl -sS -X POST http://127.0.0.1:18432/v1/memories/recall \
   -H 'Content-Type: application/json' \
   -d '{"query":"回答 语言","filters":{"kinds":["preference"]},"explain":true}'
 
-# 需要所有原始分词同时命中时显式指定 match=all
+# 自然语言问题与关键词列表使用同一预处理和 any 匹配
 curl -sS -X POST http://127.0.0.1:18432/v1/memories/recall \
   -H 'Content-Type: application/json' \
-  -d '{"query":"回答 语言","match":"all"}'
+  -d '{"query":"女儿什么时候上小学？"}'
 
-# 默认 any 会过滤受控停用词，但不设置最低命中数；
+# 查询会过滤受控停用词，但不设置最低命中数；
 # 结果按 BM25 名次与词项覆盖率做有界重排
 
 # 混合召回；语义不可用时自动降级为关键词并返回 warnings
@@ -290,6 +342,19 @@ curl -sS -X POST http://127.0.0.1:18432/v1/forget \
 响应返回实际移除的排序后 ID 数组。请求在一个事务内完成：任一目标不存在或存储失败时
 全部回滚。派生历史、FTS、依赖和在途任务引用于同一事务内先枚举后清除，迟到结果不能恢复
 已遗忘内容。
+
+遗忘按三层闭包执行：来源关联包含任意历史版本的 evidence 引用；重复事实仅在同非空事实组、
+同 scope、kind 和 phase、正文规范化后一致且有效时间相同或重叠时一并删除（包括已逻辑删除的
+副本）；依赖这些记忆的摘要、画像、经验、Skill 全部历史和冲突一并清除，相关治理任务取消或
+递增 revision 后使用剩余输入重建。正文规范化只处理 NFC、大小写、空白和句尾标点，不用模糊
+编辑距离猜测语义，避免误删否定、数量或不同主体的独立事实。没有事实组不自动扩展；时间完全
+未知与有界区间不视为已证明重叠。
+
+同组相关记忆不满足安全删除条件时保留，并在响应中明确提示，例如：
+
+```json
+{"memory_ids":["memory-1"],"source_ids":[],"experience_ids":[],"warnings":["related_memories_retained"],"retained_related_memory_ids":["memory-2"]}
+```
 
 ### 健康检查
 

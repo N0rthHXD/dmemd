@@ -2,6 +2,11 @@ package integration_test
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +18,7 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/retrieval"
 	"github.com/N0rthHXD/dmemd/internal/store/sqlite"
 	"github.com/N0rthHXD/dmemd/internal/testutil"
+	httptransport "github.com/N0rthHXD/dmemd/internal/transport/http"
 )
 
 type recallFixture struct {
@@ -191,6 +197,54 @@ func TestLayeredRecallDefaultLayersAndSelection(t *testing.T) {
 	}
 	if len(other.Memories) != 0 || len(other.Summaries) != 0 {
 		t.Fatalf("scope isolation failed: %+v", other)
+	}
+}
+
+func TestLayeredRecallUsesFilteredAnyForQuestionsAndKeywords(t *testing.T) {
+	f := newRecallFixture(t)
+	created := f.create(t, memory.CreateInput{
+		Kind: memory.KindFact, Title: "饮食限制", Content: "花生过敏。", ScopeKey: "project:dmemd", Topics: []string{"饮食"},
+	})
+	f.processAll(t, f.worker(t))
+	handler := httptransport.New(httptransport.Options{Services: httptransport.Services{Search: f.search}})
+	for _, mode := range []retrieval.Mode{retrieval.ModeKeyword, retrieval.ModeHybrid} {
+		var baseline map[string]any
+		for _, query := range []string{"过敏", "我对什么过敏？", "我对什么过敏？火星殖民地"} {
+			body := fmt.Sprintf(`{"query":%q,"mode":%q,"scope_key":"project:dmemd"}`, query, mode)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/memories/recall", strings.NewReader(body)))
+			if response.Code != http.StatusOK {
+				t.Fatalf("body=%s response=%d %s", body, response.Code, response.Body.String())
+			}
+			var decoded map[string]any
+			if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+				t.Fatal(err)
+			}
+			memories := decoded["memories"].([]any)
+			summaries := decoded["summaries"].([]any)
+			if len(memories) != 1 || memories[0].(map[string]any)["memory"].(map[string]any)["id"] != created.ID || len(summaries) == 0 {
+				t.Fatalf("partial any match missing for %s: %s", body, response.Body.String())
+			}
+			for _, field := range []string{"match", "requested_match", "effective_match", "match_relaxed"} {
+				if strings.Contains(response.Body.String(), `"`+field+`"`) {
+					t.Fatalf("matching mode field %s leaked: %s", field, response.Body.String())
+				}
+			}
+			warnings := decoded["warnings"].([]any)
+			if mode == retrieval.ModeKeyword && len(warnings) != 0 || mode == retrieval.ModeHybrid && !reflect.DeepEqual(warnings, []any{retrieval.WarningSemanticUnavailable}) {
+				t.Fatalf("unexpected warnings for %s: %v", body, warnings)
+			}
+			// Stopwords and unmatched extra terms must not remove candidates.
+			// Additional effective terms can change the keyword coverage score.
+			for _, item := range memories {
+				delete(item.(map[string]any), "score")
+			}
+			if baseline == nil {
+				baseline = decoded
+			} else if !reflect.DeepEqual(decoded, baseline) {
+				t.Fatalf("recall differs for %s: %s", body, response.Body.String())
+			}
+		}
 	}
 }
 

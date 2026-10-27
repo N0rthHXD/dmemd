@@ -125,10 +125,13 @@ func (h *SkillHandler) Process(ctx context.Context, job task.Job) error {
 	if err != nil {
 		return err
 	}
-	if len(procedures) == 0 && len(runs) == 0 {
-		return h.disable(ctx, job, target)
+	if len(procedures) == 0 {
+		return h.disable(ctx, job, target, "no_procedure_input")
 	}
 	if h.provider == nil {
+		if err := h.recordFailure(ctx, job, target, "model_unavailable"); err != nil {
+			return err
+		}
 		return &ingest.ProviderError{Operation: "configuration", Retryable: true,
 			Err: errors.New("Skill 模型未配置")}
 	}
@@ -147,6 +150,7 @@ func (h *SkillHandler) Process(ctx context.Context, job task.Job) error {
 	if h.timeout > 0 {
 		callCtx, cancel = context.WithTimeout(ctx, h.timeout)
 	}
+	started := time.Now()
 	draft, callErr := h.provider.ComposeSkill(callCtx, skill.Request{
 		ScopeKey:    scopeKey,
 		Topic:       topic,
@@ -155,10 +159,27 @@ func (h *SkillHandler) Process(ctx context.Context, job task.Job) error {
 		Truncated:   truncated,
 	})
 	cancel()
+	h.limiter.Record("skill", len(boundedProcedures)+len(boundedRuns), aggregateContextSize(boundedProcedures), started, callErr)
 	if callErr != nil {
+		reason := "model_generation_failed"
+		var providerErr *ingest.ProviderError
+		if errors.As(callErr, &providerErr) {
+			switch providerErr.Operation {
+			case "configuration":
+				reason = "model_unavailable"
+			case "protocol", "parse":
+				reason = "invalid_model_output"
+			}
+		}
+		if err := h.recordFailure(ctx, job, target, reason); err != nil {
+			return err
+		}
 		return callErr
 	}
 	if !draft.Usable() {
+		if err := h.recordFailure(ctx, job, target, "invalid_model_output"); err != nil {
+			return err
+		}
 		return &ingest.ProviderError{Operation: "protocol", Retryable: false, Err: ingest.ErrProtocol}
 	}
 	name, body, payload := renderSkill(target, draft)
@@ -181,7 +202,7 @@ func (h *SkillHandler) Process(ctx context.Context, job task.Job) error {
 				return ErrRevisionChanged
 			}
 		}
-		currentProcedures, _, err := tx.ListAggregationInputs(ctx, target, now, h.maxInputs)
+		currentProcedures, _, err := tx.ListAggregationInputs(ctx, target, h.now().UTC(), h.maxInputs)
 		if err != nil {
 			return err
 		}
@@ -204,7 +225,8 @@ func (h *SkillHandler) Process(ctx context.Context, job task.Job) error {
 			ReasonCode:      reasonCode,
 			Truncated:       truncated,
 			Generator:       "governance:skill",
-			ProtocolVersion: "skill-v1",
+			ProtocolVersion: "skill-v2",
+			RunID:           job.ID + ":" + fmt.Sprint(job.Revision),
 			Memories:        boundedProcedures,
 			Runs:            runRefs,
 		}); err != nil {
@@ -221,12 +243,31 @@ func (h *SkillHandler) Process(ctx context.Context, job task.Job) error {
 	})
 }
 
-func (h *SkillHandler) disable(ctx context.Context, job task.Job, target artifact.Target) error {
+func (h *SkillHandler) recordFailure(ctx context.Context, job task.Job, target artifact.Target, reason string) error {
 	return h.store.WithTx(ctx, func(ctx context.Context, tx Tx) error {
 		if err := checkedJob(ctx, tx, job); err != nil {
 			return err
 		}
-		if _, err := h.artifacts.Disable(ctx, tx, target); err != nil {
+		_, err := h.artifacts.DisableWithReason(ctx, tx, target, reason)
+		return err
+	})
+}
+
+func (h *SkillHandler) disable(ctx context.Context, job task.Job, target artifact.Target, reason string) error {
+	return h.store.WithTx(ctx, func(ctx context.Context, tx Tx) error {
+		if err := checkedJob(ctx, tx, job); err != nil {
+			return err
+		}
+		if reason == "no_procedure_input" {
+			hasProcedures, err := tx.HasProcedureInputs(ctx, target.ScopeKey, h.now().UTC())
+			if err != nil {
+				return err
+			}
+			if hasProcedures {
+				reason = "topic_mismatch"
+			}
+		}
+		if _, err := h.artifacts.DisableWithReason(ctx, tx, target, reason); err != nil {
 			return err
 		}
 		ok, err := tx.FinishJob(ctx, job.ID, job.Revision, h.now().UTC())

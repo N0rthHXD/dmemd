@@ -43,7 +43,7 @@ func TestLabeledClassification(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(final.Topics, testCase.ExpectedTopics) {
+			if !reflect.DeepEqual(final.Topics, memory.CanonicalTopics(testCase.ExpectedTopics)) {
 				t.Errorf("topics = %v, want %v", final.Topics, testCase.ExpectedTopics)
 			}
 			if final.ScopeKey != testCase.ScopeKey {

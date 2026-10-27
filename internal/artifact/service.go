@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/N0rthHXD/dmemd/internal/governance/task"
 	"github.com/N0rthHXD/dmemd/internal/idgen"
+	"github.com/N0rthHXD/dmemd/internal/topic"
 )
 
 const (
@@ -219,20 +221,47 @@ func (s *Service) Commit(ctx context.Context, tx Tx, input CommitInput) (Artifac
 	}
 	refs := uniqueRefs(input.Memories)
 	runRefs := uniqueRunRefs(input.Runs)
+	if input.TaxonomyVersion == "" {
+		input.TaxonomyVersion = topic.Version
+	}
+	if input.GeneratorVersion == "" {
+		input.GeneratorVersion = "generator-v2"
+	}
+	if input.Generator == "" {
+		input.Generator = "artifact:service"
+	}
+	if input.ProtocolVersion == "" {
+		input.ProtocolVersion = string(input.Kind) + "-v2"
+	}
+	if input.RunID == "" {
+		input.RunID = idgen.NewUUID()
+	}
+	provenance, err := json.Marshal(Provenance{
+		MemoryRefs: refs, RunRefs: runRefs, RunID: input.RunID,
+		TaxonomyVersion: input.TaxonomyVersion, GeneratorVersion: input.GeneratorVersion,
+		ProtocolVersion: input.ProtocolVersion, Truncated: input.Truncated,
+	})
+	if err != nil || !json.Valid(payload) {
+		return Artifact{}, fmt.Errorf("%w: invalid serialized payload", ErrInvalidInput)
+	}
 	revision := Revision{
-		ArtifactID:      item.ID,
-		Version:         next,
-		Title:           title,
-		Content:         content,
-		Payload:         payload,
-		ContentHash:     hashContent(title, content),
-		Generator:       input.Generator,
-		ProtocolVersion: input.ProtocolVersion,
-		ReasonCode:      input.ReasonCode,
-		Truncated:       input.Truncated,
-		MemoryRefs:      refs,
-		RunRefs:         runRefs,
-		CreatedAt:       now,
+		ArtifactID:       item.ID,
+		Version:          next,
+		Title:            title,
+		Content:          content,
+		Payload:          payload,
+		ContentHash:      ContentHash(title, content, payload, provenance),
+		Generator:        input.Generator,
+		ProtocolVersion:  input.ProtocolVersion,
+		TaxonomyVersion:  input.TaxonomyVersion,
+		GeneratorVersion: input.GeneratorVersion,
+		RunID:            input.RunID,
+		Provenance:       provenance,
+		ReasonCode:       input.ReasonCode,
+		Truncated:        input.Truncated,
+		MemoryRefs:       refs,
+		RunRefs:          runRefs,
+		CreatedAt:        now,
 	}
 	if err := tx.InsertArtifactRevision(ctx, revision); err != nil {
 		return Artifact{}, err
@@ -258,6 +287,7 @@ func (s *Service) Commit(ctx context.Context, tx Tx, input CommitInput) (Artifac
 
 	item.CurrentVersion = next
 	item.State = StateActive
+	item.ReasonCode = input.ReasonCode
 	item.UpdatedAt = now
 	if err := tx.UpdateArtifact(ctx, item); err != nil {
 		return Artifact{}, err
@@ -268,18 +298,24 @@ func (s *Service) Commit(ctx context.Context, tx Tx, input CommitInput) (Artifac
 // Disable records that no usable input currently exists. The historical
 // revisions remain readable, but the current object leaves default recall.
 func (s *Service) Disable(ctx context.Context, tx Tx, target Target) (Artifact, error) {
+	return s.DisableWithReason(ctx, tx, target, "no_eligible_input")
+}
+
+// DisableWithReason exposes diagnostic state even before a first revision exists.
+func (s *Service) DisableWithReason(ctx context.Context, tx Tx, target Target, reason string) (Artifact, error) {
 	now := s.now().UTC()
 	item, err := tx.GetArtifactByTarget(ctx, target.Kind, target.TargetKey())
 	switch {
 	case errors.Is(err, ErrNotFound):
 		item = Artifact{
-			ID:        idgen.NewUUID(),
-			Kind:      target.Kind,
-			TargetKey: target.TargetKey(),
-			ScopeKey:  normalizeScope(target.ScopeKey),
-			Topic:     target.Topic,
-			State:     StateDisabled,
-			UpdatedAt: now,
+			ID:         idgen.NewUUID(),
+			Kind:       target.Kind,
+			TargetKey:  target.TargetKey(),
+			ScopeKey:   normalizeScope(target.ScopeKey),
+			Topic:      target.Topic,
+			State:      StateDisabled,
+			ReasonCode: reason,
+			UpdatedAt:  now,
 		}
 		if err := tx.CreateArtifact(ctx, item); err != nil {
 			return Artifact{}, err
@@ -288,8 +324,9 @@ func (s *Service) Disable(ctx context.Context, tx Tx, target Target) (Artifact, 
 	case err != nil:
 		return Artifact{}, err
 	}
-	if item.State != StateDisabled {
+	if item.State != StateDisabled || item.ReasonCode != reason {
 		item.State = StateDisabled
+		item.ReasonCode = reason
 		item.UpdatedAt = now
 		if err := tx.UpdateArtifact(ctx, item); err != nil {
 			return Artifact{}, err
@@ -347,6 +384,28 @@ func (s *Service) MemoryChanged(ctx context.Context, tx Tx, change MemoryChange)
 	}
 	if len(targets) == 0 {
 		return nil
+	}
+	// A new eligible memory may not have been a dependency of an existing
+	// summary (especially a truncated one). Target membership still invalidates
+	// it immediately, including old and new parent topics.
+	for _, target := range targets {
+		item, err := tx.GetArtifactByTarget(ctx, target.Kind, target.TargetKey())
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if item.State == StateStale {
+			continue
+		}
+		item.State, item.UpdatedAt = StateStale, now
+		if err := tx.UpdateArtifact(ctx, item); err != nil {
+			return err
+		}
+		if err := tx.DeleteArtifactSearchDocument(ctx, item.ID); err != nil {
+			return err
+		}
 	}
 
 	deleted := change.New == nil || change.New.State == "deleted"
@@ -469,7 +528,26 @@ func enqueueTargets(ctx context.Context, tx Tx, change MemoryChange, targets map
 // the memory, before the caller deletes the atomic revisions. The whole
 // operation is one transaction; a failure leaves both sides intact.
 func (s *Service) MemoryPurged(ctx context.Context, tx Tx, change MemoryChange) error {
+	affected, err := tx.ListAllArtifactsForMemory(ctx, change.MemoryID)
+	if err != nil {
+		return err
+	}
 	if err := s.MemoryChanged(ctx, tx, change); err != nil {
+		return err
+	}
+	// Historical dependencies may belong to targets no longer represented by
+	// the memory's current topics. Bump those jobs too, rejecting late results
+	// and rebuilding only from the remaining inputs.
+	targets := make(map[string]Target)
+	for _, item := range affected {
+		target, err := TargetForArtifact(item)
+		if err != nil {
+			return err
+		}
+		targets[target.TargetKey()] = target
+	}
+	now := s.now().UTC()
+	if err := enqueueTargets(ctx, tx, change, targets, now, now); err != nil {
 		return err
 	}
 	return tx.DeleteArtifactsForMemory(ctx, change.MemoryID)
@@ -588,11 +666,16 @@ func memoryChangeHash(change MemoryChange, target Target) string {
 	return task.InputHash(parts...)
 }
 
-func hashContent(title, content string) string {
+// ContentHash covers readable and structured content, including source audit.
+func ContentHash(title, content string, payload, provenance json.RawMessage) string {
 	hash := sha256.New()
 	_, _ = hash.Write([]byte(title))
 	_, _ = hash.Write([]byte{0})
 	_, _ = hash.Write([]byte(content))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write(payload)
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write(provenance)
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
@@ -617,19 +700,5 @@ func normalizeScope(value string) string {
 }
 
 func normalizeTopics(values []string) []string {
-	result := make([]string, 0, len(values))
-	seen := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		topic := strings.ToLower(strings.TrimSpace(value))
-		if topic == "" {
-			continue
-		}
-		if _, duplicate := seen[topic]; duplicate {
-			continue
-		}
-		seen[topic] = struct{}{}
-		result = append(result, topic)
-	}
-	sort.Strings(result)
-	return result
+	return topic.Canonical(values)
 }

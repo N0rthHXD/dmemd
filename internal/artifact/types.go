@@ -75,6 +75,7 @@ type Artifact struct {
 	Topic          string    `json:"topic"`
 	CurrentVersion int       `json:"current_version"`
 	State          State     `json:"state"`
+	ReasonCode     string    `json:"reason_code,omitempty"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
@@ -94,19 +95,25 @@ type RunRef struct {
 // cases and skills) keep their fields in Payload; all kinds also expose
 // Title/Content as the readable text used by recall and rendering.
 type Revision struct {
-	ArtifactID      string          `json:"artifact_id"`
-	Version         int             `json:"version"`
-	Title           string          `json:"title"`
-	Content         string          `json:"content"`
-	Payload         json.RawMessage `json:"payload,omitempty"`
-	ContentHash     string          `json:"content_hash"`
-	Generator       string          `json:"generator"`
-	ProtocolVersion string          `json:"protocol_version"`
-	ReasonCode      string          `json:"reason_code,omitempty"`
-	Truncated       bool            `json:"truncated"`
-	MemoryRefs      []MemoryRef     `json:"memory_refs"`
-	RunRefs         []RunRef        `json:"run_refs"`
-	CreatedAt       time.Time       `json:"created_at"`
+	ArtifactID       string          `json:"artifact_id"`
+	Version          int             `json:"version"`
+	Title            string          `json:"title"`
+	Content          string          `json:"content"`
+	Payload          json.RawMessage `json:"payload,omitempty"`
+	ContentHash      string          `json:"content_hash"`
+	Generator        string          `json:"generator"`
+	ProtocolVersion  string          `json:"protocol_version"`
+	TaxonomyVersion  string          `json:"taxonomy_version"`
+	GeneratorVersion string          `json:"generator_version"`
+	RunID            string          `json:"run_id"`
+	// Provenance is an immutable serialized copy, independent of dependency
+	// tables so integrity checking can detect missing/cascaded edges.
+	Provenance json.RawMessage `json:"provenance"`
+	ReasonCode string          `json:"reason_code,omitempty"`
+	Truncated  bool            `json:"truncated"`
+	MemoryRefs []MemoryRef     `json:"memory_refs"`
+	RunRefs    []RunRef        `json:"run_refs"`
+	CreatedAt  time.Time       `json:"created_at"`
 }
 
 // Detail is one artifact plus its selected revision. Revision is nil when the
@@ -216,7 +223,7 @@ func SkillTargets(scopeKey string, topics []string) []Target {
 }
 
 // AggregateTargets returns the summary targets for one atomic memory's scope
-// and flat topics plus the scope profile. Empty scopes produce no targets.
+// and canonical topics (including parents) plus the scope profile.
 func AggregateTargets(scopeKey string, topics []string) []Target {
 	scopeKey = normalizeScope(scopeKey)
 	if scopeKey == "" {
@@ -261,6 +268,8 @@ type MemoryInput struct {
 	ID         string    `json:"id"`
 	Version    int       `json:"version"`
 	Kind       string    `json:"kind"`
+	Phase      string    `json:"phase"`
+	Durability string    `json:"durability"`
 	Title      string    `json:"title"`
 	Content    string    `json:"content"`
 	ScopeKey   string    `json:"scope_key,omitempty"`
@@ -336,20 +345,23 @@ type GroupTarget struct {
 
 // CommitInput is one successful, usable generated version.
 type CommitInput struct {
-	Kind            Kind
-	TargetKey       string
-	ScopeKey        string
-	Topic           string
-	ExperienceID    string
-	Title           string
-	Content         string
-	Payload         json.RawMessage
-	ReasonCode      string
-	Truncated       bool
-	Generator       string
-	ProtocolVersion string
-	Memories        []MemoryInput
-	Runs            []RunRef
+	Kind             Kind
+	TargetKey        string
+	ScopeKey         string
+	Topic            string
+	ExperienceID     string
+	Title            string
+	Content          string
+	Payload          json.RawMessage
+	ReasonCode       string
+	Truncated        bool
+	Generator        string
+	ProtocolVersion  string
+	TaxonomyVersion  string
+	GeneratorVersion string
+	RunID            string
+	Memories         []MemoryInput
+	Runs             []RunRef
 }
 
 // ExperienceInput is one bounded application result supplied as evidence for an
@@ -452,10 +464,12 @@ type Tx interface {
 	DeleteArtifactSearchDocument(ctx context.Context, artifactID string) error
 
 	ListArtifactsForMemory(ctx context.Context, memoryID string) ([]Artifact, error)
+	ListAllArtifactsForMemory(ctx context.Context, memoryID string) ([]Artifact, error)
 	ListArtifactsForRun(ctx context.Context, experienceID string) ([]Artifact, error)
 	ListAllArtifactsForRun(ctx context.Context, experienceID string) ([]Artifact, error)
 	ListArtifactsByScope(ctx context.Context, kind Kind, scopeKey string) ([]Artifact, error)
 	DeleteArtifactsForMemory(ctx context.Context, memoryID string) error
 	DeleteArtifactsForRun(ctx context.Context, experienceID string) error
 	ListAggregationInputs(ctx context.Context, target Target, asOf time.Time, limit int) ([]MemoryInput, bool, error)
+	HasProcedureInputs(ctx context.Context, scopeKey string, asOf time.Time) (bool, error)
 }

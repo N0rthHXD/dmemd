@@ -136,7 +136,9 @@ func TestWorkerParksPermanentProviderErrorUntilRestart(t *testing.T) {
 func TestWorkerUnparseableResponseUsesRetryBudget(t *testing.T) {
 	f := newProcessorFixture(t)
 	worker := newProcessorWorker(f)
-	for i := 0; i < 3; i++ {
+	// Each attempt permits one structured extraction retry before the worker
+	// counts a protocol failure.
+	for i := 0; i < 6; i++ {
 		f.fake.EnqueueMalformed()
 	}
 	receipt := f.submit(t, `"不可解析响应"`)
@@ -144,7 +146,7 @@ func TestWorkerUnparseableResponseUsesRetryBudget(t *testing.T) {
 	for {
 		job := f.job(t, receipt.JobID)
 		if job.Status == ingest.JobFailed {
-			if job.Attempts != 3 || f.fake.RequestCount() != 3 {
+			if job.Attempts != 3 || f.fake.RequestCount() != 6 {
 				t.Fatalf("job=%+v requests=%d", job, f.fake.RequestCount())
 			}
 			if strings.Contains(job.Error, "I could not") {

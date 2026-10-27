@@ -11,7 +11,7 @@ import (
 )
 
 // TopicSuggester is the optional classification model operation. It receives
-// only the selected snapshot and returns flat topic labels.
+// only the selected snapshot and returns raw topic labels.
 type TopicSuggester func(ctx context.Context, title, content, scopeKey string) ([]string, error)
 
 // ClassificationWriter applies classification-only revisions without
@@ -22,7 +22,7 @@ type ClassificationWriter interface {
 }
 
 // ClassifyHandler normalizes existing extraction labels and, when they are
-// missing, asks the classification model for a bounded flat topic set.
+// missing, asks the classification model for labels; the writer applies taxonomy.
 type ClassifyHandler struct {
 	reader   MemoryReader
 	store    Store
@@ -95,7 +95,10 @@ func (h *ClassifyHandler) Process(ctx context.Context, job task.Job) error {
 		return CancelMissingTask(ctx, h.store, job, h.now().UTC())
 	}
 
-	topics := memory.NormalizeTopics(current.Topics)
+	topics := current.RawTopics
+	if topics == nil {
+		topics = current.Topics
+	}
 	if len(topics) == 0 && h.suggest != nil {
 		allowed, next := h.limiter.Acquire(h.now().UTC())
 		if !allowed {
@@ -106,12 +109,14 @@ func (h *ClassifyHandler) Process(ctx context.Context, job task.Job) error {
 		if h.timeout > 0 {
 			callCtx, cancel = context.WithTimeout(ctx, h.timeout)
 		}
+		started := time.Now()
 		suggested, suggestErr := h.suggest(callCtx, current.Title, truncateRunes(current.Content, h.maxRunes), current.ScopeKey)
 		cancel()
+		h.limiter.Record("classify", 1, len(current.Title)+len(current.Content), started, suggestErr)
 		if suggestErr != nil {
 			return suggestErr
 		}
-		topics = memory.NormalizeTopics(suggested)
+		topics = suggested
 	}
 
 	now := h.now().UTC()
@@ -127,6 +132,9 @@ func (h *ClassifyHandler) Process(ctx context.Context, job task.Job) error {
 			return err
 		}
 		if latest.State == memory.StateDeleted {
+			return ErrRevisionChanged
+		}
+		if latest.Version != current.Version {
 			return ErrRevisionChanged
 		}
 		if _, err := h.writer.Classify(ctx, tx, memory.ClassificationInput{

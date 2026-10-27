@@ -1,6 +1,7 @@
 package governance
 
 import (
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -15,6 +16,58 @@ type Limiter struct {
 	windowStart  time.Time
 	count        int
 	lastCall     time.Time
+	stats        map[string]CallStats
+	logger       *slog.Logger
+}
+
+// CallStats separates actual model calls by operation, not task kind (profiles
+// and summaries share the aggregate task kind). It resets on process restart.
+type CallStats struct {
+	Calls    int64
+	Failures int64
+	Duration time.Duration
+}
+
+// WithLogger enables content-free per-operation call diagnostics.
+func (l *Limiter) WithLogger(logger *slog.Logger) *Limiter { l.logger = logger; return l }
+
+// Stats returns a copy of the per-operation counters.
+func (l *Limiter) Stats() map[string]CallStats {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	result := make(map[string]CallStats, len(l.stats))
+	for stage, stats := range l.stats {
+		result[stage] = stats
+	}
+	return result
+}
+
+// Record records a completed call, independently from the shared rate budget.
+func (l *Limiter) Record(stage string, batchSize, contextSize int, started time.Time, err error) {
+	if l == nil {
+		return
+	}
+	duration := time.Since(started)
+	l.mu.Lock()
+	if l.stats == nil {
+		l.stats = make(map[string]CallStats)
+	}
+	stats := l.stats[stage]
+	stats.Calls++
+	stats.Duration += duration
+	if err != nil {
+		stats.Failures++
+	}
+	l.stats[stage] = stats
+	l.mu.Unlock()
+	if l.logger != nil {
+		code := ""
+		if err != nil {
+			code = failureKind(err)
+		}
+		l.logger.Info("governance model call", "stage", stage, "batch_size", batchSize, "context_size", contextSize,
+			"duration_ms", duration.Milliseconds(), "error_type", code, "calls", stats.Calls, "failures", stats.Failures)
+	}
 }
 
 // NewLimiter creates a soft limiter. A non-positive maxPerWindow disables the

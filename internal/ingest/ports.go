@@ -38,10 +38,22 @@ type ExtractionProvider interface {
 	Extract(ctx context.Context, request ExtractionRequest) (ExtractionResult, error)
 }
 
+// ExtractionRepairProvider is optional. A processor spends at most one repair
+// call per extraction attempt, then isolates invalid candidates while retaining
+// valid ones. A structural retry shares that same budget.
+type ExtractionRepairProvider interface {
+	RepairExtraction(ctx context.Context, request ExtractionRepairRequest) (ExtractionResult, error)
+}
+
 // DecisionProvider judges the relationship between candidates and bounded
 // existing-fact context. The same remote adapter may implement both providers.
 type DecisionProvider interface {
 	Decide(ctx context.Context, request DecisionRequest) (DecisionResult, error)
+}
+
+// DecisionRepairProvider repairs only the invalid subset of a decision batch.
+type DecisionRepairProvider interface {
+	RepairDecision(ctx context.Context, request DecisionRepairRequest) (DecisionResult, error)
 }
 
 // ProviderError describes a provider failure without retaining raw model

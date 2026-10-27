@@ -214,11 +214,12 @@ func (f *aggregateFixture) artifactByTarget(t *testing.T, kind artifact.Kind, ta
 func TestAggregateCreatesActiveTopicSummaryAndProfile(t *testing.T) {
 	f := newAggregateFixture(t)
 	created := f.create(t, memory.CreateInput{
-		Kind:     memory.KindFact,
-		Title:    "项目数据库",
-		Content:  "项目使用 SQLite 保存记忆。",
-		ScopeKey: "project:dmemd",
-		Topics:   []string{"go", "sqlite"},
+		Kind:       memory.KindFact,
+		Title:      "项目数据库",
+		Content:    "项目使用 SQLite 保存记忆。",
+		ScopeKey:   "project:dmemd",
+		Topics:     []string{"go", "sqlite"},
+		Durability: memory.DurabilityDurable,
 	})
 	var calls atomic.Int32
 	worker := f.aggregateWorker(t, aggregateFunc(func(_ context.Context, request artifact.AggregateRequest) (artifact.AggregateResult, error) {
@@ -241,7 +242,7 @@ func TestAggregateCreatesActiveTopicSummaryAndProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if detail.Revision == nil || detail.Revision.Content != "项目使用 SQLite。" {
+	if detail.Revision == nil || !strings.Contains(detail.Revision.Content, "项目使用 SQLite。") || !strings.Contains(detail.Revision.Content, "覆盖说明") {
 		t.Fatalf("summary detail = %+v", detail)
 	}
 	if len(detail.Revision.MemoryRefs) != 1 || detail.Revision.MemoryRefs[0].MemoryID != created.ID ||

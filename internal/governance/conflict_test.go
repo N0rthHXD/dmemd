@@ -143,6 +143,32 @@ func TestConflictReviewClosesStaleConflictWithoutModel(t *testing.T) {
 	}
 }
 
+func TestConflictReviewKeepsUnknownCardinalityOpen(t *testing.T) {
+	f := newGovernanceFixture(t)
+	group := f.newGroup(t)
+	first := f.create(t, memory.CreateInput{Kind: memory.KindFact, Content: "项目使用 SQLite。", ScopeKey: "project:dmemd", FactGroupID: group.ID})
+	second := f.create(t, memory.CreateInput{Kind: memory.KindFact, Content: "项目使用 PostgreSQL。", ScopeKey: "project:dmemd", FactGroupID: group.ID})
+	f.cancelClassify(t, first.ID, second.ID)
+	conflict := f.openConflict(t, group, first, second)
+	if _, err := f.memories.UpdateState(context.Background(), second.ID, memory.StateArchived); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.WithTx(context.Background(), func(ctx context.Context, tx *sqlite.Tx) error {
+		group.Cardinality = memory.CardinalityUnknown
+		group.Generation++
+		return tx.UpdateFactGroup(ctx, group)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := newReviewWorker(f).ProcessOne(context.Background()); err != nil || !processed {
+		t.Fatalf("processed=%v err=%v", processed, err)
+	}
+	current, err := f.memories.GetConflict(context.Background(), conflict.ID)
+	if err != nil || current.Status != memory.ConflictOpen {
+		t.Fatalf("ambiguous conflict=%+v err=%v", current, err)
+	}
+}
+
 func TestOpenConflictKeepsDependentSkillOutOfRecall(t *testing.T) {
 	f := newGovernanceFixture(t)
 	group := f.newGroup(t)

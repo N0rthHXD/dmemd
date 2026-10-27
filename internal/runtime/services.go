@@ -131,26 +131,32 @@ func NewSkillService(artifacts *artifact.Service) *skill.Service {
 
 // NewModelProvider maps the local model configuration to the first remote
 // protocol adapter. It performs no network request.
-func NewModelProvider(cfg ModelConfig) (*model.Provider, error) {
-	return model.NewProvider(model.Config{
+func NewModelProvider(cfg ModelConfig, workers ...WorkerConfig) (*model.Provider, error) {
+	remote := model.Config{
 		Name:    cfg.Name,
 		BaseURL: cfg.BaseURL,
 		APIKey:  cfg.APIKey,
 		Timeout: cfg.Timeout.Std(),
-	})
+	}
+	if len(workers) > 0 {
+		remote.ExtractionTimeout = workers[0].ExtractionTimeout.Std()
+		remote.DecisionTimeout = workers[0].DecisionTimeout.Std()
+	}
+	return model.NewProvider(remote)
 }
 
 // NewIngestProcessor wires source loading, related active-memory selection,
 // remote extraction and the unified memory write unit.
-func NewIngestProcessor(store *sqlite.Store, memories *memory.Service, related retrieval.RelatedService, provider ingest.ExtractionProvider, modelName string, logger *slog.Logger) *ingest.Processor {
+func NewIngestProcessor(store *sqlite.Store, memories *memory.Service, related retrieval.RelatedService, provider ingest.ExtractionProvider, modelName string, logger *slog.Logger, options ...ingest.ProcessorOption) *ingest.Processor {
 	return ingest.NewProcessor(
 		sqlite.IngestStore{Store: store},
 		store,
 		related,
 		memories,
 		provider,
-		ingest.WithModelName(modelName),
-		ingest.WithProcessorLogger(logger),
+		append(options, ingest.WithModelName(modelName),
+			ingest.WithProcessorLogger(logger),
+		)...,
 	)
 }
 
@@ -161,8 +167,8 @@ func NewIngestWorker(store *sqlite.Store, processor *ingest.Processor, cfg Worke
 	if cfg.Workers != DefaultWorkerCount {
 		return nil, errors.New("首版只允许一个 Worker")
 	}
-	if cfg.MaxAttempts != DefaultMaxAttempts {
-		return nil, errors.New("首版连续协议失败上限为三次")
+	if cfg.MaxAttempts <= 0 {
+		return nil, errors.New("连续协议失败上限必须大于 0")
 	}
 	retryDelays := make([]time.Duration, 0, len(cfg.RetryDelays))
 	for _, delay := range cfg.RetryDelays {
@@ -214,7 +220,7 @@ func NewGovernanceWorker(store *sqlite.Store, memories *memory.Service, artifact
 			}
 		}
 	}
-	limiter := governance.NewLimiter(defaultGovernanceMaxCallsPerHour, cfg.MinCallInterval.Std())
+	limiter := governance.NewLimiter(defaultGovernanceMaxCallsPerHour, cfg.MinCallInterval.Std()).WithLogger(logger)
 	classify := governance.NewClassifyHandler(
 		store,
 		sqlite.GovernanceStore{Store: store},
@@ -318,14 +324,15 @@ func NewStack(cfg Config, logger *slog.Logger, store *sqlite.Store) (*Stack, err
 		logger.Warn("model provider not configured; submissions will be queued but extraction will fail")
 		provider = unavailableProvider{}
 	} else {
-		remote, err := NewModelProvider(cfg.Model)
+		remote, err := NewModelProvider(cfg.Model, cfg.Worker)
 		if err != nil {
 			return nil, err
 		}
 		provider = remote
 	}
 
-	processor := NewIngestProcessor(store, memories, search, provider, cfg.Model.Name, logger)
+	processor := NewIngestProcessor(store, memories, search, provider, cfg.Model.Name, logger,
+		ingest.WithProcessingBudget(cfg.Worker.ProcessBudget.Std(), cfg.Worker.ExtractionTimeout.Std(), cfg.Worker.DecisionTimeout.Std()))
 	worker, err := NewIngestWorker(store, processor, cfg.Worker, logger)
 	if err != nil {
 		return nil, err

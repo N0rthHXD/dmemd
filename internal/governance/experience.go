@@ -21,15 +21,16 @@ import (
 type ExperienceOutcome string
 
 const (
-	OutcomeSuccess ExperienceOutcome = "success"
-	OutcomeFailure ExperienceOutcome = "failure"
-	OutcomeUnknown ExperienceOutcome = "unknown"
+	OutcomeSuccess        ExperienceOutcome = "success"
+	OutcomeFailure        ExperienceOutcome = "failure"
+	OutcomeUnknown        ExperienceOutcome = "unknown"
+	OutcomePartialSuccess ExperienceOutcome = "partial_success"
 )
 
 // Known reports whether outcome is part of the first-release vocabulary.
 func (o ExperienceOutcome) Known() bool {
 	switch o {
-	case OutcomeSuccess, OutcomeFailure, OutcomeUnknown:
+	case OutcomeSuccess, OutcomeFailure, OutcomeUnknown, OutcomePartialSuccess:
 		return true
 	default:
 		return false

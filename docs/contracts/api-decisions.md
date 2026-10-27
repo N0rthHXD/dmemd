@@ -126,15 +126,29 @@
 ```
 
 - 来源会先展开为所有关联原子记忆和应用结果，再整体清除；结果会同时清除其专属报告来源。
+- 来源关联包括当前/历史 `origin_source_id` 和任意版本 evidence 的 `source_id`，即便当前 origin
+  指向其他来源也必须清除整条记忆。
+- 再计算重复事实闭包：同非空 fact group（主体、谓词明确）、同 scope、kind、phase、正文
+  NFC/大小写/空白/句尾标点规范化后一致，且有效时间相同或重叠。包括 archived/deleted 副本，
+  不受普通列表上限影响。完全未知区间仅与同样完全未知的区间视为相同；相邻半开区间不重叠。
+  不用编辑距离扩大删除范围，不跨主体/事实组猜测语义重复。
 - 删除顺序固定为枚举依赖、清除派生对象全部版本/索引/依赖、清除原子/结果/来源叶子和引用
   任务；不先依赖外键级联再寻找受影响对象。
 - 整个请求在一个事务内完成。任一 ID 不存在、外键冲突或存储失败都会回滚全部目标；不会
   部分清除后返回成功。
 - 记忆历史、证据、派生历史、Skill 渲染和 FTS 在提交后均不可读；共享的其他来源不受影响。
+- 依赖目标的整个 open/resolved 冲突及审计事件删除，review 任务取消；派生对象即便仅历史
+  版本依赖目标也整体删除，其目标任务递增 revision 后从剩余输入重建，拒绝在途旧结果。
 - 响应返回实际移除的排序后 ID 数组：
 
 ```json
 {"memory_ids":["memory-uuid"],"source_ids":["source-uuid"],"experience_ids":["experience-uuid"]}
+```
+
+同组相关但未安全删除的记忆，以排序去重 ID 返回；没有保留项时省略以下两个字段：
+
+```json
+{"memory_ids":["memory-1"],"source_ids":[],"experience_ids":[],"warnings":["related_memories_retained"],"retained_related_memory_ids":["memory-2"]}
 ```
 
 `DELETE /v1/sources/{id}` 仍是逻辑清除原文；`POST /v1/forget` 才是永久删除来源、关联记忆和
@@ -201,11 +215,10 @@
 
 | 字段 | 默认/边界 |
 | --- | --- |
-| `query` | 缺失或空白返回 `200` 与空分区；按普通关键词处理，不暴露 FTS 语法；语义路只做 NFC/首尾空白清理 |
+| `query` | 关键词列表和自然语言问题统一分词、去重、过滤受控停用词并保留否定词；命中任一有效词即可召回，不暴露 FTS 语法；空白、纯标点或无有效词返回 `200` 与空分区且不执行检索；语义路保留原始问题，只做 NFC/首尾空白清理 |
 | `scope_key` | 可选平面作用域；提供时原子与派生结果只接受该作用域或 `user` 级信息；缺失表示不做作用域过滤；未知作用域不会提升为全局结论 |
 | `layers` | 缺失选择全部层；显式列表只检索对应分区；值只能是 `atomic/summary/experience/skill`，其他值返回 `400` |
 | `mode` | 缺失或空为 `keyword`；支持 `keyword`、`hybrid`，其他值返回 `400`；只影响原子层，派生层固定使用派生 FTS |
-| `match` | 缺失、空值或未知值按 `any`；支持 `all`、`any`；keyword 模式的 `any` 先按受控停用词表选择有效词项再按覆盖率重排，`all` 保持严格 `AND` |
 | `filters.kinds/states` | 只过滤 `atomic` 分区；不会隐式排除摘要、经验或 Skill；`states` 缺失默认 `active`，`deleted` 永不返回 |
 | `filters.as_of` | 显式历史时点只支持原子层。所选 layers 含派生层时这些分区返回空数组并附 `derived_as_of_unsupported`；只选 `atomic` 不产生该提示 |
 | `filters.created_by_app/updated_after/before` | 只过滤原子层；时间边界无法解析时忽略 |
@@ -213,7 +226,8 @@
 | `max_context_tokens` | 可选保守预算，按 rune 数估算而非模型精确 tokenizer；超过预算时截断后续条目并返回 `context_budget_truncated` |
 | `explain` | 默认 `false`；只影响原子条目的 `explanation` |
 
-原子层沿用加权 BM25（标题 4、正文 1）、覆盖率重排和 RRF 混合语义；`score` 只在当前查询
+原子层、派生层、相关事实选择、冲突发现及 hybrid 的关键词分支统一使用过滤后的词项和 any
+语义，不提供匹配方式字段。原子层沿用加权 BM25（标题 4、正文 1）、覆盖率重排和 RRF 混合语义；`score` 只在当前查询
 内比较。派生层按 `(kind,target_key)` 的当前版本检索，只有 `state=active` 的当前版本进入
 默认召回；`stale/disabled` 历史可通过 `GET /v1/artifacts/{id}` 或历史接口读取，但不会出现
 在默认召回。摘要、经验与 Skill 使用同一分词规则建立独立 FTS 索引，不与原子分数相加。
@@ -333,7 +347,10 @@
 
 `status` 为 `queued`、`running`、`waiting`、`succeeded`、`failed`、`cancelled`。`waiting`
 表示任务已持久化但暂不执行：`wait_reason=transient` 会在 5 秒、30 秒、2 分钟后继续，之后
-最长每 30 分钟重试；`configuration` 等待重启后重评；`protocol` 连续三次后进入 `failed`。
+最长每 30 分钟重试；`configuration` 等待重启后重评；`protocol` 在局部修复后连续失败达到
+`worker.max_attempts`（默认 3）后进入 `failed`。`stage` 返回 source/extraction/context/decision/
+decision_repair/commit 等阶段，`reason_code` 返回稳定原因（如 `model_timeout`、
+`process_budget_exceeded`、`decision_repair_failed`），不依赖展示用 `error` 文本。
 `succeeded` 表示处理完成，不保证全部断言被采纳。`memory_ids` 是本次创建或修订的全部记忆；
 `conflict_ids` 与 `pending_memory_ids` 分别列出未决冲突和待裁决断言；`warnings` 为固定代码
 数组。失败原因不包含完整模型响应或原始输入。任务不存在返回 `404`。无结果时数组字段为 `[]`。
@@ -358,7 +375,7 @@
 - `PATCH .../state` 仅状态；`DELETE /v1/memories/{id}` 是逻辑删除，`POST .../purge` 是单个记忆
   永久清除，`POST /v1/forget` 是显式范围的原子、来源和结果联合遗忘；内容新增或更正只走
   `POST /v1/ingestions`。
-- `/v1/memory-conflicts` 是只读列表/详情与显式裁决能力；普通召回不返回 pending 正文。
+- `/v1/memory-conflicts` 是只读列表/详情与显式裁决能力；普通召回按 accepted 优先、pending 随后展示。
 - 不存在 `POST /v1/sources`、模型提取提交端点、直接记忆写入端点或分页端点。
 - 所有本地应用按相同规则访问全部记忆；`app_id` 不产生隔离或授权。
 
@@ -370,7 +387,7 @@
 
 | 字段 | 含义 |
 | --- | --- |
-| `assertion_status` | `accepted` / `pending` / `rejected`；普通召回只返回 accepted |
+| `assertion_status` | `accepted` / `pending` / `rejected`；普通召回先 accepted 再 pending，永不返回 rejected |
 | `valid_from` / `valid_to` | 左闭右开事实有效区间；`null` 表示未知，不表示无限 |
 | `valid_from_basis` / `valid_to_basis` | `explicit` / `inferred` / `unknown`；空边界必须为 unknown |
 | `fact_group_id` | 同主体、属性、场景的事实组；可为空 |
@@ -382,7 +399,7 @@
 
 ### 9.2 召回与冲突提示
 
-- 缺失 `as_of` 时请求开始固定一次 now；`as_of` 只选择区间匹配的 accepted 记忆。
+- 缺失 `as_of` 时请求开始固定一次 now；`as_of` 选择区间匹配的 accepted 和 pending 记忆。
 - 归档不等于过期：过期记录可以保持 active，仍可按历史时点召回。
 - 每个原子条目返回 `temporal_status` 与 `conflict_refs`；响应顶层返回相关 `conflicts` 摘要。
 - 与查询时点相关的未决冲突返回 `warnings: ["fact_conflict"]`；摘要超过 20 项时追加
@@ -390,6 +407,9 @@
 - 冲突发现是独立路径：即使原子 `memories` 分区为空，只要 accepted 或 pending 成员命中查询且
   存在相关 open 冲突，仍返回 `conflicts` 与警告。
 - 已知只涉及其他历史时期的冲突不告警；时间未知的潜在冲突保守告警。
+- pending 正文保留 `assertion_status=pending`，不得作为已确认事实；即使没有可关联的 open
+  冲突，返回 pending 时也提示 `fact_conflict`。同状态内保持原有 BM25/覆盖率或 RRF 排序，
+  accepted 优先于 pending，Top-K 和上下文预算限制不变。
 
 ### 9.3 冲突管理
 
@@ -432,6 +452,12 @@
 `409`。
 
 ### 9.4 有限自动复查
+
+入库前先执行确定性自动收敛：主体、谓词、fact group、scope 和单值属性必须一致；当前来源
+的可定位 quote 必须明确表达更正、改期或替换，不使用模型 reason_code 或单纯接收顺序作为证据。
+新事实时间必须可确认晚于旧事实；完整已知且重叠的不同区间、条件性更新、未知单值属性不自动裁决。
+满足条件时创建 active+accepted 后继，旧事实 rejected 或设置 valid_to，记录 supersedes、完整
+冲突成员和 resolved 事件；检测版本不被后续版本覆盖，current_version 始终反映当前快照。
 
 冲突创建、成员扩展或任一相关成员产生新版本（包括仅补证和生命周期变化）时，同一事务会
 更新 `(review_conflict, conflict:<id>)` 治理目标。Worker 只使用当前冲突成员及有限原子快照，

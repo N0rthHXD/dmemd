@@ -21,6 +21,9 @@ func TestDefaultConfigMeetsArchitectureDefaults(t *testing.T) {
 	if cfg.Worker.Workers != 1 || cfg.Worker.MaxAttempts != 3 {
 		t.Fatalf("worker defaults = %+v", cfg.Worker)
 	}
+	if cfg.Worker.ProcessBudget.Std() != 600*time.Second || cfg.Worker.ExtractionTimeout.Std() != 180*time.Second || cfg.Worker.DecisionTimeout.Std() != 300*time.Second {
+		t.Fatalf("worker budgets = %+v", cfg.Worker)
+	}
 	if len(cfg.Worker.RetryDelays) != 3 ||
 		cfg.Worker.RetryDelays[0].Std() != 5*time.Second ||
 		cfg.Worker.RetryDelays[1].Std() != 30*time.Second ||
@@ -74,6 +77,19 @@ func TestEmbeddingConfigValidation(t *testing.T) {
 		if err := mutated.Validate(); err == nil {
 			t.Fatalf("%s accepted", name)
 		}
+	}
+}
+
+func TestLoadWorkerBudgetsAndConfigurableAttempts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeConfigFile(t, path, `{"worker":{"process_budget":"900s","extraction_timeout":"200s","decision_timeout":"400s","max_attempts":5}}`)
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := loaded.Config.Worker
+	if w.ProcessBudget.Std() != 900*time.Second || w.ExtractionTimeout.Std() != 200*time.Second || w.DecisionTimeout.Std() != 400*time.Second || w.MaxAttempts != 5 {
+		t.Fatalf("worker=%+v", w)
 	}
 }
 
@@ -168,14 +184,17 @@ func TestConfigValidateRejectsArchitectureViolations(t *testing.T) {
 	base.Database.Path = filepath.Join(base.DataDir, "dmemd.db")
 
 	cases := map[string]func(*Config){
-		"non-loopback listen": func(cfg *Config) { cfg.Listen = "0.0.0.0:18432" },
-		"multiple workers":    func(cfg *Config) { cfg.Worker.Workers = 2 },
-		"wrong max attempts":  func(cfg *Config) { cfg.Worker.MaxAttempts = 4 },
-		"zero model timeout":  func(cfg *Config) { cfg.Model.Timeout = 0 },
-		"bad model URL":       func(cfg *Config) { cfg.Model.BaseURL = "not-a-url" },
-		"bad log level":       func(cfg *Config) { cfg.Log.Level = "verbose" },
-		"no data directory":   func(cfg *Config) { cfg.DataDir = ""; cfg.Database.Path = "x" },
-		"zero max inputs":     func(cfg *Config) { cfg.Governance.MaxInputs = 0 },
+		"non-loopback listen":         func(cfg *Config) { cfg.Listen = "0.0.0.0:18432" },
+		"multiple workers":            func(cfg *Config) { cfg.Worker.Workers = 2 },
+		"zero max attempts":           func(cfg *Config) { cfg.Worker.MaxAttempts = 0 },
+		"zero process budget":         func(cfg *Config) { cfg.Worker.ProcessBudget = 0 },
+		"negative extraction timeout": func(cfg *Config) { cfg.Worker.ExtractionTimeout = -1 },
+		"zero decision timeout":       func(cfg *Config) { cfg.Worker.DecisionTimeout = 0 },
+		"zero model timeout":          func(cfg *Config) { cfg.Model.Timeout = 0 },
+		"bad model URL":               func(cfg *Config) { cfg.Model.BaseURL = "not-a-url" },
+		"bad log level":               func(cfg *Config) { cfg.Log.Level = "verbose" },
+		"no data directory":           func(cfg *Config) { cfg.DataDir = ""; cfg.Database.Path = "x" },
+		"zero max inputs":             func(cfg *Config) { cfg.Governance.MaxInputs = 0 },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

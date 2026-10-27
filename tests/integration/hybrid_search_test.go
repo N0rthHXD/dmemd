@@ -147,7 +147,7 @@ func TestHybridRRFFusionAndExplanations(t *testing.T) {
 	})
 
 	result, err := f.search.Search(context.Background(), retrieval.Request{
-		Query: "回答", Mode: retrieval.ModeHybrid, TopK: 10, Explain: true,
+		Query: "我对什么回答？不存在的词", Mode: retrieval.ModeHybrid, TopK: 10, Explain: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -351,7 +351,7 @@ func TestHybridValidationBlankAndCancellation(t *testing.T) {
 	if _, err := f.search.Search(context.Background(), retrieval.Request{Query: "回答", TopK: retrieval.MaxTopK + 1}); !errors.Is(err, retrieval.ErrInvalidRequest) {
 		t.Fatalf("top_k error = %v", err)
 	}
-	for _, query := range []string{"", " ，。！？ "} {
+	for _, query := range []string{"", " ，。！？ ", "我 对 什么", "what is the"} {
 		result, err := f.search.Search(context.Background(), retrieval.Request{Query: query, Mode: retrieval.ModeHybrid})
 		if err != nil {
 			t.Fatal(err)

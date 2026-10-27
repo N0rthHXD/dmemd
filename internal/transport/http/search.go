@@ -49,7 +49,6 @@ func (h *handler) recallMemories(w http.ResponseWriter, request *http.Request) {
 		Layers:           layers,
 		LayersSpecified:  layersSpecified,
 		Mode:             mode,
-		Match:            retrieval.Match(rawString(object, "match")),
 		TopK:             topK,
 		Explain:          rawBool(object, "explain"),
 		MaxContextTokens: maxContextTokens,

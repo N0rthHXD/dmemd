@@ -193,10 +193,23 @@ func (t *Tx) CancelJob(ctx context.Context, kind task.Kind, targetKey string, no
 }
 
 func (t *Tx) ClaimNextGovernanceJob(ctx context.Context, now time.Time) (task.Job, bool, error) {
+	// Check in the same write transaction as the claim. Configuration-blocked
+	// and future-backoff ingestion must not starve governance. Already executing
+	// governance calls are not interrupted, but no new task starts ahead of ingest.
+	var busy bool
+	if err := t.tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM ingest_jobs
+		WHERE status = 'running' OR
+		((status = 'queued' OR (status = 'waiting' AND wait_reason <> 'configuration'))
+		AND (next_attempt_at IS NULL OR next_attempt_at <= ?)))`, formatTime(now)).Scan(&busy); err != nil {
+		return task.Job{}, false, fmt.Errorf("检查摄取优先级: %w", err)
+	}
+	if busy {
+		return task.Job{}, false, nil
+	}
 	row := t.tx.QueryRowContext(ctx, `SELECT `+governanceJobColumns+` FROM governance_jobs
 		WHERE (status = ? OR (status = ? AND wait_reason <> ?))
 		AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-		ORDER BY created_at ASC, id ASC LIMIT 1`,
+		ORDER BY CASE WHEN kind IN ('aggregate', 'build_skill') THEN 1 ELSE 0 END, created_at ASC, id ASC LIMIT 1`,
 		string(task.StatusQueued), string(task.StatusWaiting), task.WaitConfiguration,
 		formatTime(now))
 	item, err := scanGovernanceJob(row)

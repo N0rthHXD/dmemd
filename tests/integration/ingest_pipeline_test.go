@@ -480,8 +480,11 @@ func TestPartialAndZeroCandidateResults(t *testing.T) {
 		{"action":"add","content":"另一个可用候选。","evidence":[{"quote":7}]}
 	]}`
 	f.fake.EnqueueContent(partial)
+	// Extraction v2 repairs the malformed evidence of c3 without touching c1;
+	// the empty c2 is deliberately omitted and isolated.
+	f.fake.EnqueueContent(`{"candidates":[{"candidate_id":"c3","content":"另一个可用候选。","evidence":[{"quote":"另一个可用候选。"}]}]}`)
 	f.fake.EnqueueContent(`{"decisions":[{"candidate_id":"c1","action":"add"},{"candidate_id":"c2","action":"add"}]}`)
-	receipt := f.submit(t, `"部分可解析输入"`)
+	receipt := f.submit(t, `"可用的部分候选。另一个可用候选。"`)
 	if !f.processOne(t) {
 		t.Fatal("partial job not processed")
 	}

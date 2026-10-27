@@ -143,6 +143,26 @@ func deterministicResolution(ctx context.Context, tx Tx, conflict memory.Conflic
 	if len(states) < 2 {
 		return memory.ResolveInput{}, false, nil
 	}
+	// Receive order and shared keywords cannot establish subject/scope identity.
+	// Do not let maintenance rules settle a mixed or ambiguous fact group.
+	if conflict.FactGroupID == "" {
+		return memory.ResolveInput{}, false, nil
+	}
+	group, err := tx.GetFactGroup(ctx, conflict.FactGroupID)
+	if errors.Is(err, memory.ErrNotFound) {
+		return memory.ResolveInput{}, false, nil
+	}
+	if err != nil {
+		return memory.ResolveInput{}, false, err
+	}
+	if group.Cardinality != memory.CardinalitySingle || strings.TrimSpace(group.Subject) == "" || strings.TrimSpace(group.Predicate) == "" {
+		return memory.ResolveInput{}, false, nil
+	}
+	for _, state := range states {
+		if state.item.FactGroupID != group.ID || state.item.ScopeKey != states[0].item.ScopeKey {
+			return memory.ResolveInput{}, false, nil
+		}
+	}
 
 	activeAccepted := make([]conflictMemberState, 0, len(states))
 	pending := 0

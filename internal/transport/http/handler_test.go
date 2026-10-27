@@ -192,7 +192,7 @@ func TestSetStateIgnoresContentAndRecallParsing(t *testing.T) {
 			return memory.Memory{ID: id, State: gotState, Version: 2}, nil
 		}},
 		Search: stubSearch{recall: func(_ context.Context, request retrieval.RecallRequest) (retrieval.RecallResult, error) {
-			if request.Query != "回答 语言" || request.Match != retrieval.MatchAny || request.TopK != 5 || !request.Explain {
+			if request.Query != "回答 语言" || request.TopK != 5 || !request.Explain {
 				t.Fatalf("search request = %+v", request)
 			}
 			if len(request.Filters.Kinds) != 1 || request.Filters.Kinds[0] != memory.KindPreference {
@@ -208,7 +208,7 @@ func TestSetStateIgnoresContentAndRecallParsing(t *testing.T) {
 	}
 
 	response = serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/recall",
-		strings.NewReader(`{"query":"回答 语言","match":"any","filters":{"kinds":["preference"]},"top_k":5,"explain":true}`)))
+		strings.NewReader(`{"query":"回答 语言","filters":{"kinds":["preference"]},"top_k":5,"explain":true}`)))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"memories":[]`) {
 		t.Fatalf("recall = %d %q", response.Code, response.Body.String())
 	}

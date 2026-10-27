@@ -43,7 +43,7 @@ func TestSearchChineseTermsFiltersRankingAndLimits(t *testing.T) {
 		CreatedByApp: "app-other", UpdatedAt: early,
 	})
 
-	expression, err := retrieval.Compile(retrieval.Groups("回答"), retrieval.MatchAll)
+	expression, err := retrieval.Compile(retrieval.Groups("回答"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,26 +84,26 @@ func TestSearchChineseTermsFiltersRankingAndLimits(t *testing.T) {
 		t.Fatalf("top_k hits = %+v", hits)
 	}
 
-	terms, err := retrieval.Compile(retrieval.Groups("记忆检索"), retrieval.MatchAll)
+	terms, err := retrieval.Compile(retrieval.Groups("记忆检索"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if hits := storeHits(t, store, terms, retrieval.Filters{States: []memory.State{memory.StateActive}}, 20); len(hits) != 1 || hits[0].MemoryID != other.ID {
 		t.Fatalf("Chinese term hits = %+v", hits)
 	}
-	nonAdjacentTerms, err := retrieval.Compile(retrieval.Groups("苹果香蕉"), retrieval.MatchAll)
+	nonAdjacentTerms, err := retrieval.Compile(retrieval.Groups("苹果香蕉"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if hits := storeHits(t, store, nonAdjacentTerms, retrieval.Filters{States: []memory.State{memory.StateActive}}, 20); len(hits) != 1 || hits[0].MemoryID != scattered.ID {
 		t.Fatalf("non-adjacent dictionary terms should both match in one document: %+v", hits)
 	}
-	notAdjacent, err := retrieval.Compile(retrieval.Groups("记忆 回答"), retrieval.MatchAll)
+	independentTerms, err := retrieval.Compile(retrieval.Groups("记忆 回答"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hits := storeHits(t, store, notAdjacent, retrieval.Filters{States: []memory.State{memory.StateActive}}, 20); len(hits) != 0 {
-		t.Fatalf("terms split across documents matched = %+v", hits)
+	if hits := storeHits(t, store, independentTerms, retrieval.Filters{States: []memory.State{memory.StateActive}}, 20); len(hits) != 3 {
+		t.Fatalf("independent terms should recall all three matching documents = %+v", hits)
 	}
 
 	// A deleted snapshot is excluded even if a stale derived document exists.
@@ -130,7 +130,7 @@ func TestSearchOrdersTiesByUpdatedAtThenID(t *testing.T) {
 	newer := seedIndexedMemory(t, store, sourceID, memory.Memory{
 		Title: "tie", Content: "tie", Kind: memory.KindFact, UpdatedAt: sameTime.Add(time.Minute),
 	})
-	expression, err := retrieval.Compile(retrieval.Groups("tie"), retrieval.MatchAll)
+	expression, err := retrieval.Compile(retrieval.Groups("tie"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +294,7 @@ func storeHits(t *testing.T, store *Store, expression string, filters retrieval.
 
 func mustCompile(t *testing.T, query string) string {
 	t.Helper()
-	expression, err := retrieval.Compile(retrieval.Groups(query), retrieval.MatchAll)
+	expression, err := retrieval.Compile(retrieval.Groups(query))
 	if err != nil {
 		t.Fatal(err)
 	}

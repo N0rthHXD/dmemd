@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -30,6 +31,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	configPath := flags.String("config", "", "JSON 配置文件路径（默认使用用户配置目录）")
 	showVersion := flags.Bool("version", false, "输出版本后退出")
 	checkConfig := flags.Bool("check-config", false, "加载并校验配置后退出")
+	checkArtifacts := flags.Bool("artifact-integrity-check", false, "检查派生版本来源、内容和依赖一致性后退出")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -98,6 +100,21 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("检查数据库权限: %w", err)
 	}
 	logger.Info("database ready", "path", store.Path())
+	if *checkArtifacts {
+		defer lock.Close()
+		defer store.Close()
+		report, err := store.ArtifactIntegrityCheck(ctx)
+		if err != nil {
+			return err
+		}
+		if err := json.NewEncoder(stdout).Encode(report); err != nil {
+			return err
+		}
+		if len(report.Issues) > 0 {
+			return fmt.Errorf("artifact integrity check: %d issues", len(report.Issues))
+		}
+		return nil
+	}
 
 	stack, err := appruntime.NewStack(loaded.Config, logger, store)
 	if err != nil {

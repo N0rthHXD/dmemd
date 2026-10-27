@@ -26,8 +26,10 @@ func (h *handler) forget(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, forgetResponse{
-		MemoryIDs:     nonNilStrings(result.MemoryIDs),
-		SourceIDs:     nonNilStrings(result.SourceIDs),
-		ExperienceIDs: nonNilStrings(result.ExperienceIDs),
+		MemoryIDs:                nonNilStrings(result.MemoryIDs),
+		SourceIDs:                nonNilStrings(result.SourceIDs),
+		ExperienceIDs:            nonNilStrings(result.ExperienceIDs),
+		Warnings:                 result.Warnings,
+		RetainedRelatedMemoryIDs: result.RetainedRelatedMemoryIDs,
 	})
 }

@@ -92,8 +92,8 @@ var (
 	_ IndexMaintainer = (*Service)(nil)
 )
 
-// Search runs one Top-K query. Empty or punctuation-only input is a valid empty
-// result and never calls the model.
+// Search runs one Top-K query. Input without effective terms (empty,
+// punctuation-only or stopword-only) returns empty without querying any backend.
 func (s *Service) Search(ctx context.Context, request Request) (Result, error) {
 	mode, err := normalizeMode(request.Mode)
 	if err != nil {
@@ -103,7 +103,7 @@ func (s *Service) Search(ctx context.Context, request Request) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	groups := dedupeGroups(Groups(request.Query))
+	groups := queryGroups(request.Query)
 	filters, filtersOK := sanitizeFilters(request.Filters)
 	if filters.AsOf == nil {
 		asOf := time.Now().UTC()
@@ -116,10 +116,6 @@ func (s *Service) Search(ctx context.Context, request Request) (Result, error) {
 			Conflicts: []memory.ConflictSummary{},
 		}, nil
 	}
-	match := normalizeMatch(request.Match)
-	if mode == ModeKeyword && match == MatchAny {
-		groups = selectQueryTerms(groups)
-	}
 	var result Result
 	if mode == ModeHybrid {
 		result, err = s.searchHybrid(ctx, groups, request, filters, topK)
@@ -129,17 +125,17 @@ func (s *Service) Search(ctx context.Context, request Request) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	return s.decorateConflicts(ctx, result, groups, request, filters)
+	return s.decorateConflicts(ctx, result, groups, filters)
 }
 
 // RelatedContext selects bounded consistency context for one candidate fact.
-// It deliberately bypasses the public accepted-only filter so historical,
+// It deliberately bypasses the public current-time filter so historical,
 // pending and archived assertions can be judged.
 func (s *Service) RelatedContext(ctx context.Context, text string, limit int) (ContextResult, error) {
 	if limit <= 0 {
 		limit = DefaultRelatedLimit
 	}
-	groups := dedupeGroups(Groups(text))
+	groups := queryGroups(text)
 	if len(groups) > MaxRelatedQueryGroups {
 		groups = groups[:MaxRelatedQueryGroups]
 	}
@@ -150,7 +146,7 @@ func (s *Service) RelatedContext(ctx context.Context, text string, limit int) (C
 		States:          []memory.State{memory.StateActive, memory.StateArchived},
 		AssertionStatus: []memory.AssertionStatus{memory.AssertionAccepted, memory.AssertionPending},
 	}
-	result, err := s.searchKeyword(ctx, groups, Request{Match: MatchAny}, contextFilters, limit+1, nil, false)
+	result, err := s.searchKeyword(ctx, groups, Request{}, contextFilters, limit+1, nil, false)
 	if err != nil {
 		return ContextResult{}, err
 	}
@@ -242,12 +238,15 @@ func (s *Service) CatalogGeneration(ctx context.Context) (int64, error) {
 
 // decorateConflicts runs an independent conflict discovery path over accepted
 // and pending members, attaches conflict references to returned items and emits
-// stable warnings. It never mixes pending text into ordinary items.
-func (s *Service) decorateConflicts(ctx context.Context, result Result, groups []Group, request Request, filters Filters) (Result, error) {
+// stable warnings. Pending text retains its assertion status in ordinary items.
+func (s *Service) decorateConflicts(ctx context.Context, result Result, groups []Group, filters Filters) (Result, error) {
 	if result.Conflicts == nil {
 		result.Conflicts = []memory.ConflictSummary{}
 	}
 	for index := range result.Items {
+		if result.Items[index].Memory.AssertionStatus == memory.AssertionPending {
+			result.Warnings = dedupeWarnings(append(result.Warnings, WarningFactConflict))
+		}
 		if result.Items[index].ConflictRefs == nil {
 			result.Items[index].ConflictRefs = []memory.ConflictRef{}
 		}
@@ -256,7 +255,7 @@ func (s *Service) decorateConflicts(ctx context.Context, result Result, groups [
 		return result, nil
 	}
 	asOf := *filters.AsOf
-	expression, err := Compile(groups, normalizeMatch(request.Match))
+	expression, err := Compile(groups)
 	if err != nil {
 		return Result{}, err
 	}
@@ -266,7 +265,6 @@ func (s *Service) decorateConflicts(ctx context.Context, result Result, groups [
 		memory.AssertionPending,
 	}
 	hits, err := s.backend.Search(ctx, Query{
-		Match:      normalizeMatch(request.Match),
 		Groups:     groups,
 		Expression: expression,
 		Filters:    discoveryFilters,
@@ -356,7 +354,7 @@ func (s *Service) relevantConflicts(ctx context.Context, conflicts []memory.Conf
 			if item.AssertionStatus != memory.AssertionAccepted && item.AssertionStatus != memory.AssertionPending {
 				continue
 			}
-			if item.ValidFrom == nil || item.ValidTo == nil || memory.Contains(item.ValidFrom, item.ValidTo, asOf) {
+			if item.State != memory.StateDeleted && memory.Contains(item.ValidFrom, item.ValidTo, asOf) {
 				relates = true
 				break
 			}
@@ -406,19 +404,20 @@ func (s *Service) searchKeyword(ctx context.Context, groups []Group, request Req
 		Retrieval: Retrieval{Mode: ModeKeyword},
 		Warnings:  dedupeWarnings(warnings),
 	}
-	match := normalizeMatch(request.Match)
-	expression, err := Compile(groups, match)
+	if len(groups) == 0 {
+		return result, nil
+	}
+	expression, err := Compile(groups)
 	if err != nil {
 		return Result{}, err
 	}
 	limit := topK
-	if optimize && match == MatchAny {
+	if optimize {
 		// Reranking needs a wider candidate pool. top_k still bounds the
 		// response, not the recall range.
 		limit = candidateLimit(topK)
 	}
 	hits, err := s.backend.Search(ctx, Query{
-		Match:      match,
 		Groups:     groups,
 		Expression: expression,
 		Filters:    filters,
@@ -428,7 +427,7 @@ func (s *Service) searchKeyword(ctx context.Context, groups []Group, request Req
 		return Result{}, err
 	}
 	var assembled []Item
-	if optimize && match == MatchAny {
+	if optimize {
 		assembled, err = s.assembleCoverageRerankedKeywordHits(ctx, hits, groups, filters, topK, request.Explain)
 	} else {
 		assembled, err = s.assembleKeywordHits(ctx, hits, groups, filters, topK, request.Explain)
@@ -470,9 +469,16 @@ func (s *Service) assembleKeywordHits(ctx context.Context, hits []Hit, groups []
 		position := len(selected) + 1
 		entry := rankedCandidate{candidate: candidate, keyword: &hit, keywordRank: position, score: -hit.BM25}
 		selected = append(selected, entry)
-		if len(selected) >= limit {
-			break
+	}
+	sort.SliceStable(selected, func(i, j int) bool {
+		li, lj := selected[i].candidate.Memory.AssertionStatus, selected[j].candidate.Memory.AssertionStatus
+		if li != lj {
+			return li == memory.AssertionAccepted
 		}
+		return selected[i].keywordRank < selected[j].keywordRank
+	})
+	if len(selected) > limit {
+		selected = selected[:limit]
 	}
 	return s.buildKeywordItems(ctx, selected, groups, explain)
 }
@@ -515,6 +521,10 @@ func (s *Service) assembleCoverageRerankedKeywordHits(ctx context.Context, hits 
 		})
 	}
 	sort.SliceStable(selected, func(i, j int) bool {
+		li, lj := selected[i].candidate.Memory.AssertionStatus, selected[j].candidate.Memory.AssertionStatus
+		if li != lj {
+			return li == memory.AssertionAccepted
+		}
 		if selected[i].score != selected[j].score {
 			return selected[i].score > selected[j].score
 		}
@@ -638,9 +648,9 @@ func sanitizeFilters(input Filters) (Filters, bool) {
 	output := input
 	output.Kinds = nil
 	output.States = nil
-	// Public recall is accepted-only. Pending and rejected text is available
-	// through conflict and management APIs, never through ordinary items.
-	output.AssertionStatus = []memory.AssertionStatus{memory.AssertionAccepted}
+	// Confirmed assertions rank ahead of pending alternatives. Rejected
+	// assertions are never recalled.
+	output.AssertionStatus = []memory.AssertionStatus{memory.AssertionAccepted, memory.AssertionPending}
 
 	if len(input.Kinds) > 0 {
 		seen := make(map[memory.Kind]struct{}, len(input.Kinds))

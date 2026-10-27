@@ -12,7 +12,7 @@ CREATE TABLE experience_runs (
     goal          TEXT NOT NULL,
     conditions_json TEXT NOT NULL DEFAULT '[]',
     actions_json  TEXT NOT NULL DEFAULT '[]',
-    outcome       TEXT NOT NULL CHECK (outcome IN ('success', 'failure', 'unknown')),
+    outcome       TEXT NOT NULL CHECK (outcome IN ('success', 'failure', 'unknown', 'partial_success')),
     state         TEXT NOT NULL CHECK (state IN ('recorded', 'revoked')),
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL,

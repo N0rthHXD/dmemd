@@ -23,6 +23,30 @@ const (
 	KindProcedure  Kind = "procedure"
 )
 
+// Phase preserves the lifecycle meaning of an assertion independently from
+// the storage lifecycle state. A cancelled event remains auditable.
+type Phase string
+
+const (
+	PhaseUnknown    Phase = "unknown"
+	PhaseScheduled  Phase = "scheduled"
+	PhaseInProgress Phase = "in_progress"
+	PhaseCompleted  Phase = "completed"
+	PhaseCancelled  Phase = "cancelled"
+	PhasePostponed  Phase = "postponed"
+)
+
+// Durability is extraction metadata used by derived-layer selection. It is not
+// a truth or lifecycle decision.
+type Durability string
+
+const (
+	DurabilityUnknown   Durability = "unknown"
+	DurabilityDurable   Durability = "durable"
+	DurabilityEpisodic  Durability = "episodic"
+	DurabilityTemporary Durability = "temporary"
+)
+
 // State controls lifecycle and default search visibility.
 type State string
 
@@ -113,6 +137,8 @@ const (
 type Memory struct {
 	ID              string          `json:"id"`
 	Kind            Kind            `json:"kind"`
+	Phase           Phase           `json:"phase"`
+	Durability      Durability      `json:"durability"`
 	Title           string          `json:"title"`
 	Content         string          `json:"content"`
 	State           State           `json:"state"`
@@ -130,6 +156,7 @@ type Memory struct {
 	OriginSourceID  string          `json:"origin_source_id,omitempty"`
 	ScopeKey        string          `json:"scope_key,omitempty"`
 	Topics          []string        `json:"topics"`
+	RawTopics       []string        `json:"raw_topics"`
 }
 
 // TemporalStatus reports whether a current snapshot has fully known validity
@@ -205,6 +232,8 @@ type TimeRange struct {
 // carry their identifiers and source relationships.
 type CreateInput struct {
 	Kind            Kind
+	Phase           Phase
+	Durability      Durability
 	Title           string
 	Content         string
 	ObservedAt      time.Time
@@ -229,6 +258,8 @@ type CreateInput struct {
 type ReviseInput struct {
 	MemoryID        string
 	Kind            Kind
+	Phase           Phase
+	Durability      Durability
 	Title           string
 	Content         string
 	ObservedAt      time.Time

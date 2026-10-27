@@ -12,6 +12,7 @@ CREATE TABLE artifacts (
     topic           TEXT NOT NULL DEFAULT '',
     current_version INTEGER NOT NULL DEFAULT 0 CHECK (current_version >= 0),
     state           TEXT NOT NULL CHECK (state IN ('active', 'stale', 'disabled')),
+    reason_code     TEXT NOT NULL DEFAULT '',
     updated_at      TEXT NOT NULL,
     UNIQUE (kind, target_key)
 );
@@ -28,6 +29,10 @@ CREATE TABLE artifact_revisions (
     content_hash      TEXT NOT NULL DEFAULT '',
     generator         TEXT NOT NULL DEFAULT '',
     protocol_version  TEXT NOT NULL DEFAULT '',
+    taxonomy_version  TEXT NOT NULL DEFAULT '',
+    generator_version TEXT NOT NULL DEFAULT '',
+    run_id            TEXT NOT NULL DEFAULT '',
+    provenance_json   TEXT NOT NULL DEFAULT '{}',
     reason_code       TEXT NOT NULL DEFAULT '',
     truncated         INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0, 1)),
     created_at        TEXT NOT NULL,

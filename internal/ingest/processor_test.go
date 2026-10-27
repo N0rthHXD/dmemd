@@ -178,8 +178,9 @@ func TestAddUpdateMergeDuplicateAndZeroCandidates(t *testing.T) {
 
 	f.fake.EnqueueCandidates([]any{map[string]any{
 		"action": "add", "kind": "preference", "title": "回答语言",
-		"content":  "用户希望默认使用中文回答。",
-		"evidence": []any{map[string]any{"message_id": "m1", "quote": "用户希望默认使用中文回答。"}},
+		"fact_group": map[string]any{"subject": "用户", "predicate": "回答语言", "cardinality": "single"},
+		"content":    "用户希望默认使用中文回答。",
+		"evidence":   []any{map[string]any{"message_id": "m1", "quote": "用户希望默认使用中文回答。"}},
 	}})
 	firstReceipt := f.submit(t, `{"messages":[{"id":"m1","content":"用户希望默认使用中文回答。"}]}`)
 	firstJob := f.claim(t)
@@ -216,77 +217,46 @@ func TestAddUpdateMergeDuplicateAndZeroCandidates(t *testing.T) {
 	f.advance(time.Minute)
 	f.fake.EnqueueCandidates([]any{map[string]any{
 		"kind": "preference", "title": "回答语言",
-		"content":  "用户希望默认使用英文回答。",
-		"evidence": []any{map[string]any{"message_id": "m2", "quote": "默认使用英文回答"}},
+		"fact_group": map[string]any{"subject": "用户", "predicate": "回答语言", "cardinality": "single"},
+		"content":    "用户希望默认使用英文回答。",
+		"evidence":   []any{map[string]any{"message_id": "m2", "quote": "以后请默认使用英文回答"}},
 	}})
-	f.fake.EnqueueContent(`{"decisions":[{"candidate_id":"c1","action":"correct","target_memory_ids":["` + firstID + `"],"content":"用户希望默认使用英文回答。","evidence_refs":[{"candidate_id":"c1","evidence_index":0}],"reason_code":"explicit_correction"}]}`)
 	secondReceipt := f.submit(t, `{"messages":[{"id":"m2","content":"回答 语言 英文 以后请默认使用英文回答。"}]}`)
 	secondJob := f.claim(t)
 	result = f.process(t, secondJob)
-	if len(result.MemoryIDs) != 1 || result.MemoryIDs[0] != firstID {
+	if len(result.MemoryIDs) != 2 || len(result.PendingMemoryIDs) != 0 || len(result.ConflictIDs) != 1 {
 		t.Fatalf("update result = %+v", result)
 	}
+	oldID := firstID
+	for _, id := range result.MemoryIDs {
+		if id != oldID {
+			firstID = id
+		}
+	}
 	updated := f.memory(t, firstID)
-	if updated.Version != 2 || updated.Content != "用户希望默认使用英文回答。" {
+	if updated.Version != 1 || updated.Content != "用户希望默认使用英文回答。" || f.memory(t, oldID).AssertionStatus != memory.AssertionRejected {
 		t.Fatalf("updated = %+v", updated)
 	}
 	if current, err := f.memories.GetEvidence(ctx, firstID, 0); err != nil || len(current) != 1 || current[0].SourceID != secondReceipt.SourceID {
 		t.Fatalf("updated evidence = %+v err=%v", current, err)
 	}
-	if old, err := f.memories.GetEvidence(ctx, firstID, 1); err != nil || len(old) != 1 || old[0].SourceID != firstReceipt.SourceID {
+	if old, err := f.memories.GetEvidence(ctx, oldID, 1); err != nil || len(old) != 1 || old[0].SourceID != firstReceipt.SourceID {
 		t.Fatalf("old evidence = %+v err=%v", old, err)
 	}
 	versions, err := f.memories.ListVersions(ctx, firstID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if versions[0].Reason != "ingest:correct" {
+	if versions[0].Reason != "ingest:auto_converge" {
 		t.Fatalf("update reason = %q", versions[0].Reason)
 	}
 
 	requests := f.fake.Requests()
-	if len(requests) != 3 {
+	if len(requests) != 2 {
 		t.Fatalf("model requests = %d", len(requests))
 	}
-	var payload struct {
-		CurrentSource struct {
-			ID string `json:"id"`
-		} `json:"current_source"`
-		Candidates []struct {
-			CandidateID string `json:"candidate_id"`
-		} `json:"candidates"`
-		RelatedMemories []struct {
-			ID string `json:"id"`
-		} `json:"related_memories"`
-	}
-	var message struct {
-		Messages []struct {
-			Content string `json:"content"`
-		} `json:"messages"`
-	}
-	if err := json.Unmarshal(requests[2].Body, &message); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal([]byte(message.Messages[1].Content), &payload); err != nil {
-		t.Fatal(err)
-	}
-	if payload.CurrentSource.ID != secondReceipt.SourceID {
-		t.Fatalf("current source = %+v", payload.CurrentSource)
-	}
-	foundTarget := false
-	for _, relatedMemory := range payload.RelatedMemories {
-		if relatedMemory.ID == firstID {
-			foundTarget = true
-		}
-		if relatedMemory.ID == unrelated.ID {
-			t.Fatalf("unrelated memory entered decision context: %+v", payload.RelatedMemories)
-		}
-	}
-	if !foundTarget {
-		t.Fatalf("target missing from decision context: %+v", payload.RelatedMemories)
-	}
-	if len(payload.Candidates) != 1 || payload.Candidates[0].CandidateID != "c1" {
-		t.Fatalf("decision candidates = %+v", payload.Candidates)
+	if item := f.memory(t, unrelated.ID); item.Version != 1 {
+		t.Fatalf("unrelated memory changed: %+v", item)
 	}
 
 	f.advance(time.Minute)
@@ -294,6 +264,7 @@ func TestAddUpdateMergeDuplicateAndZeroCandidates(t *testing.T) {
 		"title": "回答语言", "content": "用户希望默认使用英文回答。",
 		"evidence": []any{map[string]any{"message_id": "m3", "quote": "英文回答"}},
 	}})
+	f.fake.EnqueueContent(`{"decisions":[{"candidate_id":"c1","action":"merge_evidence","target_memory_ids":["` + firstID + `"]}]}`)
 	f.submit(t, `{"messages":[{"id":"m3","content":"回答 语言 英文 再次确认默认英文回答。"}]}`)
 	thirdJob := f.claim(t)
 	result = f.process(t, thirdJob)
@@ -301,7 +272,7 @@ func TestAddUpdateMergeDuplicateAndZeroCandidates(t *testing.T) {
 		t.Fatalf("merge result = %+v", result)
 	}
 	merged := f.memory(t, firstID)
-	if merged.Version != 3 {
+	if merged.Version != 2 {
 		t.Fatalf("merged version = %d", merged.Version)
 	}
 	if current, err := f.memories.GetEvidence(ctx, firstID, 0); err != nil || len(current) != 2 {
@@ -314,14 +285,15 @@ func TestAddUpdateMergeDuplicateAndZeroCandidates(t *testing.T) {
 		"content":  "用户希望默认使用英文回答。",
 		"evidence": []any{map[string]any{"message_id": "m4", "quote": "英文回答"}},
 	}})
+	f.fake.EnqueueContent(`{"decisions":[{"candidate_id":"c1","action":"merge_evidence","target_memory_ids":["` + firstID + `"]}]}`)
 	f.submit(t, `{"messages":[{"id":"m4","content":"回答 语言 英文 再次确认默认英文回答。"}]}`)
 	fourthJob := f.claim(t)
 	result = f.process(t, fourthJob)
 	if len(result.MemoryIDs) != 1 || result.MemoryIDs[0] != firstID {
 		t.Fatalf("duplicate add result = %+v", result)
 	}
-	if count := f.countMemories(t, memory.StateActive); count != 2 {
-		t.Fatalf("active memories = %d, want first + unrelated", count)
+	if count := f.countMemories(t, memory.StateActive); count != 3 {
+		t.Fatalf("active memories = %d, want old rejected + successor + unrelated", count)
 	}
 
 	f.advance(time.Minute)

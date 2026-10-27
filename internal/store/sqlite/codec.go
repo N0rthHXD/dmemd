@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/N0rthHXD/dmemd/internal/memory"
 )
 
 // storageTimeLayout is fixed-width UTC RFC 3339 with nanoseconds. Fixed width is
@@ -72,4 +74,67 @@ func decodeTopics(value string) ([]string, error) {
 		topics = []string{}
 	}
 	return topics, nil
+}
+
+func encodeTemporalDetails(value memory.TemporalDetails) (string, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "", fmt.Errorf("序列化时间元数据: %w", err)
+	}
+	return string(data), nil
+}
+
+func decodeTemporalDetails(value string) (memory.TemporalDetails, error) {
+	result := memory.TemporalDetails{}
+	if value == "" {
+		return result, nil
+	}
+	if err := json.Unmarshal([]byte(value), &result); err != nil {
+		return memory.TemporalDetails{}, fmt.Errorf("解析时间元数据: %w", err)
+	}
+	return result, nil
+}
+
+func encodeOptionalProcedure(value *memory.Procedure) (string, error) {
+	if value == nil {
+		return "", nil
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "", fmt.Errorf("序列化流程结构: %w", err)
+	}
+	return string(data), nil
+}
+
+func decodeOptionalProcedure(value string) (*memory.Procedure, error) {
+	if value == "" {
+		return nil, nil
+	}
+	result := &memory.Procedure{}
+	if err := json.Unmarshal([]byte(value), result); err != nil {
+		return nil, fmt.Errorf("解析流程结构: %w", err)
+	}
+	return result, nil
+}
+
+func encodeOptionalQualifiers(value *memory.AssertionQualifiers) (string, error) {
+	if value == nil {
+		return "", nil
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "", fmt.Errorf("序列化断言限定: %w", err)
+	}
+	return string(data), nil
+}
+
+func decodeOptionalQualifiers(value string) (*memory.AssertionQualifiers, error) {
+	if value == "" {
+		return nil, nil
+	}
+	result := &memory.AssertionQualifiers{}
+	if err := json.Unmarshal([]byte(value), result); err != nil {
+		return nil, fmt.Errorf("解析断言限定: %w", err)
+	}
+	return result, nil
 }

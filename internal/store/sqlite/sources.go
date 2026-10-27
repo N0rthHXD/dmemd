@@ -238,7 +238,8 @@ func (t *Tx) ScrubJobErrorsBySource(ctx context.Context, sourceID, reason string
 // untouched.
 func (t *Tx) CancelJobsBySource(ctx context.Context, sourceID, reason string, at time.Time) (int64, error) {
 	result, err := t.tx.ExecContext(ctx, `UPDATE ingest_jobs SET
-		status = ?, error = ?, next_attempt_at = NULL, updated_at = ?, finished_at = ?
+		status = ?, error = ?, next_attempt_at = NULL, quality_outcome = '',
+		extraction_stats = '{}', diagnostics = '[]', updated_at = ?, finished_at = ?
 		WHERE source_id = ? AND status IN (?, ?, ?)`,
 		string(ingest.JobCancelled), reason, formatTime(at), formatTime(at),
 		sourceID, string(ingest.JobQueued), string(ingest.JobRunning), string(ingest.JobWaiting),

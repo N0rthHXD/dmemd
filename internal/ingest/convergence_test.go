@@ -59,7 +59,7 @@ func TestConvergenceRequiresExplicitScopedSingleValueEvidence(t *testing.T) {
 			a.candidate.ValidFrom, a.candidate.ValidTo = &start, &end
 			a.candidate.ValidFromBasis, a.candidate.ValidToBasis = memory.BasisExplicit, memory.BasisExplicit
 		}},
-		{name: "bounded overlap", mutate: func(_ *mergePlan, a *plannedAction, _ *memory.FactGroup, m *memory.Memory) {
+		{name: "bounded correction", want: true, mutate: func(_ *mergePlan, a *plannedAction, _ *memory.FactGroup, m *memory.Memory) {
 			end := base.Add(72 * time.Hour)
 			start := base.Add(time.Hour)
 			m.ValidFrom, m.ValidTo = &base, &end
@@ -69,14 +69,14 @@ func TestConvergenceRequiresExplicitScopedSingleValueEvidence(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			later := base.Add(time.Hour)
-			group := memory.FactGroup{ID: "g", Subject: "用户", Predicate: "血糖", Cardinality: memory.CardinalitySingle}
+			group := memory.FactGroup{ID: "g", Subject: "用户", Predicate: "血糖", SubjectKey: memory.NormalizeIdentityText("用户"), PredicateKey: memory.NormalizeIdentityText("血糖"), Cardinality: memory.CardinalitySingle}
 			old := memory.Memory{ID: "old", FactGroupID: "g", Content: "血糖是6.5", State: memory.StateActive, AssertionStatus: memory.AssertionAccepted, ObservedAt: base}
 			plan := &mergePlan{source: source.Source{ID: "s", Content: json.RawMessage(`"更正血糖为5.6"`)}, complete: true}
 			action := plannedAction{candidate: Candidate{Content: "血糖是5.6", ObservedAt: &later, FactGroup: &FactGroupProposal{Subject: "用户", Predicate: "血糖", Cardinality: memory.CardinalitySingle}}, evidence: []source.Evidence{{SourceID: "s", Quote: "更正血糖为5.6"}}}
 			if test.mutate != nil {
 				test.mutate(plan, &action, &group, &old)
 			}
-			if got := convergenceEligible(plan, action, group, []memory.Memory{old}); got != test.want {
+			if got, _ := evaluateConvergence(plan, action, group, []memory.Memory{old}); got != test.want {
 				t.Fatalf("eligible=%v want=%v", got, test.want)
 			}
 		})

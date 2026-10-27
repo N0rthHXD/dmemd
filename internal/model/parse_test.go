@@ -32,19 +32,20 @@ func TestParseCandidatesDefaultsPartialAndEvidence(t *testing.T) {
 		]
 	}` + "\n```"
 
-	candidates, err := ParseCandidates(content)
+	result, err := ParseCandidates(content)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(candidates) != 5 {
-		t.Fatalf("candidates = %d: %+v", len(candidates), candidates)
+	candidates := result.Candidates
+	if len(candidates) != 5 || result.RawCandidates != 5 {
+		t.Fatalf("candidates = %d raw=%d: %+v", len(candidates), result.RawCandidates, candidates)
 	}
-	if len(candidates[0].ProtocolErrors) == 0 || len(candidates[3].ProtocolErrors) == 0 || strings.TrimSpace(candidates[4].Content) != "" {
+	if len(candidates[0].ProtocolIssues) == 0 || len(candidates[3].ProtocolIssues) == 0 || strings.TrimSpace(candidates[4].Content) != "" {
 		t.Fatalf("invalid candidate diagnostics were lost: %+v", candidates)
 	}
 	first := candidates[0]
-	if first.Kind != memory.KindFact {
-		t.Fatalf("defaults = %+v", first)
+	if first.Kind != "" {
+		t.Fatalf("parser must not silently default kind = %+v", first)
 	}
 	if !strings.HasPrefix(first.Title, "用户希望默认使用中文回答") || len([]rune(first.Title)) != 40 {
 		t.Fatalf("default title = %q (%d runes)", first.Title, len([]rune(first.Title)))
@@ -55,12 +56,13 @@ func TestParseCandidatesDefaultsPartialAndEvidence(t *testing.T) {
 	if len(first.Topics) != 3 || first.Topics[0] != "Go" || first.Topics[1] != "sqlite" || first.Topics[2] != "go" {
 		t.Fatalf("topics = %#v", first.Topics)
 	}
-	if len(first.Evidence) != 1 || first.Evidence[0].MessageID != "m1" || first.Evidence[0].Quote != "默认使用中文" {
+	if len(first.Evidence) != 2 || first.Evidence[0].SegmentID != "" || first.Evidence[0].Quote != "默认使用中文" ||
+		first.Evidence[1].Quote != "bad message type" {
 		t.Fatalf("evidence = %+v", first.Evidence)
 	}
-	if first.Evidence[0].Location == nil || first.Evidence[0].Location.Field != "messages.0.content" ||
-		first.Evidence[0].Location.Start != 2 || first.Evidence[0].Location.End != 8 {
-		t.Fatalf("evidence location = %+v", first.Evidence[0].Location)
+	if first.Evidence[0].Start == nil || *first.Evidence[0].Start != 2 ||
+		first.Evidence[0].End == nil || *first.Evidence[0].End != 8 {
+		t.Fatalf("evidence offsets = %+v", first.Evidence[0])
 	}
 	if candidates[1].Kind != "unknown" || candidates[1].Title != "自定义" {
 		t.Fatalf("unknown values = %+v", candidates[1])
@@ -77,10 +79,11 @@ func TestParseCandidatesDefaultsPartialAndEvidence(t *testing.T) {
 }
 
 func TestParseCandidatesV2MetadataAndProcedure(t *testing.T) {
-	candidates, err := ParseCandidates(`{"candidates":[{"candidate_id":"c1","kind":"procedure","content":"先检查配置，再运行部署。","phase":"scheduled","durability":"durable","procedure":{"steps":["检查配置","运行部署"],"preconditions":["配置存在"],"completion_conditions":["部署完成"],"failure_branches":["配置缺失时停止"]},"evidence":[{"message_id":"m1","quote":"先检查配置，再运行部署。"}]}]}`)
+	result, err := ParseCandidates(`{"candidates":[{"candidate_id":"c1","kind":"procedure","content":"先检查配置，再运行部署。","phase":"scheduled","durability":"durable","procedure":{"steps":["检查配置","运行部署"],"preconditions":["配置存在"],"completion_conditions":["部署完成"],"failure_branches":["配置缺失时停止"]},"evidence":[{"message_id":"m1","quote":"先检查配置，再运行部署。"}]}]}`)
 	if err != nil {
 		t.Fatal(err)
 	}
+	candidates := result.Candidates
 	if len(candidates) != 1 || candidates[0].CandidateID != "c1" ||
 		candidates[0].Phase != ingest.PhaseScheduled || candidates[0].Durability != ingest.DurabilityDurable {
 		t.Fatalf("candidate = %+v", candidates)
@@ -97,10 +100,11 @@ func TestParseCandidatesObservedAtAndRuneTitle(t *testing.T) {
 		{"content":"正文二","observed_at":"not-a-time"},
 		{"content":"正文三","observed_at":123}
 	]}`
-	candidates, err := ParseCandidates(content)
+	result, err := ParseCandidates(content)
 	if err != nil {
 		t.Fatal(err)
 	}
+	candidates := result.Candidates
 	if len(candidates) != 3 {
 		t.Fatalf("candidates = %d", len(candidates))
 	}
@@ -115,12 +119,12 @@ func TestParseCandidatesObservedAtAndRuneTitle(t *testing.T) {
 		t.Fatalf("invalid observed_at diagnostics lost: %+v", candidates)
 	}
 	chinese := strings.Repeat("记", 50)
-	title, err := ParseCandidates(`{"candidates":[{"content":"` + chinese + `"}]}`)
+	result, err = ParseCandidates(`{"candidates":[{"content":"` + chinese + `"}]}`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len([]rune(title[0].Title)) != 40 {
-		t.Fatalf("title runes = %d", len([]rune(title[0].Title)))
+	if len([]rune(result.Candidates[0].Title)) != 40 {
+		t.Fatalf("title runes = %d", len([]rune(result.Candidates[0].Title)))
 	}
 }
 
@@ -129,12 +133,12 @@ func TestParseCandidatesZeroCandidates(t *testing.T) {
 		`{"candidates":[]}`,
 		"```json\n{\"candidates\": []}\n```",
 	} {
-		candidates, err := ParseCandidates(content)
+		result, err := ParseCandidates(content)
 		if err != nil {
 			t.Fatalf("%q: %v", content, err)
 		}
-		if candidates == nil || len(candidates) != 0 {
-			t.Fatalf("%q candidates = %#v", content, candidates)
+		if result.Candidates == nil || len(result.Candidates) != 0 {
+			t.Fatalf("%q candidates = %#v", content, result.Candidates)
 		}
 	}
 }
@@ -154,6 +158,82 @@ func TestParseCandidatesRejectsOverallUnparseable(t *testing.T) {
 	} {
 		if _, err := ParseCandidates(content); !errors.Is(err, ErrUnparseable) {
 			t.Fatalf("%q error = %v, want ErrUnparseable", content, err)
+		}
+	}
+}
+
+func TestParseCandidatesNormalizesWhitelistedShapes(t *testing.T) {
+	result, err := ParseCandidates(`{"candidates":[{
+		"content":"先检查配置，再运行部署。",
+		"kind":"procedure",
+		"topics":"部署",
+		"fact_group":[{"subject":"用户","predicate":"部署方式","cardinality":"single"}],
+		"procedure":[{"steps":"检查配置","preconditions":["配置存在"],"completion_conditions":"部署完成","failure_branches":"配置缺失时停止"}],
+		"evidence":{"segment_id":"seg-0001","quote":"先检查配置，再运行部署。"}
+	}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Candidates) != 1 {
+		t.Fatalf("candidates = %+v", result.Candidates)
+	}
+	candidate := result.Candidates[0]
+	if len(candidate.Evidence) != 1 || candidate.Evidence[0].SegmentID != "seg-0001" {
+		t.Fatalf("evidence = %+v", candidate.Evidence)
+	}
+	if candidate.FactGroup == nil || candidate.FactGroup.Subject != "用户" || candidate.FactGroup.Cardinality != memory.CardinalitySingle {
+		t.Fatalf("fact group = %+v", candidate.FactGroup)
+	}
+	if candidate.Procedure == nil || len(candidate.Procedure.Steps) != 1 || candidate.Procedure.Steps[0] != "检查配置" ||
+		len(candidate.Procedure.CompletionConditions) != 1 || len(candidate.Procedure.FailureBranches) != 1 {
+		t.Fatalf("procedure = %+v", candidate.Procedure)
+	}
+	if len(candidate.Topics) != 1 || candidate.Topics[0] != "部署" {
+		t.Fatalf("topics = %+v", candidate.Topics)
+	}
+	if len(candidate.ProtocolIssues) != 0 {
+		t.Fatalf("unexpected protocol issues = %+v", candidate.ProtocolIssues)
+	}
+	normalized := map[string]bool{}
+	for _, normalization := range candidate.Normalizations {
+		normalized[normalization.Field+":"+normalization.Code] = true
+	}
+	for _, want := range []string{
+		"evidence:shape_recovered", "topics:shape_recovered", "fact_group:shape_recovered",
+		"procedure:shape_recovered", "procedure.steps:shape_recovered",
+		"procedure.completion_conditions:shape_recovered", "procedure.failure_branches:shape_recovered",
+	} {
+		if !normalized[want] {
+			t.Fatalf("missing normalization %q in %+v", want, candidate.Normalizations)
+		}
+	}
+}
+
+func TestParseCandidatesRejectsUnsafeShapesWithoutSilentDefaults(t *testing.T) {
+	result, err := ParseCandidates(`{"candidates":[{
+		"content":"正文",
+		"kind":7,
+		"fact_group":[{"subject":"a"},{"subject":"b"}],
+		"procedure":{"steps":7},
+		"evidence":"fabricated"
+	}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := result.Candidates[0]
+	if candidate.Kind != "" || candidate.FactGroup != nil || candidate.Procedure != nil || len(candidate.Evidence) != 0 {
+		t.Fatalf("unsafe shapes were accepted: %+v", candidate)
+	}
+	if len(candidate.ProtocolIssues) < 4 {
+		t.Fatalf("protocol issues = %+v", candidate.ProtocolIssues)
+	}
+	found := map[string]bool{}
+	for _, issue := range candidate.ProtocolIssues {
+		found[issue.Field] = true
+	}
+	for _, field := range []string{"kind", "fact_group", "procedure.steps", "evidence"} {
+		if !found[field] {
+			t.Fatalf("missing issue for %s in %+v", field, candidate.ProtocolIssues)
 		}
 	}
 }
@@ -255,5 +335,40 @@ func TestParseAggregateKeepsUsableBodyAndDefaultsMissingTitle(t *testing.T) {
 		if _, err := ParseAggregate(content); err == nil {
 			t.Fatalf("ParseAggregate(%q) succeeded", content)
 		}
+	}
+}
+
+func TestParseAggregateKeepsValidCitationsAndDropsMalformedAuxiliaryItems(t *testing.T) {
+	result, err := ParseAggregate(`{"title":"摘要","content":"正文",
+		"citations":[
+			{"section":"现状","point":"使用 SQLite","memory_id":"m1","version":2},
+			{"point":"","memory_id":"m1","version":2},
+			{"point":"missing version","memory_id":"m2","version":0}
+		],
+		"omitted_inputs":[
+			{"memory_id":"m3","version":1,"reason":"not covered"},
+			{"memory_id":"","version":1}
+		]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Citations) != 1 || result.Citations[0].MemoryID != "m1" ||
+		result.Citations[0].Version != 2 || result.Citations[0].Section != "现状" {
+		t.Fatalf("citations = %+v", result.Citations)
+	}
+	if len(result.OmittedInputs) != 1 || result.OmittedInputs[0].MemoryID != "m3" ||
+		result.OmittedInputs[0].Reason != "not covered" {
+		t.Fatalf("omissions = %+v", result.OmittedInputs)
+	}
+}
+
+func TestParseFactGroupConditionsShape(t *testing.T) {
+	result, err := ParseCandidates(`{"candidates":[{"content":"白天使用中文回答","fact_group":{"subject":"用户","predicate":"回答语言","conditions":"白天","cardinality":"single"}}]}`)
+	if err != nil || len(result.Candidates) != 1 || result.Candidates[0].FactGroup == nil {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	group := result.Candidates[0].FactGroup
+	if len(group.Conditions) != 1 || group.Conditions[0] != "白天" {
+		t.Fatalf("conditions=%+v", group.Conditions)
 	}
 }

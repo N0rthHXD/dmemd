@@ -89,7 +89,7 @@ func (f *searchFixture) revise(t *testing.T, input memory.ReviseInput) memory.Me
 }
 
 func (f *searchFixture) evidence(quote string) source.Evidence {
-	return source.NewEvidence(f.source, "", quote, "test-model", f.clock)
+	return source.NewEvidence(f.source, source.EvidenceReference{Quote: quote}, "test-model", f.clock)
 }
 
 func (f *searchFixture) run(t *testing.T, request retrieval.Request) retrieval.Result {
@@ -669,7 +669,7 @@ func TestRelatedContext(t *testing.T) {
 		Kind: memory.KindFact, Title: "疑问词", Content: "什么",
 	})
 
-	first, err := f.search.RelatedContext(ctx, "回答 记忆", 0)
+	first, err := f.search.RelatedContext(ctx, "", "回答 记忆", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -685,7 +685,7 @@ func TestRelatedContext(t *testing.T) {
 		}
 	}
 
-	limited, err := f.search.RelatedContext(ctx, "回答", 1)
+	limited, err := f.search.RelatedContext(ctx, "", "回答", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -695,7 +695,7 @@ func TestRelatedContext(t *testing.T) {
 	if limited.Memories[0].ID == deleted.ID || limited.Memories[0].ID == unrelated.ID {
 		t.Fatalf("ineligible memory entered limited context: %+v", limited.Memories)
 	}
-	related, err := f.search.RelatedContext(ctx, "回答 什么", 0)
+	related, err := f.search.RelatedContext(ctx, "", "回答 什么", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -705,7 +705,7 @@ func TestRelatedContext(t *testing.T) {
 	if result := f.run(t, retrieval.Request{Query: "回答 什么"}); !slices.Equal(searchIDs(result), searchSet(answer.ID)) {
 		t.Fatalf("public any term selection = %+v", searchIDs(result))
 	}
-	empty, err := f.search.RelatedContext(ctx, "火星殖民地", 0)
+	empty, err := f.search.RelatedContext(ctx, "", "火星殖民地", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

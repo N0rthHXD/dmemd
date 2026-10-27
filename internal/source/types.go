@@ -1,4 +1,5 @@
-// Package source owns accepted submissions and the evidence derived from them.
+// Package source owns accepted submissions, their deterministic model-facing
+// segment views and the evidence derived from them.
 //
 // Content is stored exactly as valid JSON received from a client. A source may
 // be explicitly redacted later; redaction keeps the identifier and status but

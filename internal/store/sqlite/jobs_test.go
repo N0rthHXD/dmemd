@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/N0rthHXD/dmemd/internal/governance/task"
 	"github.com/N0rthHXD/dmemd/internal/ingest"
 )
 
@@ -95,6 +96,19 @@ func TestUpdateJobPersistsTerminalResultAndError(t *testing.T) {
 	claimed.Status = ingest.JobSucceeded
 	claimed.MemoryIDs = []string{"memory-1", "memory-2"}
 	claimed.Error = ""
+	claimed.QualityOutcome = ingest.QualityPartial
+	claimed.ExtractionStats = ingest.ExtractionStats{
+		RawCandidates: 3, ParsedCandidates: 3, NormalizedCandidates: 1, Normalizations: 2,
+		RepairAttempts: 1, RepairedCandidates: 1, RepairSucceeded: 1,
+		ExcludedCandidates: 1, IsolatedCandidates: 1, AcceptedCandidates: 2, MemoryWrites: 2,
+	}
+	claimed.Diagnostics = []ingest.ExtractionDiagnostic{{
+		CandidateID: "c2", Field: "evidence[0]", Code: "evidence_quote_ambiguous",
+		Stage: "validate", Disposition: "isolated",
+	}}
+	claimed.Convergence = []ingest.ConvergenceDiagnostic{{
+		CandidateID: "c1", GroupID: "group-1", Code: ingest.ConvergenceMissingUpdateEvidence,
+	}}
 	claimed.FinishedAt = &base
 	claimed.UpdatedAt = base
 	claimed.NextAttemptAt = nil
@@ -109,6 +123,12 @@ func TestUpdateJobPersistsTerminalResultAndError(t *testing.T) {
 	}
 	if loaded.Status != ingest.JobSucceeded || len(loaded.MemoryIDs) != 2 || loaded.MemoryIDs[1] != "memory-2" {
 		t.Fatalf("loaded job = %+v", loaded)
+	}
+	if loaded.QualityOutcome != ingest.QualityPartial || loaded.ExtractionStats.RepairSucceeded != 1 ||
+		loaded.ExtractionStats.MemoryWrites != 2 || len(loaded.Diagnostics) != 1 ||
+		loaded.Diagnostics[0].CandidateID != "c2" || len(loaded.Convergence) != 1 ||
+		loaded.Convergence[0].Code != ingest.ConvergenceMissingUpdateEvidence {
+		t.Fatalf("loaded quality = %+v", loaded)
 	}
 	if loaded.FinishedAt == nil || !loaded.FinishedAt.Equal(base) {
 		t.Fatalf("finished_at = %v", loaded.FinishedAt)
@@ -313,4 +333,50 @@ func claimJob(store *Store, ctx context.Context, now time.Time) (ingest.Job, boo
 		return err
 	})
 	return claimed, ok, err
+}
+
+func TestGovernanceFairnessBypassesContinuousIngestOnlyWhenOld(t *testing.T) {
+	store := newTestStore(t)
+	sourceID := "source-fairness"
+	seedSource(t, store, sourceID)
+	ctx := context.Background()
+	base := testTime(0)
+	insertTestJob(t, store, ingest.Job{
+		ID: "busy-ingest", SourceID: sourceID, Status: ingest.JobQueued,
+		CreatedAt: base, UpdatedAt: base,
+	})
+	if err := store.ConfigureGovernanceFairness(10 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	upsert := func(target string, createdAt time.Time) {
+		t.Helper()
+		if err := store.WithTx(ctx, func(ctx context.Context, tx *Tx) error {
+			_, _, err := tx.UpsertJob(ctx, task.UpsertInput{
+				Kind: task.KindClassify, TargetKey: target, InputHash: target,
+				NextAttemptAt: &base, Now: createdAt,
+			})
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	upsert("young", base)
+	var claimed task.Job
+	var ok bool
+	if err := store.WithTx(ctx, func(ctx context.Context, tx *Tx) error {
+		var err error
+		claimed, ok, err = tx.ClaimNextGovernanceJob(ctx, base)
+		return err
+	}); err != nil || ok {
+		t.Fatalf("young governance claimed during ingest: job=%+v ok=%v err=%v", claimed, ok, err)
+	}
+
+	upsert("old", base.Add(-time.Minute))
+	if err := store.WithTx(ctx, func(ctx context.Context, tx *Tx) error {
+		var err error
+		claimed, ok, err = tx.ClaimNextGovernanceJob(ctx, base)
+		return err
+	}); err != nil || !ok || claimed.TargetKey != "old" {
+		t.Fatalf("stale governance not claimed: job=%+v ok=%v err=%v", claimed, ok, err)
+	}
 }

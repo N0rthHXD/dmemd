@@ -10,7 +10,22 @@
     "name": "example-model",
     "base_url": "https://model.example.invalid/v1",
     "api_key": "",
-    "timeout": "60s"
+    "timeout": "60s",
+    "extraction": {
+      "name": "example-model",
+      "timeout": "180s",
+      "reasoning_effort": "low"
+    },
+    "decision": {
+      "name": "example-model",
+      "timeout": "300s",
+      "reasoning_effort": "medium"
+    },
+    "governance": {
+      "name": "example-model",
+      "timeout": "60s",
+      "reasoning_effort": "minimal"
+    }
   },
   "embedding": {
     "enabled": false,
@@ -22,23 +37,25 @@
     "min_similarity": 0.35
   },
   "worker": {
-	"process_budget": "600s",
-	"extraction_timeout": "180s",
-	"decision_timeout": "300s",
+    "process_budget": "600s",
+    "extraction_timeout": "180s",
+    "decision_timeout": "300s",
     "workers": 1,
     "max_attempts": 3,
     "retry_delays": [
       "5s",
       "30s",
       "2m"
-    ]
+    ],
+    "extraction_chunk_runes": 12000
   },
   "governance": {
     "enabled": true,
     "debounce": "30s",
     "reconcile_interval": "15m",
     "min_call_interval": "2m",
-    "max_inputs": 64
+    "max_inputs": 64,
+    "max_wait": "30m"
   },
   "log": {
     "level": "info"

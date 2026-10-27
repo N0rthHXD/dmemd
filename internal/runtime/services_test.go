@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/N0rthHXD/dmemd/internal/artifact"
+	"github.com/N0rthHXD/dmemd/internal/embedding"
 	"github.com/N0rthHXD/dmemd/internal/governance"
 	"github.com/N0rthHXD/dmemd/internal/governance/task"
 	"github.com/N0rthHXD/dmemd/internal/ingest"
@@ -221,6 +223,18 @@ func TestEmbeddingAssemblyIndexesAndSearchesSemantically(t *testing.T) {
 	if documents != 1 {
 		t.Fatalf("embedding rows = %d", documents)
 	}
+	status, err := stack.Services.Embedding.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Enabled || !status.Ready || status.ReasonCode != embedding.StatusReady ||
+		status.Documents != 1 || status.CurrentVectors != 1 || !status.ConfigFingerprintMatch {
+		t.Fatalf("embedding status = %+v", status)
+	}
+	probe := stack.Services.Embedding.Probe(context.Background())
+	if !probe.Attempted || !probe.Success || probe.Code != "ok" || probe.Dimensions != 3 {
+		t.Fatalf("embedding probe = %+v", probe)
+	}
 }
 
 func TestProductionExperienceAndSkillAssembly(t *testing.T) {
@@ -280,11 +294,18 @@ func TestProductionExperienceAndSkillAssembly(t *testing.T) {
 	}
 	skillArtifact, err := store.GetArtifactByTarget(context.Background(), artifact.KindSkill,
 		task.SkillKey("project:dmemd", ""))
+	if !errors.Is(err, artifact.ErrNotFound) {
+		t.Fatalf("skill artifact should not exist without a procedure: %+v err=%v", skillArtifact, err)
+	}
+	targets, err := stack.Services.Artifacts.ListTargets(context.Background(), artifact.TargetQuery{
+		ScopeKey: "project:dmemd", Kind: artifact.KindSkill,
+		Status: artifact.TargetStatusNoEligibleInput,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if skillArtifact.State != artifact.StateDisabled || skillArtifact.ReasonCode != "no_procedure_input" {
-		t.Fatalf("skill = %+v", skillArtifact)
+	if len(targets.Items) != 1 || targets.Items[0].ReasonCode != "no_procedure_input" {
+		t.Fatalf("skill target evaluation = %+v", targets)
 	}
 	if fake.RequestCount() != 1 {
 		t.Fatalf("model calls = %d, want 1 (no procedure)", fake.RequestCount())
@@ -307,8 +328,8 @@ func TestProductionExperienceAndSkillAssembly(t *testing.T) {
 		t.Fatal(err)
 	}
 	if skill, err := store.GetArtifactByTarget(context.Background(), artifact.KindSkill,
-		task.SkillKey("project:dmemd", "")); err != nil || skill.State != artifact.StateDisabled {
-		t.Fatalf("skill after retract = %+v err=%v", skill, err)
+		task.SkillKey("project:dmemd", "")); !errors.Is(err, artifact.ErrNotFound) {
+		t.Fatalf("retract created an empty skill artifact: %+v err=%v", skill, err)
 	}
 	for i := 0; i < 10; i++ {
 		processed, err := stack.GovernanceWorker.ProcessOne(context.Background())
@@ -345,8 +366,13 @@ func TestGovernanceDisabledKeepsAtomicServicesAvailable(t *testing.T) {
 	if stack.GovernanceWorker != nil {
 		t.Fatal("governance worker started while disabled")
 	}
-	if stack.Services.Search == nil || stack.Services.Memories == nil || stack.Services.Forget == nil {
-		t.Fatal("atomic or management services missing while governance is disabled")
+	if stack.Services.Search == nil || stack.Services.Memories == nil || stack.Services.Forget == nil ||
+		stack.Services.Embedding == nil {
+		t.Fatal("atomic, management or embedding diagnostics services missing while governance is disabled")
+	}
+	embeddingStatus, err := stack.Services.Embedding.Status(context.Background())
+	if err != nil || embeddingStatus.Enabled || embeddingStatus.ReasonCode != embedding.StatusDisabled {
+		t.Fatalf("disabled embedding status = %+v, %v", embeddingStatus, err)
 	}
 	result, err := stack.Services.Search.Recall(context.Background(), retrieval.RecallRequest{Query: "任意内容"})
 	if err != nil {

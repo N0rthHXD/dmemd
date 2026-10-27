@@ -12,8 +12,9 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/source"
 )
 
-const memoryColumns = `id, kind, phase, durability, title, content, state, assertion_status, version, observed_at,
-	valid_from, valid_to, valid_from_basis, valid_to_basis, fact_group_id,
+const memoryColumns = `id, kind, phase, durability, title, content, state, assertion_status, version, observed_at, observed_at_basis,
+	event_time, event_time_basis, event_time_precision,
+	valid_from, valid_to, valid_from_basis, valid_to_basis, temporal_json, procedure_json, qualifiers_json, fact_group_id,
 	created_at, updated_at, created_by_app, origin_source_id, scope_key, topics_json, raw_topics_json`
 
 var _ memory.Reader = (*Store)(nil)
@@ -53,13 +54,15 @@ func getMemory(ctx context.Context, q interface {
 
 func scanMemory(row rowScanner) (memory.Memory, error) {
 	var item memory.Memory
-	var kind, phase, durability, state, assertion, observedAt, createdAt, updatedAt string
+	var kind, phase, durability, state, assertion, observedAt, observedBasis, createdAt, updatedAt string
+	var eventBasis, eventPrecision string
 	var fromBasis, toBasis string
-	var validFrom, validTo, origin, group sql.NullString
-	var topicsJSON, rawTopicsJSON string
+	var eventTime, validFrom, validTo, origin, group sql.NullString
+	var topicsJSON, rawTopicsJSON, temporalJSON, procedureJSON, qualifiersJSON string
 	if err := row.Scan(
 		&item.ID, &kind, &phase, &durability, &item.Title, &item.Content, &state, &assertion, &item.Version,
-		&observedAt, &validFrom, &validTo, &fromBasis, &toBasis, &group,
+		&observedAt, &observedBasis, &eventTime, &eventBasis, &eventPrecision,
+		&validFrom, &validTo, &fromBasis, &toBasis, &temporalJSON, &procedureJSON, &qualifiersJSON, &group,
 		&createdAt, &updatedAt, &item.CreatedByApp, &origin, &item.ScopeKey, &topicsJSON, &rawTopicsJSON,
 	); err != nil {
 		return memory.Memory{}, err
@@ -69,6 +72,9 @@ func scanMemory(row rowScanner) (memory.Memory, error) {
 	item.Durability = memory.Durability(durability)
 	item.State = memory.State(state)
 	item.AssertionStatus = memory.AssertionStatus(assertion)
+	item.ObservedAtBasis = memory.TemporalBasis(observedBasis)
+	item.EventTimeBasis = memory.TemporalBasis(eventBasis)
+	item.EventTimePrecision = memory.TemporalPrecision(eventPrecision)
 	item.ValidFromBasis = memory.TemporalBasis(fromBasis)
 	item.ValidToBasis = memory.TemporalBasis(toBasis)
 	if origin.Valid {
@@ -84,7 +90,19 @@ func scanMemory(row rowScanner) (memory.Memory, error) {
 	if item.RawTopics, err = decodeTopics(rawTopicsJSON); err != nil {
 		return memory.Memory{}, err
 	}
+	if item.Temporal, err = decodeTemporalDetails(temporalJSON); err != nil {
+		return memory.Memory{}, err
+	}
+	if item.Procedure, err = decodeOptionalProcedure(procedureJSON); err != nil {
+		return memory.Memory{}, err
+	}
+	if item.Qualifiers, err = decodeOptionalQualifiers(qualifiersJSON); err != nil {
+		return memory.Memory{}, err
+	}
 	if item.ObservedAt, err = parseTime(observedAt); err != nil {
+		return memory.Memory{}, err
+	}
+	if item.EventTime, err = nullableTime(eventTime); err != nil {
 		return memory.Memory{}, err
 	}
 	if item.ValidFrom, err = nullableTime(validFrom); err != nil {
@@ -114,11 +132,25 @@ func (t *Tx) InsertMemory(ctx context.Context, item memory.Memory) error {
 	if err != nil {
 		return err
 	}
-	_, err = t.tx.ExecContext(ctx, `INSERT INTO memories(`+memoryColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	temporalJSON, err := encodeTemporalDetails(item.Temporal)
+	if err != nil {
+		return err
+	}
+	procedureJSON, err := encodeOptionalProcedure(item.Procedure)
+	if err != nil {
+		return err
+	}
+	qualifiersJSON, err := encodeOptionalQualifiers(item.Qualifiers)
+	if err != nil {
+		return err
+	}
+	_, err = t.tx.ExecContext(ctx, `INSERT INTO memories(`+memoryColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		item.ID, string(item.Kind), string(item.Phase), string(item.Durability), item.Title, item.Content, string(item.State),
-		string(item.AssertionStatus), item.Version, formatTime(item.ObservedAt),
+		string(item.AssertionStatus), item.Version, formatTime(item.ObservedAt), string(item.ObservedAtBasis),
+		timeValue(item.EventTime), string(item.EventTimeBasis), string(item.EventTimePrecision),
 		timeValue(item.ValidFrom), timeValue(item.ValidTo),
-		string(item.ValidFromBasis), string(item.ValidToBasis), nullableString(item.FactGroupID),
+		string(item.ValidFromBasis), string(item.ValidToBasis), temporalJSON, procedureJSON, qualifiersJSON,
+		nullableString(item.FactGroupID),
 		formatTime(item.CreatedAt), formatTime(item.UpdatedAt),
 		item.CreatedByApp, nullableString(item.OriginSourceID), item.ScopeKey, topics, rawTopics,
 	)
@@ -143,6 +175,18 @@ func (t *Tx) UpdateMemory(ctx context.Context, item memory.Memory) error {
 	if err != nil {
 		return err
 	}
+	temporalJSON, err := encodeTemporalDetails(item.Temporal)
+	if err != nil {
+		return err
+	}
+	procedureJSON, err := encodeOptionalProcedure(item.Procedure)
+	if err != nil {
+		return err
+	}
+	qualifiersJSON, err := encodeOptionalQualifiers(item.Qualifiers)
+	if err != nil {
+		return err
+	}
 	if err := t.tx.QueryRowContext(ctx,
 		`SELECT fact_group_id FROM memories WHERE id = ?`, item.ID).Scan(&previousGroup); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -152,14 +196,19 @@ func (t *Tx) UpdateMemory(ctx context.Context, item memory.Memory) error {
 	}
 	result, err := t.tx.ExecContext(ctx, `UPDATE memories SET
 		kind = ?, phase = ?, durability = ?, title = ?, content = ?, state = ?, assertion_status = ?, version = ?,
-		observed_at = ?, valid_from = ?, valid_to = ?, valid_from_basis = ?, valid_to_basis = ?,
+		observed_at = ?, observed_at_basis = ?, event_time = ?, event_time_basis = ?, event_time_precision = ?,
+		valid_from = ?, valid_to = ?, valid_from_basis = ?, valid_to_basis = ?,
+		temporal_json = ?, procedure_json = ?, qualifiers_json = ?,
 		fact_group_id = ?, created_at = ?, updated_at = ?, created_by_app = ?, origin_source_id = ?,
 		scope_key = ?, topics_json = ?, raw_topics_json = ?
 		WHERE id = ?`,
 		string(item.Kind), string(item.Phase), string(item.Durability), item.Title, item.Content, string(item.State),
-		string(item.AssertionStatus), item.Version, formatTime(item.ObservedAt),
+		string(item.AssertionStatus), item.Version, formatTime(item.ObservedAt), string(item.ObservedAtBasis),
+		timeValue(item.EventTime), string(item.EventTimeBasis), string(item.EventTimePrecision),
 		timeValue(item.ValidFrom), timeValue(item.ValidTo),
-		string(item.ValidFromBasis), string(item.ValidToBasis), nullableString(item.FactGroupID),
+		string(item.ValidFromBasis), string(item.ValidToBasis),
+		temporalJSON, procedureJSON, qualifiersJSON,
+		nullableString(item.FactGroupID),
 		formatTime(item.CreatedAt), formatTime(item.UpdatedAt),
 		item.CreatedByApp, nullableString(item.OriginSourceID), item.ScopeKey, topics, rawTopics, item.ID,
 	)
@@ -198,7 +247,8 @@ func (t *Tx) bumpFactGroupGeneration(ctx context.Context, groupID string, now ti
 }
 
 const revisionColumns = `memory_id, version, operation, reason, kind, title, content, state, phase, durability,
-	assertion_status, observed_at, valid_from, valid_to, valid_from_basis, valid_to_basis,
+	assertion_status, observed_at, observed_at_basis, event_time, event_time_basis, event_time_precision,
+	valid_from, valid_to, valid_from_basis, valid_to_basis, temporal_json, procedure_json, qualifiers_json,
 	fact_group_id, created_at, updated_at, created_by_app, origin_source_id, scope_key, topics_json, raw_topics_json`
 
 // InsertRevision stores one complete historical snapshot. Its revision time is
@@ -213,13 +263,27 @@ func (t *Tx) InsertRevision(ctx context.Context, revision memory.Revision) error
 	if err != nil {
 		return err
 	}
+	temporalJSON, err := encodeTemporalDetails(snapshot.Temporal)
+	if err != nil {
+		return err
+	}
+	procedureJSON, err := encodeOptionalProcedure(snapshot.Procedure)
+	if err != nil {
+		return err
+	}
+	qualifiersJSON, err := encodeOptionalQualifiers(snapshot.Qualifiers)
+	if err != nil {
+		return err
+	}
 	_, err = t.tx.ExecContext(ctx, `INSERT INTO memory_revisions(`+revisionColumns+`) VALUES
-		(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		revision.MemoryID, revision.Version, string(revision.Operation), revision.Reason,
 		string(snapshot.Kind), snapshot.Title, snapshot.Content, string(snapshot.State), string(snapshot.Phase), string(snapshot.Durability),
-		string(snapshot.AssertionStatus), formatTime(snapshot.ObservedAt),
+		string(snapshot.AssertionStatus), formatTime(snapshot.ObservedAt), string(snapshot.ObservedAtBasis),
+		timeValue(snapshot.EventTime), string(snapshot.EventTimeBasis), string(snapshot.EventTimePrecision),
 		timeValue(snapshot.ValidFrom), timeValue(snapshot.ValidTo),
 		string(snapshot.ValidFromBasis), string(snapshot.ValidToBasis),
+		temporalJSON, procedureJSON, qualifiersJSON,
 		nullableString(snapshot.FactGroupID), formatTime(snapshot.CreatedAt),
 		formatTime(snapshot.UpdatedAt), snapshot.CreatedByApp, nullableString(snapshot.OriginSourceID),
 		snapshot.ScopeKey, topics, rawTopics,
@@ -302,12 +366,14 @@ func listRevisions(ctx context.Context, q revisionQueryer, memoryID string, limi
 func scanRevision(row rowScanner) (memory.Revision, error) {
 	var item memory.Revision
 	var operation, kind, state, phase, durability, assertion, fromBasis, toBasis string
-	var observedAt, createdAt, updatedAt, topicsJSON, rawTopicsJSON string
-	var validFrom, validTo, origin, group sql.NullString
+	var observedAt, observedBasis, eventBasis, eventPrecision, createdAt, updatedAt, topicsJSON, rawTopicsJSON string
+	var temporalJSON, procedureJSON, qualifiersJSON string
+	var eventTime, validFrom, validTo, origin, group sql.NullString
 	if err := row.Scan(
 		&item.MemoryID, &item.Version, &operation, &item.Reason,
 		&kind, &item.Snapshot.Title, &item.Snapshot.Content, &state, &phase, &durability, &assertion,
-		&observedAt, &validFrom, &validTo, &fromBasis, &toBasis, &group,
+		&observedAt, &observedBasis, &eventTime, &eventBasis, &eventPrecision,
+		&validFrom, &validTo, &fromBasis, &toBasis, &temporalJSON, &procedureJSON, &qualifiersJSON, &group,
 		&createdAt, &updatedAt, &item.Snapshot.CreatedByApp, &origin,
 		&item.Snapshot.ScopeKey, &topicsJSON, &rawTopicsJSON,
 	); err != nil {
@@ -321,6 +387,9 @@ func scanRevision(row rowScanner) (memory.Revision, error) {
 	item.Snapshot.Durability = memory.Durability(durability)
 	item.Snapshot.State = memory.State(state)
 	item.Snapshot.AssertionStatus = memory.AssertionStatus(assertion)
+	item.Snapshot.ObservedAtBasis = memory.TemporalBasis(observedBasis)
+	item.Snapshot.EventTimeBasis = memory.TemporalBasis(eventBasis)
+	item.Snapshot.EventTimePrecision = memory.TemporalPrecision(eventPrecision)
 	item.Snapshot.ValidFromBasis = memory.TemporalBasis(fromBasis)
 	item.Snapshot.ValidToBasis = memory.TemporalBasis(toBasis)
 	if origin.Valid {
@@ -336,7 +405,19 @@ func scanRevision(row rowScanner) (memory.Revision, error) {
 	if item.Snapshot.RawTopics, err = decodeTopics(rawTopicsJSON); err != nil {
 		return memory.Revision{}, err
 	}
+	if item.Snapshot.Temporal, err = decodeTemporalDetails(temporalJSON); err != nil {
+		return memory.Revision{}, err
+	}
+	if item.Snapshot.Procedure, err = decodeOptionalProcedure(procedureJSON); err != nil {
+		return memory.Revision{}, err
+	}
+	if item.Snapshot.Qualifiers, err = decodeOptionalQualifiers(qualifiersJSON); err != nil {
+		return memory.Revision{}, err
+	}
 	if item.Snapshot.ObservedAt, err = parseTime(observedAt); err != nil {
+		return memory.Revision{}, err
+	}
+	if item.Snapshot.EventTime, err = nullableTime(eventTime); err != nil {
 		return memory.Revision{}, err
 	}
 	if item.Snapshot.ValidFrom, err = nullableTime(validFrom); err != nil {
@@ -699,6 +780,22 @@ func normalizedStoredMemory(item memory.Memory) memory.Memory {
 		item.ValidToBasis = memory.BasisUnknown
 	} else if item.ValidToBasis == "" || item.ValidToBasis == memory.BasisUnknown {
 		item.ValidToBasis = memory.BasisInferred
+	}
+	switch item.ObservedAtBasis {
+	case memory.BasisExplicit, memory.BasisInferred, memory.BasisRecorded:
+	default:
+		item.ObservedAtBasis = memory.BasisUnknown
+	}
+	if item.EventTime == nil {
+		item.EventTimeBasis = memory.BasisUnknown
+		item.EventTimePrecision = memory.PrecisionUnknown
+	} else {
+		if item.EventTimeBasis == "" || item.EventTimeBasis == memory.BasisUnknown {
+			item.EventTimeBasis = memory.BasisInferred
+		}
+		if item.EventTimePrecision == "" {
+			item.EventTimePrecision = memory.PrecisionUnknown
+		}
 	}
 	return item
 }

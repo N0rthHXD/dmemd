@@ -22,10 +22,11 @@ func TestMigrationsCreateCoreAndSearchSchema(t *testing.T) {
 		"memories", "memory_revisions", "sources", "evidence", "revision_evidence",
 		"ingest_jobs", "schema_migrations", "memory_search_docs", "memory_fts",
 		"memory_embeddings", "memory_embedding_jobs", "memory_index_meta",
-		"memory_fact_groups", "memory_relations", "memory_conflicts",
+		"memory_fact_groups", "memory_relations", "memory_evolution_events", "memory_conflicts",
 		"memory_conflict_members", "memory_conflict_events", "memory_catalog",
 		"schema_meta", "governance_jobs", "artifacts", "artifact_revisions",
 		"artifact_memory_dependencies", "artifact_search_docs", "artifact_fts",
+		"derived_target_evaluations",
 	} {
 		var name string
 		err := store.writer.QueryRowContext(ctx,

@@ -36,9 +36,56 @@ type Draft struct {
 	Counterexamples  []string `json:"counterexamples"`
 }
 
-// Usable reports whether the draft contains guidance that can be saved.
+// Usable reports whether the draft contains actionable guidance that can be
+// saved. A bare paragraph is not enough: at least one step or a structured
+// heading/list is required so a name-only or description-only response cannot
+// become an active skill.
 func (d Draft) Usable() bool {
-	return strings.TrimSpace(d.Content) != "" || len(clean(d.Steps)) > 0
+	if len(clean(d.Steps)) > 0 {
+		return true
+	}
+	return hasGuidanceStructure(d.Content)
+}
+
+// Issue returns a fixed content-check code for a draft that is structurally
+// usable but still not eligible for activation. It never echoes model text.
+func (d Draft) Issue() string {
+	if len(clean(d.Steps)) > 0 {
+		return ""
+	}
+	content := strings.TrimSpace(d.Content)
+	if content == "" {
+		return "empty_content"
+	}
+	if !hasGuidanceStructure(content) {
+		return "missing_steps"
+	}
+	return ""
+}
+
+func hasGuidanceStructure(content string) bool {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return false
+	}
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#") || strings.HasPrefix(line, "- ") ||
+			strings.HasPrefix(line, "* ") {
+			return true
+		}
+		digits := 0
+		for digits < len(line) && line[digits] >= '0' && line[digits] <= '9' {
+			digits++
+		}
+		if digits > 0 && digits < len(line) && (line[digits] == '.' || line[digits] == ')') {
+			return true
+		}
+	}
+	return false
 }
 
 // Content is one rendered SKILL.md plus the exact version metadata. State is

@@ -295,3 +295,41 @@ func writeConfigFile(t *testing.T, path, body string) {
 		t.Fatal(err)
 	}
 }
+
+func TestModelTaskOverridesAndRuntimeBounds(t *testing.T) {
+	base := DefaultConfig()
+	base.DataDir = t.TempDir()
+	base.Database.Path = filepath.Join(base.DataDir, "dmemd.db")
+	cfg := base
+	cfg.Model.Extraction = &ModelTaskConfig{Name: "fast-extract", Timeout: Duration(30 * time.Second), ReasoningEffort: "low"}
+	cfg.Model.Decision = &ModelTaskConfig{Name: "deep-decision", Timeout: Duration(90 * time.Second), ReasoningEffort: "high"}
+	cfg.Model.Governance = &ModelTaskConfig{Name: "governance", ReasoningEffort: "minimal"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Model.TaskName(cfg.Model.Extraction); got != "fast-extract" {
+		t.Fatalf("extraction task name = %q", got)
+	}
+	if got := cfg.Model.TaskTimeout(cfg.Model.Decision, time.Minute); got != 90*time.Second {
+		t.Fatalf("decision task timeout = %v", got)
+	}
+	if got := cfg.Model.TaskReasoning(cfg.Model.Governance); got != "minimal" {
+		t.Fatalf("governance reasoning = %q", got)
+	}
+	if base.Worker.ExtractionChunkRunes != DefaultExtractionChunkRunes {
+		t.Fatalf("chunk runes = %d", base.Worker.ExtractionChunkRunes)
+	}
+	if base.Governance.MaxWait.Std() != DefaultGovernanceMaxWait {
+		t.Fatalf("governance max wait = %v", base.Governance.MaxWait)
+	}
+	invalid := base
+	invalid.Model.Extraction = &ModelTaskConfig{ReasoningEffort: "unbounded"}
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("invalid reasoning effort accepted")
+	}
+	invalid = base
+	invalid.Worker.ExtractionChunkRunes = -1
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("negative chunk size accepted")
+	}
+}

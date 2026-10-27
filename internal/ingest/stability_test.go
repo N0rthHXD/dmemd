@@ -52,7 +52,7 @@ func TestDecisionLocalRepair(t *testing.T) {
 				repaired: DecisionResult{Decisions: []Decision{tc.fixed}},
 			}
 			p := &Processor{decider: stub, decisionTimeout: time.Second, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-			decisions, err := p.decideValidated(context.Background(), request)
+			decisions, _, err := p.decideValidated(context.Background(), request)
 			if (err != nil) != tc.wantError || stub.calls != tc.wantCalls {
 				t.Fatalf("decisions=%+v err=%v calls=%d", decisions, err, stub.calls)
 			}
@@ -82,13 +82,13 @@ func TestDecisionLocalRepair(t *testing.T) {
 func TestDecisionMalformedResponseGetsOneRepair(t *testing.T) {
 	stub := &repairDecisionStub{err: &ProviderError{Operation: "protocol"}, repaired: DecisionResult{Decisions: []Decision{{CandidateID: "c1", Action: ActionSkip}}}}
 	p := &Processor{decider: stub, decisionTimeout: time.Second, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	_, err := p.decideValidated(context.Background(), DecisionRequest{Candidates: []Candidate{{CandidateID: "c1"}}})
+	_, _, err := p.decideValidated(context.Background(), DecisionRequest{Candidates: []Candidate{{CandidateID: "c1"}}})
 	if err != nil || stub.calls != 1 {
 		t.Fatalf("err=%v calls=%d", err, stub.calls)
 	}
 	stub.err = &ProviderError{Operation: "credentials"}
 	stub.calls = 0
-	_, err = p.decideValidated(context.Background(), DecisionRequest{Candidates: []Candidate{{CandidateID: "c1"}}})
+	_, _, err = p.decideValidated(context.Background(), DecisionRequest{Candidates: []Candidate{{CandidateID: "c1"}}})
 	if err == nil || stub.calls != 0 {
 		t.Fatalf("credentials retried: err=%v calls=%d", err, stub.calls)
 	}

@@ -148,6 +148,7 @@ const ReconcileKey = "global"
 
 const (
 	aggregateSummaryPrefix = "summary:"
+	scopeSummaryPrefix     = "scope_summary:"
 	aggregateProfilePrefix = "profile:"
 	skillPrefix            = "skill:"
 	experiencePrefix       = "experience:"
@@ -183,6 +184,25 @@ func AggregateKey(scopeKey, topic string) string {
 // ProfileKey is the canonical target key for one scope profile.
 func ProfileKey(scopeKey string) string {
 	return aggregateProfilePrefix + encodeKeyPart(scopeKey)
+}
+
+// ScopeSummaryKey is the canonical target key for one scope overview. The
+// overview is selected by scope and derived type only; it never requires a
+// model-supplied project name or topic.
+func ScopeSummaryKey(scopeKey string) string {
+	return scopeSummaryPrefix + encodeKeyPart(scopeKey)
+}
+
+// ParseScopeSummaryKey extracts the scope from a canonical scope overview key.
+func ParseScopeSummaryKey(targetKey string) (scopeKey string, ok bool) {
+	if !strings.HasPrefix(targetKey, scopeSummaryPrefix) {
+		return "", false
+	}
+	scopeKey, err := decodeKeyPart(strings.TrimPrefix(targetKey, scopeSummaryPrefix))
+	if err != nil || scopeKey == "" {
+		return "", false
+	}
+	return scopeKey, true
 }
 
 // ParseAggregateKey extracts the scope and topic from a canonical summary key.

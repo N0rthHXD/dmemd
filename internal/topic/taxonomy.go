@@ -54,12 +54,24 @@ func normalize(value string) string {
 
 // Canonical includes every ancestor without imposing a cap that could drop a
 // parent. Limits belong on raw labels, before hierarchy expansion.
+//
+// A slash-separated path is expanded only when every segment is already a known
+// alias or canonical concept. Unknown paths remain one scope-local extension
+// label; they are never mechanically split into a guessed hierarchy.
 func Canonical(values []string) []string {
 	seen := map[string]bool{}
 	for _, value := range values {
 		value = normalize(value)
 		if name, ok := aliases[value]; ok {
 			value = name
+		} else if expanded, ok := canonicalPath(value); ok {
+			for _, name := range expanded {
+				for name != "" && !seen[name] {
+					seen[name] = true
+					name = parents[name]
+				}
+			}
+			continue
 		}
 		for value != "" && !seen[value] {
 			seen[value] = true
@@ -72,6 +84,23 @@ func Canonical(values []string) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+func canonicalPath(value string) ([]string, bool) {
+	if !strings.Contains(value, "/") {
+		return nil, false
+	}
+	parts := strings.Split(value, "/")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = normalize(part)
+		name, ok := aliases[part]
+		if !ok || name == "" {
+			return nil, false
+		}
+		result = append(result, name)
+	}
+	return result, true
 }
 
 // Raw keeps original spelling and language for audit, trimming only whitespace

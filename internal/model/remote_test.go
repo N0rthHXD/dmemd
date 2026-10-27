@@ -159,7 +159,9 @@ func TestProviderMapsRequestsAndResponses(t *testing.T) {
 		t.Fatal(err)
 	}
 	if payload.CurrentSource.ID != "source-1" || payload.CurrentSource.AppID != "app-1" ||
-		payload.CurrentSource.ExternalID != "external-1" || string(payload.CurrentSource.Content) != string(src.Content) {
+		payload.CurrentSource.ExternalID != "external-1" || payload.CurrentSource.ProtocolVersion != extractionProtocolVersion ||
+		len(payload.CurrentSource.Segments) != 1 || payload.CurrentSource.Segments[0].Text != "默认中文" ||
+		payload.CurrentSource.Segments[0].MessageID != "m1" || payload.CurrentSource.Segments[0].Role != "" {
 		t.Fatalf("current source payload = %+v", payload.CurrentSource)
 	}
 	if strings.Contains(body.Messages[1].Content, "secret-key") {
@@ -277,5 +279,36 @@ func TestProviderConnectionFailureIsRetryable(t *testing.T) {
 	var providerErr *ingest.ProviderError
 	if !errors.As(err, &providerErr) || !providerErr.Retryable {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestProviderTaskProfileAndTokenUsage(t *testing.T) {
+	fake := testutil.NewFakeModel(t)
+	fake.EnqueueRaw(http.StatusOK, `{"choices":[{"message":{"content":"{\"candidates\":[]}"}}],"usage":{"prompt_tokens":13,"completion_tokens":7}}`)
+	provider, err := NewProvider(Config{
+		Name: "base-model", BaseURL: fake.URL(), Timeout: time.Second,
+		ExtractionModel: "extract-model", ExtractionReasoning: "low",
+		DecisionModel: "decision-model", DecisionReasoning: "high",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := provider.Extract(context.Background(), ingest.ExtractionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Usage.Calls != 1 || result.Usage.InputTokens != 13 || result.Usage.OutputTokens != 7 {
+		t.Fatalf("usage = %+v", result.Usage)
+	}
+	requests := fake.Requests()
+	if len(requests) != 1 {
+		t.Fatalf("requests = %d", len(requests))
+	}
+	var request chatRequest
+	if err := json.Unmarshal(requests[0].Body, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.Model != "extract-model" || request.ReasoningEffort != "low" {
+		t.Fatalf("extraction profile = %+v", request)
 	}
 }

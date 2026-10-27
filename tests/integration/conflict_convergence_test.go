@@ -13,11 +13,14 @@ import (
 )
 
 func TestExplicitUpdatesConvergeWithoutDecisionModel(t *testing.T) {
-	for _, test := range []struct{ name, predicate, old, updated, quote string }{
-		{"dog food", "狗粮品牌", "狗粮使用A牌", "狗粮使用B牌", "狗粮换成B牌"},
-		{"glucose", "空腹血糖", "空腹血糖6.5", "空腹血糖5.6", "更正空腹血糖为5.6"},
-		{"rent", "租房预算", "租房预算3000元", "租房预算4000元", "租房预算改为4000元"},
-		{"CKA reschedule", "CKA考试日期", "CKA考试安排在下周", "CKA考试安排在下个月", "CKA考试改期到下个月"},
+	for _, test := range []struct {
+		name, predicate, old, updated, quote string
+		wantConflict                         bool
+	}{
+		{"dog food", "狗粮品牌", "狗粮使用A牌", "狗粮使用B牌", "狗粮换成B牌", false},
+		{"glucose", "空腹血糖", "空腹血糖6.5", "空腹血糖5.6", "更正空腹血糖为5.6", true},
+		{"rent", "租房预算", "租房预算3000元", "租房预算4000元", "租房预算改为4000元", false},
+		{"CKA reschedule", "CKA考试日期", "CKA考试安排在下周", "CKA考试安排在下个月", "CKA考试改期到下个月", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newIngestStack(t)
@@ -36,33 +39,53 @@ func TestExplicitUpdatesConvergeWithoutDecisionModel(t *testing.T) {
 			second := f.submit(t, string(data))
 			f.processOne(t)
 			job := f.job(t, second.JobID)
-			if job.Status != ingest.JobSucceeded || len(job.PendingMemoryIDs) != 0 || len(job.MemoryIDs) != 2 || len(job.ConflictIDs) != 1 {
+			wantConflicts := 0
+			if test.wantConflict {
+				wantConflicts = 1
+			}
+			if job.Status != ingest.JobSucceeded || len(job.PendingMemoryIDs) != 0 || len(job.MemoryIDs) != 2 || len(job.ConflictIDs) != wantConflicts {
 				t.Fatalf("convergence job=%+v", job)
 			}
 			if len(f.fake.Requests()) != 2 {
 				t.Fatalf("explicit update called decision model: %d requests", len(f.fake.Requests()))
 			}
 			old, err := f.memories.Get(ctx, oldID)
-			if err != nil || old.AssertionStatus != memory.AssertionRejected {
+			if err != nil {
 				t.Fatalf("old=%+v err=%v", old, err)
 			}
-			conflict, err := f.memories.GetConflict(ctx, job.ConflictIDs[0])
-			if err != nil || conflict.Status != memory.ConflictResolved || len(conflict.Members) != 2 {
-				t.Fatalf("conflict=%+v err=%v", conflict, err)
+			if test.name == "glucose" || test.name == "CKA reschedule" {
+				if old.AssertionStatus != memory.AssertionRejected {
+					t.Fatalf("correction/reschedule must reject the old assertion: %+v", old)
+				}
+				if test.name == "glucose" && old.ValidTo != nil {
+					t.Fatalf("correction invented a validity boundary: %+v", old)
+				}
+			} else if old.AssertionStatus != memory.AssertionAccepted || old.ValidTo == nil {
+				t.Fatalf("state change must keep a closed historical segment: %+v", old)
 			}
-			resolved := 0
-			for _, event := range conflict.Events {
-				if event.Action == "resolved" {
-					resolved++
+			if test.wantConflict {
+				conflict, err := f.memories.GetConflict(ctx, job.ConflictIDs[0])
+				if err != nil || conflict.Status != memory.ConflictResolved || len(conflict.Members) != 2 {
+					t.Fatalf("conflict=%+v err=%v", conflict, err)
+				}
+				resolved := 0
+				for _, event := range conflict.Events {
+					if event.Action == "resolved" {
+						resolved++
+					}
+				}
+				if resolved != 1 {
+					t.Fatalf("resolved audit count=%d", resolved)
+				}
+				for _, member := range conflict.Members {
+					if member.MemoryID == oldID && (member.Version != 1 || member.CurrentVersion != 2) {
+						t.Fatalf("detection version overwritten: %+v", member)
+					}
 				}
 			}
-			if resolved != 1 {
-				t.Fatalf("resolved audit count=%d", resolved)
-			}
-			for _, member := range conflict.Members {
-				if member.MemoryID == oldID && (member.Version != 1 || member.CurrentVersion != 2) {
-					t.Fatalf("detection version overwritten: %+v", member)
-				}
+			evolution, err := f.memories.Evolution(ctx, newIDFor(job.MemoryIDs, oldID), 10)
+			if err != nil || len(evolution) != 1 || evolution[0].ToMemoryID != oldID {
+				t.Fatalf("evolution audit=%+v err=%v", evolution, err)
 			}
 			result, err := f.search.Search(ctx, retrieval.Request{Query: test.predicate})
 			if err != nil || len(result.Items) != 1 || result.Items[0].Memory.Content != test.updated || len(result.Conflicts) != 0 {
@@ -167,14 +190,25 @@ func TestExplicitUpdateResolvesExistingPendingSet(t *testing.T) {
 	if err != nil || conflict.Status != memory.ConflictResolved || len(conflict.Members) != 3 {
 		t.Fatalf("resolved=%+v err=%v", conflict, err)
 	}
-	for _, id := range []string{oldID, previous.PendingMemoryIDs[0]} {
-		item, err := f.memories.Get(ctx, id)
-		if err != nil || item.AssertionStatus != memory.AssertionRejected {
-			t.Fatalf("opponent=%+v err=%v", item, err)
-		}
+	item, err := f.memories.Get(ctx, oldID)
+	if err != nil || item.AssertionStatus != memory.AssertionAccepted || item.ValidTo == nil {
+		t.Fatalf("changed predecessor=%+v err=%v", item, err)
+	}
+	pending, err := f.memories.Get(ctx, previous.PendingMemoryIDs[0])
+	if err != nil || pending.AssertionStatus != memory.AssertionRejected {
+		t.Fatalf("pending opponent=%+v err=%v", pending, err)
 	}
 	result, err := f.search.Search(ctx, retrieval.Request{Query: "狗粮"})
 	if err != nil || len(result.Items) != 1 || result.Items[0].Memory.Content != "狗粮使用C牌" || len(result.Warnings) != 0 {
 		t.Fatalf("recall=%+v err=%v", result, err)
 	}
+}
+
+func newIDFor(ids []string, oldID string) string {
+	for _, id := range ids {
+		if id != oldID {
+			return id
+		}
+	}
+	return ""
 }

@@ -132,15 +132,26 @@ func NewSkillService(artifacts *artifact.Service) *skill.Service {
 // NewModelProvider maps the local model configuration to the first remote
 // protocol adapter. It performs no network request.
 func NewModelProvider(cfg ModelConfig, workers ...WorkerConfig) (*model.Provider, error) {
-	remote := model.Config{
-		Name:    cfg.Name,
-		BaseURL: cfg.BaseURL,
-		APIKey:  cfg.APIKey,
-		Timeout: cfg.Timeout.Std(),
-	}
+	extractionTimeout := cfg.Timeout.Std()
+	decisionTimeout := cfg.Timeout.Std()
 	if len(workers) > 0 {
-		remote.ExtractionTimeout = workers[0].ExtractionTimeout.Std()
-		remote.DecisionTimeout = workers[0].DecisionTimeout.Std()
+		extractionTimeout = workers[0].ExtractionTimeout.Std()
+		decisionTimeout = workers[0].DecisionTimeout.Std()
+	}
+	remote := model.Config{
+		Name:                cfg.Name,
+		BaseURL:             cfg.BaseURL,
+		APIKey:              cfg.APIKey,
+		Timeout:             cfg.Timeout.Std(),
+		ExtractionTimeout:   cfg.TaskTimeout(cfg.Extraction, extractionTimeout),
+		DecisionTimeout:     cfg.TaskTimeout(cfg.Decision, decisionTimeout),
+		GovernanceTimeout:   cfg.TaskTimeout(cfg.Governance, cfg.Timeout.Std()),
+		ExtractionModel:     cfg.TaskName(cfg.Extraction),
+		DecisionModel:       cfg.TaskName(cfg.Decision),
+		GovernanceModel:     cfg.TaskName(cfg.Governance),
+		ExtractionReasoning: cfg.TaskReasoning(cfg.Extraction),
+		DecisionReasoning:   cfg.TaskReasoning(cfg.Decision),
+		GovernanceReasoning: cfg.TaskReasoning(cfg.Governance),
 	}
 	return model.NewProvider(remote)
 }
@@ -309,6 +320,11 @@ func NewStack(cfg Config, logger *slog.Logger, store *sqlite.Store) (*Stack, err
 	} else {
 		store.ConfigureEmbedding(false, "")
 	}
+	var embeddingProbe embedding.ProbeEncoder
+	if encoder != nil {
+		embeddingProbe = encoder
+	}
+	embeddingDiagnostics := embedding.NewDiagnosticService(store, embeddingProbe, cfg.Embedding.toEmbedding())
 
 	artifacts := NewArtifactService(store, cfg.Governance.Debounce.Std(), logger)
 	memories := NewMemoryService(store,
@@ -328,19 +344,41 @@ func NewStack(cfg Config, logger *slog.Logger, store *sqlite.Store) (*Stack, err
 		if err != nil {
 			return nil, err
 		}
+		remote.SetObserver(func(metrics model.CallMetrics) {
+			level := slog.LevelDebug
+			switch metrics.Operation {
+			case "classification", "aggregate", "experience", "skill":
+				level = slog.LevelInfo
+			}
+			logger.Log(context.Background(), level, "model call metrics",
+				"stage", metrics.Operation,
+				"model", metrics.Model,
+				"duration_ms", metrics.Duration.Milliseconds(),
+				"calls", metrics.Usage.Calls,
+				"input_tokens", metrics.Usage.InputTokens,
+				"output_tokens", metrics.Usage.OutputTokens,
+			)
+		})
 		provider = remote
 	}
 
-	processor := NewIngestProcessor(store, memories, search, provider, cfg.Model.Name, logger,
-		ingest.WithProcessingBudget(cfg.Worker.ProcessBudget.Std(), cfg.Worker.ExtractionTimeout.Std(), cfg.Worker.DecisionTimeout.Std()))
+	extractionTimeout := cfg.Model.TaskTimeout(cfg.Model.Extraction, cfg.Worker.ExtractionTimeout.Std())
+	decisionTimeout := cfg.Model.TaskTimeout(cfg.Model.Decision, cfg.Worker.DecisionTimeout.Std())
+	processor := NewIngestProcessor(store, memories, search, provider, cfg.Model.TaskName(cfg.Model.Extraction), logger,
+		ingest.WithProcessingBudget(cfg.Worker.ProcessBudget.Std(), extractionTimeout, decisionTimeout),
+		ingest.WithExtractionChunkRunes(cfg.Worker.ExtractionChunkRunes),
+		ingest.WithDecisionModelName(cfg.Model.TaskName(cfg.Model.Decision)))
 	worker, err := NewIngestWorker(store, processor, cfg.Worker, logger)
 	if err != nil {
+		return nil, err
+	}
+	if err := store.ConfigureGovernanceFairness(cfg.Governance.MaxWait.Std()); err != nil {
 		return nil, err
 	}
 	var governanceWorker *governance.Worker
 	if cfg.Governance.IsEnabled() {
 		governanceWorker = NewGovernanceWorker(store, memories, artifacts, provider,
-			cfg.Governance, cfg.Model.Timeout.Std(), logger)
+			cfg.Governance, cfg.Model.TaskTimeout(cfg.Model.Governance, cfg.Model.Timeout.Std()), logger)
 	} else {
 		logger.Info("governance worker disabled by configuration")
 	}
@@ -350,11 +388,17 @@ func NewStack(cfg Config, logger *slog.Logger, store *sqlite.Store) (*Stack, err
 		// A migrated database or a changed document contract requires one full
 		// local rebuild before vector generation. Otherwise the worker's
 		// startup scan only enqueues missing or profile-mismatched vectors.
+		registration, err := store.RegisterEmbeddingConfiguration(
+			context.Background(), encoder.ProfileID(), embedding.IndexVersion, time.Now().UTC(),
+		)
+		if err != nil {
+			return nil, err
+		}
 		needsRebuild, err := needsIndexRebuild(context.Background(), store)
 		if err != nil {
 			return nil, err
 		}
-		if needsRebuild {
+		if needsRebuild || registration.IndexVersionChanged {
 			if _, err := search.RebuildIndex(context.Background()); err != nil {
 				return nil, fmt.Errorf("启用语义检索时重建索引: %w", err)
 			}
@@ -375,6 +419,7 @@ func NewStack(cfg Config, logger *slog.Logger, store *sqlite.Store) (*Stack, err
 		Experiences: NewExperienceService(store),
 		Skills:      NewSkillService(artifacts),
 		Forget:      NewForgetService(store, memories),
+		Embedding:   embeddingDiagnostics,
 	}
 	app, err := New(cfg, logger, store, WithServices(services), WithWorker(worker),
 		WithGovernanceWorker(governanceWorker), WithEmbeddingWorker(embeddingWorker))

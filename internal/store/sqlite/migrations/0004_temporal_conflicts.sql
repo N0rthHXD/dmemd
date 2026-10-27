@@ -3,19 +3,28 @@
 -- assertion columns; this migration adds the graph and audit structures.
 
 CREATE TABLE memory_fact_groups (
-    id          TEXT NOT NULL PRIMARY KEY,
-    subject     TEXT NOT NULL DEFAULT '',
-    predicate   TEXT NOT NULL DEFAULT '',
-    scope       TEXT NOT NULL DEFAULT '',
-    cardinality TEXT NOT NULL DEFAULT 'unknown'
-                CHECK (cardinality IN ('single', 'multiple', 'unknown')),
-    generation  INTEGER NOT NULL DEFAULT 1 CHECK (generation >= 1),
-    created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL
+    id             TEXT NOT NULL PRIMARY KEY,
+    scope_key      TEXT NOT NULL DEFAULT '',
+    subject        TEXT NOT NULL DEFAULT '',
+    predicate      TEXT NOT NULL DEFAULT '',
+    scope          TEXT NOT NULL DEFAULT '',
+    conditions_json TEXT NOT NULL DEFAULT '[]',
+    subject_key    TEXT NOT NULL DEFAULT '',
+    predicate_key  TEXT NOT NULL DEFAULT '',
+    scene_key      TEXT NOT NULL DEFAULT '',
+    conditions_key TEXT NOT NULL DEFAULT '',
+    cardinality    TEXT NOT NULL DEFAULT 'unknown'
+                   CHECK (cardinality IN ('single', 'multiple', 'unknown')),
+    generation     INTEGER NOT NULL DEFAULT 1 CHECK (generation >= 1),
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
 );
 
-CREATE INDEX idx_fact_groups_identity
-    ON memory_fact_groups(subject, predicate, scope);
+CREATE INDEX idx_fact_groups_subject_predicate
+    ON memory_fact_groups(scope_key, subject_key, predicate_key);
+
+CREATE UNIQUE INDEX idx_fact_groups_identity
+    ON memory_fact_groups(scope_key, subject_key, predicate_key, scene_key, conditions_key);
 
 CREATE TABLE memory_relations (
     id             TEXT NOT NULL PRIMARY KEY,
@@ -34,6 +43,27 @@ CREATE TABLE memory_relations (
 );
 
 CREATE INDEX idx_relations_to ON memory_relations(to_memory_id);
+
+CREATE TABLE memory_evolution_events (
+    id             TEXT NOT NULL PRIMARY KEY,
+    fact_group_id  TEXT REFERENCES memory_fact_groups(id) ON DELETE SET NULL,
+    from_memory_id TEXT NOT NULL,
+    from_version   INTEGER NOT NULL CHECK (from_version >= 1),
+    to_memory_id   TEXT NOT NULL,
+    to_version     INTEGER NOT NULL CHECK (to_version >= 1),
+    action         TEXT NOT NULL CHECK (action IN ('change', 'correction', 'reschedule', 'cancel', 'supersede')),
+    reason_code    TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL,
+    FOREIGN KEY (from_memory_id, from_version)
+        REFERENCES memory_revisions(memory_id, version) ON DELETE CASCADE,
+    FOREIGN KEY (to_memory_id, to_version)
+        REFERENCES memory_revisions(memory_id, version) ON DELETE CASCADE,
+    CHECK (from_memory_id <> to_memory_id)
+);
+
+CREATE INDEX idx_evolution_group ON memory_evolution_events(fact_group_id, created_at, id);
+CREATE INDEX idx_evolution_from ON memory_evolution_events(from_memory_id);
+CREATE INDEX idx_evolution_to ON memory_evolution_events(to_memory_id);
 
 CREATE TABLE memory_conflicts (
     id            TEXT NOT NULL PRIMARY KEY,

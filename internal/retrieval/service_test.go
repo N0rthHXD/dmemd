@@ -2,11 +2,13 @@ package retrieval
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/N0rthHXD/dmemd/internal/artifact"
+	"github.com/N0rthHXD/dmemd/internal/embedding"
 	"github.com/N0rthHXD/dmemd/internal/memory"
 )
 
@@ -47,6 +49,18 @@ type queryRecordingEncoder struct {
 	queries []string
 }
 
+type failingEncoder struct {
+	err        error
+	dimensions int
+}
+
+func (e failingEncoder) ProfileID() string      { return "profile" }
+func (e failingEncoder) Dimensions() int        { return e.dimensions }
+func (e failingEncoder) MinSimilarity() float64 { return 0 }
+func (e failingEncoder) EmbedQuery(context.Context, string) ([]float32, error) {
+	return nil, e.err
+}
+
 func (e *queryRecordingEncoder) EmbedQuery(_ context.Context, text string) ([]float32, error) {
 	e.queries = append(e.queries, text)
 	// A dimension mismatch exercises hybrid fallback without a vector backend.
@@ -72,7 +86,7 @@ func TestEveryTextQueryUsesSameFilteredAnyTerms(t *testing.T) {
 			if len(backend.queries) != 2 {
 				t.Fatalf("atomic and conflict query count = %d, want 2", len(backend.queries))
 			}
-			if _, err := service.RelatedContext(ctx, query, 10); err != nil {
+			if _, err := service.RelatedContext(ctx, "", query, 10); err != nil {
 				t.Fatal(err)
 			}
 			if len(backend.queries) != 3 {
@@ -117,7 +131,7 @@ func TestQueriesWithoutEffectiveTermsNeverAccessBackends(t *testing.T) {
 					len(recall.Memories)+len(recall.Summaries)+len(recall.Experiences)+len(recall.Skills)+len(recall.Conflicts)+len(recall.Warnings) != 0 {
 					t.Fatalf("empty recall = %+v, %v", recall, err)
 				}
-				related, err := service.RelatedContext(ctx, query, 10)
+				related, err := service.RelatedContext(ctx, "", query, 10)
 				if err != nil || related.Memories == nil || len(related.Memories) != 0 || !related.Complete {
 					t.Fatalf("empty related context = %+v, %v", related, err)
 				}
@@ -129,10 +143,35 @@ func TestQueriesWithoutEffectiveTermsNeverAccessBackends(t *testing.T) {
 func TestRelatedQueryFiltersBeforeApplyingTermLimit(t *testing.T) {
 	backend := &queryRecordingBackend{}
 	service := NewService(backend, nil)
-	if _, err := service.RelatedContext(context.Background(), englishQueryStopwords+" 过敏 "+strings.Repeat("过敏 ", 40), 10); err != nil {
+	if _, err := service.RelatedContext(context.Background(), "", englishQueryStopwords+" 过敏 "+strings.Repeat("过敏 ", 40), 10); err != nil {
 		t.Fatal(err)
 	}
 	if len(backend.queries) != 1 || !reflect.DeepEqual(GroupTexts(backend.queries[0].Groups), []string{"过敏"}) {
 		t.Fatalf("stopwords or duplicates exhausted the term budget: %+v", backend.queries)
+	}
+}
+
+func TestSemanticDegradationCodesAreStable(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "rate limited", err: embedding.NewProviderError("http_429", true, nil), want: WarningSemanticRateLimited},
+		{name: "configuration", err: embedding.NewProviderError("unauthorized", false, nil), want: WarningSemanticConfigError},
+		{name: "invalid response", err: embedding.NewProviderError("invalid_vector", false, nil), want: WarningSemanticInvalidResponse},
+		{name: "unavailable", err: errors.New("provider down"), want: WarningSemanticUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			backend := &queryRecordingBackend{}
+			service := NewService(backend, nil, WithSemantic(failingEncoder{err: test.err, dimensions: 3}))
+			result, err := service.Search(context.Background(), Request{Query: "回答", Mode: ModeHybrid})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Retrieval.Mode != ModeKeyword || len(result.Warnings) != 1 || result.Warnings[0] != test.want {
+				t.Fatalf("degradation = %+v", result)
+			}
+		})
 	}
 }

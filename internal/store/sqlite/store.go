@@ -22,6 +22,7 @@ import (
 const (
 	defaultBusyTimeout        = 5 * time.Second
 	defaultMaxReadConnections = 4
+	defaultGovernanceMaxWait  = 30 * time.Minute
 )
 
 // Config is the physical database configuration derived from runtime.Config.
@@ -47,6 +48,34 @@ type Store struct {
 	embeddingMu        sync.RWMutex
 	embeddingEnabled   bool
 	embeddingProfileID string
+
+	governanceMu      sync.RWMutex
+	governanceMaxWait time.Duration
+}
+
+// ConfigureGovernanceFairness sets the maximum age a due governance target may
+// reach while continuous ingest keeps the worker busy. A non-positive value
+// restores the default.
+func (s *Store) ConfigureGovernanceFairness(maxWait time.Duration) error {
+	if s == nil {
+		return errors.New("database store is nil")
+	}
+	if maxWait <= 0 {
+		maxWait = defaultGovernanceMaxWait
+	}
+	s.governanceMu.Lock()
+	s.governanceMaxWait = maxWait
+	s.governanceMu.Unlock()
+	return nil
+}
+
+func (s *Store) governanceFairnessLimit() time.Duration {
+	s.governanceMu.RLock()
+	defer s.governanceMu.RUnlock()
+	if s.governanceMaxWait <= 0 {
+		return defaultGovernanceMaxWait
+	}
+	return s.governanceMaxWait
 }
 
 // ConfigureEmbedding installs the single Embedding profile used by the memory

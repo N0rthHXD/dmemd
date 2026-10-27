@@ -137,11 +137,21 @@ func (s *Service) Relations(ctx context.Context, id string) ([]Relation, error) 
 	return s.reader.ListRelationsForMemory(ctx, id)
 }
 
+// Evolution returns the deterministic supersession/correction audit chain that
+// touches one memory.
+func (s *Service) Evolution(ctx context.Context, id string, limit int) ([]EvolutionEvent, error) {
+	if _, err := s.reader.GetMemory(ctx, id); err != nil {
+		return nil, err
+	}
+	return s.reader.ListEvolutionEvents(ctx, id, limit)
+}
+
 // Create writes the first snapshot, revision, complete evidence set and search
 // document in the caller's transaction.
 func (s *Service) Create(ctx context.Context, tx Tx, input CreateInput) (Memory, error) {
 	now := s.timestamp()
 	observedAt := normalizeObservedAt(input.ObservedAt, now)
+	observedBasis := normalizeObservedBasis(input.ObservedAtBasis, input.ObservedAt, now)
 	kind := input.Kind
 	if kind == "" {
 		kind = KindFact
@@ -154,29 +164,40 @@ func (s *Service) Create(ctx context.Context, tx Tx, input CreateInput) (Memory,
 	if err != nil {
 		return Memory{}, err
 	}
+	eventTime, eventBasis, eventPrecision, err := NormalizeEventTime(input.EventTime, input.EventTimeBasis, input.EventTimePrecision)
+	if err != nil {
+		return Memory{}, err
+	}
 	item := Memory{
-		ID:              idgen.NewUUID(),
-		Kind:            kind,
-		Phase:           normalizePhase(input.Phase),
-		Durability:      normalizeDurability(input.Durability),
-		Title:           input.Title,
-		Content:         input.Content,
-		State:           StateActive,
-		AssertionStatus: status,
-		Version:         1,
-		ObservedAt:      observedAt,
-		ValidFrom:       timeRange.From,
-		ValidTo:         timeRange.To,
-		ValidFromBasis:  timeRange.FromBasis,
-		ValidToBasis:    timeRange.ToBasis,
-		FactGroupID:     input.FactGroupID,
-		CreatedAt:       now,
-		UpdatedAt:       now,
-		CreatedByApp:    input.CreatedByApp,
-		OriginSourceID:  input.OriginSourceID,
-		ScopeKey:        NormalizeScopeKey(input.ScopeKey),
-		Topics:          CanonicalTopics(rawTopics(input.Topics)),
-		RawTopics:       rawTopics(input.Topics),
+		ID:                 idgen.NewUUID(),
+		Kind:               kind,
+		Phase:              normalizePhase(input.Phase),
+		Durability:         normalizeDurability(input.Durability),
+		Title:              input.Title,
+		Content:            input.Content,
+		State:              StateActive,
+		AssertionStatus:    status,
+		Version:            1,
+		ObservedAt:         observedAt,
+		ObservedAtBasis:    observedBasis,
+		EventTime:          eventTime,
+		EventTimeBasis:     eventBasis,
+		EventTimePrecision: eventPrecision,
+		ValidFrom:          timeRange.From,
+		ValidTo:            timeRange.To,
+		ValidFromBasis:     timeRange.FromBasis,
+		ValidToBasis:       timeRange.ToBasis,
+		Temporal:           input.Temporal,
+		FactGroupID:        input.FactGroupID,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+		CreatedByApp:       input.CreatedByApp,
+		OriginSourceID:     input.OriginSourceID,
+		ScopeKey:           NormalizeScopeKey(input.ScopeKey),
+		Procedure:          input.Procedure,
+		Qualifiers:         input.Qualifiers,
+		Topics:             CanonicalTopics(rawTopics(input.Topics)),
+		RawTopics:          rawTopics(input.Topics),
 	}
 	if err := validateFactGroupReference(ctx, tx, item.FactGroupID); err != nil {
 		return Memory{}, err
@@ -238,6 +259,11 @@ func (s *Service) Revise(ctx context.Context, tx Tx, input ReviseInput) (Memory,
 		candidate.Title = input.Title
 		candidate.Content = input.Content
 		candidate.ObservedAt = normalizeObservedAt(input.ObservedAt, current.ObservedAt)
+		if input.ObservedAt.IsZero() && input.ObservedAtBasis == "" {
+			candidate.ObservedAtBasis = current.ObservedAtBasis
+		} else {
+			candidate.ObservedAtBasis = normalizeObservedBasis(input.ObservedAtBasis, input.ObservedAt, current.ObservedAt)
+		}
 		if input.ValidFrom != nil || input.ValidTo != nil || input.ValidFromBasis != "" ||
 			input.ValidToBasis != "" {
 			timeRange, err := NormalizeTimeRange(input.ValidFrom, input.ValidTo, input.ValidFromBasis, input.ValidToBasis)
@@ -248,6 +274,18 @@ func (s *Service) Revise(ctx context.Context, tx Tx, input ReviseInput) (Memory,
 			candidate.ValidTo = timeRange.To
 			candidate.ValidFromBasis = timeRange.FromBasis
 			candidate.ValidToBasis = timeRange.ToBasis
+		}
+		if input.ReplaceStructured {
+			eventTime, eventBasis, eventPrecision, err := NormalizeEventTime(input.EventTime, input.EventTimeBasis, input.EventTimePrecision)
+			if err != nil {
+				return Memory{}, err
+			}
+			candidate.EventTime = eventTime
+			candidate.EventTimeBasis = eventBasis
+			candidate.EventTimePrecision = eventPrecision
+			candidate.Temporal = input.Temporal
+			candidate.Procedure = input.Procedure
+			candidate.Qualifiers = input.Qualifiers
 		}
 		if input.AssertionStatus != "" {
 			status, err := NormalizeAssertionStatus(input.AssertionStatus)
@@ -289,6 +327,13 @@ func (s *Service) Revise(ctx context.Context, tx Tx, input ReviseInput) (Memory,
 		candidate.Title == current.Title &&
 		candidate.Content == current.Content &&
 		candidate.ObservedAt.Equal(current.ObservedAt) &&
+		candidate.ObservedAtBasis == current.ObservedAtBasis &&
+		sameTimePointer(candidate.EventTime, current.EventTime) &&
+		candidate.EventTimeBasis == current.EventTimeBasis &&
+		candidate.EventTimePrecision == current.EventTimePrecision &&
+		sameTemporalDetails(candidate.Temporal, current.Temporal) &&
+		sameProcedure(candidate.Procedure, current.Procedure) &&
+		sameQualifiers(candidate.Qualifiers, current.Qualifiers) &&
 		sameTimeRange(candidate, current) &&
 		candidate.AssertionStatus == current.AssertionStatus &&
 		candidate.FactGroupID == current.FactGroupID &&
@@ -426,6 +471,19 @@ func (s *Service) enqueueClassify(ctx context.Context, tx Tx, item Memory) error
 }
 
 func classifyInputHash(item Memory) string {
+	procedure := ""
+	if item.Procedure != nil {
+		procedure = item.Procedure.Goal + "\x00" + strings.Join(item.Procedure.Steps, "\x00") +
+			"\x00" + strings.Join(item.Procedure.Preconditions, "\x00") +
+			"\x00" + strings.Join(item.Procedure.CompletionConditions, "\x00") +
+			"\x00" + strings.Join(item.Procedure.FailureBranches, "\x00")
+	}
+	qualifiers := ""
+	if item.Qualifiers != nil {
+		qualifiers = string(item.Qualifiers.Polarity) + "\x00" + string(item.Qualifiers.Certainty) +
+			"\x00" + item.Qualifiers.Attribution + "\x00" + strings.Join(item.Qualifiers.Entities, "\x00") +
+			"\x00" + strings.Join(item.Qualifiers.Conditions, "\x00")
+	}
 	parts := []string{
 		string(item.Kind),
 		item.Title,
@@ -434,6 +492,8 @@ func classifyInputHash(item Memory) string {
 		strings.Join(NormalizeTopics(item.Topics), "\x00"),
 		strings.Join(item.RawTopics, "\x00"),
 		item.OriginSourceID,
+		procedure,
+		qualifiers,
 	}
 	return task.InputHash(parts...)
 }
@@ -483,6 +543,90 @@ func normalizeObservedAt(value, fallback time.Time) time.Time {
 		value = fallback
 	}
 	return value.UTC()
+}
+
+// normalizeObservedBasis marks the receipt-time fallback explicitly. A missing
+// basis for a supplied value is inferred, never silently "explicit".
+func normalizeObservedBasis(basis TemporalBasis, value, fallback time.Time) TemporalBasis {
+	if value.IsZero() {
+		return BasisRecorded
+	}
+	switch basis {
+	case BasisExplicit, BasisInferred:
+		return basis
+	case BasisRecorded:
+		return BasisRecorded
+	default:
+		return BasisInferred
+	}
+}
+
+func sameTimePointer(left, right *time.Time) bool {
+	return equalTimePointer(left, right)
+}
+
+func sameTemporalDetails(left, right TemporalDetails) bool {
+	return left == right
+}
+
+func sameProcedure(left, right *Procedure) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	if left.Goal != right.Goal || len(left.Steps) != len(right.Steps) ||
+		len(left.Preconditions) != len(right.Preconditions) ||
+		len(left.CompletionConditions) != len(right.CompletionConditions) ||
+		len(left.FailureBranches) != len(right.FailureBranches) {
+		return false
+	}
+	for index := range left.Steps {
+		if left.Steps[index] != right.Steps[index] {
+			return false
+		}
+	}
+	for index := range left.Preconditions {
+		if left.Preconditions[index] != right.Preconditions[index] {
+			return false
+		}
+	}
+	for index := range left.CompletionConditions {
+		if left.CompletionConditions[index] != right.CompletionConditions[index] {
+			return false
+		}
+	}
+	for index := range left.FailureBranches {
+		if left.FailureBranches[index] != right.FailureBranches[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func sameQualifiers(left, right *AssertionQualifiers) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	if left.Polarity != right.Polarity || left.Certainty != right.Certainty ||
+		left.Attribution != right.Attribution || !sameStrings(left.Entities, right.Entities) ||
+		!sameStrings(left.Conditions, right.Conditions) {
+		return false
+	}
+	if left.Quantity == nil || right.Quantity == nil {
+		return left.Quantity == nil && right.Quantity == nil
+	}
+	return left.Quantity.Value == right.Quantity.Value && left.Quantity.Unit == right.Quantity.Unit
+}
+
+func sameStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func sameTimeRange(left, right Memory) bool {

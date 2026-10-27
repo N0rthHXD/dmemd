@@ -28,6 +28,122 @@ var (
 	ErrRestoreConflict = errors.New("memory restore would create a conflict")
 )
 
+// NormalizeTemporalBasis validates a time basis. Recorded is only meaningful for
+// observed_at and must never be supplied for a validity or event boundary.
+func NormalizeTemporalBasis(value TemporalBasis, allowRecorded bool) (TemporalBasis, error) {
+	switch value {
+	case "":
+		return BasisUnknown, nil
+	case BasisExplicit, BasisInferred:
+		return value, nil
+	case BasisUnknown:
+		return value, nil
+	case BasisRecorded:
+		if allowRecorded {
+			return value, nil
+		}
+		return "", fmt.Errorf("memory: recorded basis is not valid for this boundary")
+	default:
+		return "", fmt.Errorf("memory: invalid temporal basis %q", value)
+	}
+}
+
+// NormalizeEventTime validates the optional event occurrence instant and basis.
+func NormalizeEventTime(value *time.Time, basis TemporalBasis, precision TemporalPrecision) (*time.Time, TemporalBasis, TemporalPrecision, error) {
+	normalized, err := NormalizeTemporalBasis(basis, false)
+	if err != nil {
+		return nil, "", "", err
+	}
+	value = utcPointer(value)
+	if value == nil {
+		return nil, BasisUnknown, PrecisionUnknown, nil
+	}
+	if normalized == BasisUnknown {
+		return nil, "", "", fmt.Errorf("%w: event_time 非空但依据为 unknown", ErrInvalidTemporal)
+	}
+	if precision == "" || precision == PrecisionUnknown {
+		precision = PrecisionSecond
+	}
+	if !validPrecision(precision) || precision == PrecisionYear || precision == PrecisionMonth {
+		return nil, "", "", fmt.Errorf("%w: event_time 精度 %q 无法定位到可查询时刻", ErrInvalidTemporal, precision)
+	}
+	return value, normalized, precision, nil
+}
+
+func validPrecision(value TemporalPrecision) bool {
+	switch value {
+	case PrecisionUnknown, PrecisionYear, PrecisionMonth, PrecisionDay, PrecisionHour, PrecisionMinute, PrecisionSecond:
+		return true
+	default:
+		return false
+	}
+}
+
+// EventContains reports whether at falls inside the source-stated resolution of
+// one event instant. A day-precision event covers its whole local day treated as
+// a UTC-normalized calendar day; a second-precision event covers one second.
+func EventContains(item Memory, at time.Time) bool {
+	if item.EventTime == nil {
+		return false
+	}
+	start, end := TemporalWindow(*item.EventTime, item.EventTimePrecision)
+	return !at.Before(start) && at.Before(end)
+}
+
+// TemporalWindow returns the half-open interval represented by one normalized
+// temporal value at the stated precision.
+func TemporalWindow(value time.Time, precision TemporalPrecision) (time.Time, time.Time) {
+	value = value.UTC()
+	switch precision {
+	case PrecisionYear:
+		return time.Date(value.Year(), 1, 1, 0, 0, 0, 0, time.UTC), time.Date(value.Year()+1, 1, 1, 0, 0, 0, 0, time.UTC)
+	case PrecisionMonth:
+		return time.Date(value.Year(), value.Month(), 1, 0, 0, 0, 0, time.UTC), time.Date(value.Year(), value.Month()+1, 1, 0, 0, 0, 0, time.UTC)
+	case PrecisionDay:
+		return time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, time.UTC), time.Date(value.Year(), value.Month(), value.Day()+1, 0, 0, 0, 0, time.UTC)
+	case PrecisionHour:
+		return value.Truncate(time.Hour), value.Truncate(time.Hour).Add(time.Hour)
+	case PrecisionMinute:
+		return value.Truncate(time.Minute), value.Truncate(time.Minute).Add(time.Minute)
+	default:
+		return value.Truncate(time.Second), value.Truncate(time.Second).Add(time.Second)
+	}
+}
+
+// ClassifyRetention assigns a stable, service-owned retention reason from the
+// assertion's semantic shape. It is deliberately conservative: low-value
+// detection never removes a candidate, and explicit exclusions are handled by
+// the ingest hard boundary instead. Temporary context remains retained but is
+// visible for maintenance and display decisions.
+func ClassifyRetention(kind Kind, phase Phase, durability Durability, eventTime, validTo *time.Time, now time.Time) RetentionReason {
+	switch kind {
+	case KindPreference, KindProcedure:
+		return RetentionExplicitIntent
+	}
+	switch phase {
+	case PhaseScheduled, PhaseInProgress, PhasePostponed:
+		return RetentionFutureApplicability
+	}
+	if !now.IsZero() {
+		if eventTime != nil && eventTime.After(now) {
+			return RetentionFutureApplicability
+		}
+		if validTo != nil && validTo.After(now) {
+			return RetentionFutureApplicability
+		}
+	}
+	switch durability {
+	case DurabilityTemporary:
+		return RetentionTemporaryContext
+	case DurabilityDurable:
+		return RetentionDurableKnowledge
+	}
+	if kind == KindEvent {
+		return RetentionEpisodicEvent
+	}
+	return RetentionUnclassified
+}
+
 // NormalizeAssertionStatus returns accepted for an empty status.
 func NormalizeAssertionStatus(status AssertionStatus) (AssertionStatus, error) {
 	switch status {

@@ -35,14 +35,25 @@ func (s *Service) Recall(ctx context.Context, request RecallRequest) (RecallResu
 	filtersInput.ScopeKey = scopeKey
 	filters, filtersOK := sanitizeFilters(filtersInput)
 	if !filtersOK {
-		return emptyRecallResult(), nil
+		result := emptyRecallResult()
+		if request.Explain {
+			result.Diagnostics = &SearchDiagnostics{}
+		}
+		return result, nil
 	}
-	if filters.AsOf == nil {
+	if filters.AsOf == nil && filters.EventAt == nil {
 		asOf := time.Now().UTC()
 		filters.AsOf = &asOf
 	}
+	derivedAsOf := time.Now().UTC()
+	if filters.AsOf != nil {
+		derivedAsOf = *filters.AsOf
+	}
 
 	result := emptyRecallResult()
+	if request.Explain {
+		result.Diagnostics = &SearchDiagnostics{}
+	}
 	if layers[LayerAtomic] {
 		searchRequest := Request{
 			Query: request.Query,
@@ -51,6 +62,7 @@ func (s *Service) Recall(ctx context.Context, request RecallRequest) (RecallResu
 				Kinds:         filters.Kinds,
 				States:        filters.States,
 				AsOf:          filters.AsOf,
+				EventAt:       filters.EventAt,
 				ScopeKey:      filters.ScopeKey,
 				CreatedByApp:  filters.CreatedByApp,
 				UpdatedAfter:  filters.UpdatedAfter,
@@ -66,6 +78,7 @@ func (s *Service) Recall(ctx context.Context, request RecallRequest) (RecallResu
 		result.Memories = atomic.Items
 		result.Conflicts = atomic.Conflicts
 		result.Warnings = append(result.Warnings, atomic.Warnings...)
+		result.Diagnostics = atomic.Diagnostics
 	}
 
 	derivedRequested := layers[LayerSummary] || layers[LayerExperience] || layers[LayerSkill]
@@ -87,7 +100,7 @@ func (s *Service) Recall(ctx context.Context, request RecallRequest) (RecallResu
 				kinds []artifact.Kind
 				into  *[]artifact.SearchHit
 			}{
-				{layer: LayerSummary, kinds: []artifact.Kind{artifact.KindTopicSummary, artifact.KindProfile}, into: &result.Summaries},
+				{layer: LayerSummary, kinds: []artifact.Kind{artifact.KindTopicSummary, artifact.KindScopeSummary, artifact.KindProfile}, into: &result.Summaries},
 				{layer: LayerExperience, kinds: []artifact.Kind{artifact.KindExperienceCase}, into: &result.Experiences},
 				{layer: LayerSkill, kinds: []artifact.Kind{artifact.KindSkill}, into: &result.Skills},
 			}
@@ -99,7 +112,7 @@ func (s *Service) Recall(ctx context.Context, request RecallRequest) (RecallResu
 					Expression: expression,
 					ScopeKey:   scopeKey,
 					Kinds:      entry.kinds,
-					AsOf:       *filters.AsOf,
+					AsOf:       derivedAsOf,
 					Limit:      topK,
 				})
 				if err != nil {
@@ -112,7 +125,18 @@ func (s *Service) Recall(ctx context.Context, request RecallRequest) (RecallResu
 		}
 	}
 
-	applyContextBudget(&result, request.MaxContextTokens)
+	applyContextBudget(&result, request.MaxContextTokens, result.Diagnostics)
+	if result.Diagnostics != nil {
+		result.Diagnostics.ReturnedItems = len(result.Memories)
+	}
+	if explicitAsOf {
+		for _, item := range result.Memories {
+			if item.Memory.TemporalStatus() == memory.TemporalUnknown {
+				result.Warnings = append(result.Warnings, WarningTemporalUncertain)
+				break
+			}
+		}
+	}
 	result.Warnings = dedupeWarnings(result.Warnings)
 	if result.Warnings == nil {
 		result.Warnings = []string{}
@@ -155,18 +179,18 @@ func emptyRecallResult() RecallResult {
 // applyContextBudget uses a deliberately conservative rune-based estimate.
 // Callers can only see that truncation happened; the service never claims
 // tokenizer-exact accounting for an arbitrary model.
-func applyContextBudget(result *RecallResult, maxTokens int) {
+func applyContextBudget(result *RecallResult, maxTokens int, diagnostics *SearchDiagnostics) {
 	if maxTokens <= 0 {
 		return
 	}
 	remaining := maxTokens
-	truncated := false
+	truncated := 0
 	fit := func(count int, estimate func(int) int) int {
 		kept := 0
 		for kept < count {
 			cost := estimate(kept)
 			if cost > remaining {
-				truncated = true
+				truncated += count - kept
 				break
 			}
 			remaining -= cost
@@ -187,8 +211,11 @@ func applyContextBudget(result *RecallResult, maxTokens int) {
 	result.Skills = result.Skills[:fit(len(result.Skills), func(i int) int {
 		return estimateTokens(result.Skills[i].Revision.Title) + estimateTokens(result.Skills[i].Revision.Content)
 	})]
-	if truncated {
+	if truncated > 0 {
 		result.Warnings = append(result.Warnings, WarningContextBudgetTruncated)
+		if diagnostics != nil {
+			diagnostics.ContextBudgetTruncated += truncated
+		}
 	}
 }
 

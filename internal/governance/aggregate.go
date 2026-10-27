@@ -143,6 +143,8 @@ func (h *AggregateHandler) Process(ctx context.Context, job task.Job) error {
 	now := h.now().UTC()
 	var inputs []artifact.MemoryInput
 	var truncated bool
+	var eligible int
+	var currentSignature string
 	err = h.store.WithTx(ctx, func(ctx context.Context, tx Tx) error {
 		if err := checkedJob(ctx, tx, job); err != nil {
 			return err
@@ -152,10 +154,11 @@ func (h *AggregateHandler) Process(ctx context.Context, job task.Job) error {
 		if listErr != nil {
 			return listErr
 		}
-		if target.Kind == artifact.KindTopicSummary {
-			return h.diagnoseSkillInput(ctx, tx, target, now)
+		if eligible, listErr = tx.CountAggregationInputs(ctx, target, now); listErr != nil {
+			return listErr
 		}
-		return nil
+		currentSignature, listErr = currentAggregateSignature(ctx, tx, target)
+		return listErr
 	})
 	if err != nil {
 		return err
@@ -166,6 +169,13 @@ func (h *AggregateHandler) Process(ctx context.Context, job task.Job) error {
 	truncated = truncated || truncatedInputs
 	if len(bounded) == 0 || h.provider == nil {
 		return h.disable(ctx, job, target)
+	}
+	inputSignature := aggregateInputSignature(inputs)
+	if currentSignature != "" && currentSignature == inputSignature {
+		// A new generation task can be registered after a membership or
+		// evidence change without changing the selected input set. Reuse the
+		// active revision instead of paying for an identical model call.
+		return h.finishWithoutWork(ctx, job)
 	}
 	if h.limiter != nil {
 		allowed, next := h.limiter.Acquire(now)
@@ -185,6 +195,7 @@ func (h *AggregateHandler) Process(ctx context.Context, job task.Job) error {
 		ScopeKey:  target.ScopeKey,
 		Topic:     target.Topic,
 		Truncated: truncated,
+		Eligible:  eligible,
 		Memories:  bounded,
 	})
 	cancel()
@@ -198,22 +209,13 @@ func (h *AggregateHandler) Process(ctx context.Context, job task.Job) error {
 		return &ingest.ProviderError{Operation: "protocol", Retryable: false, Err: ingest.ErrProtocol}
 	}
 	result.Content = truncateRunes(result.Content, maxAggregateContentRunes)
-	coverage := "full"
-	for _, input := range bounded {
-		if !strings.Contains(result.Content, strings.TrimSpace(input.Content)) {
-			coverage = "subset"
-		}
+	if target.Kind == artifact.KindProfile && len(profileTransientMarkers(result.Content)) > 0 {
+		return h.failOutput(ctx, job, target, "invalid_profile_content")
 	}
-	if truncated {
-		coverage = "subset"
-	}
-	if target.Kind == artifact.KindTopicSummary && coverage == "subset" {
-		result.Content = "覆盖说明：本摘要仅覆盖所列来源的部分内容，不代表该主题的全部原子事实。\n\n" + result.Content
-	}
-	payload, err := json.Marshal(map[string]any{"coverage": coverage, "truncated": truncated})
-	if err != nil {
-		return err
-	}
+	acceptedCitations, rejectedCitations := validateCitations(result.Citations, bounded)
+	acceptedOmissions, rejectedOmissions := validateOmittedInputs(result.OmittedInputs, bounded)
+	payload := aggregatePayload(target, result, inputs, bounded, eligible, selectionTruncated,
+		truncatedInputs, acceptedCitations, rejectedCitations, acceptedOmissions, rejectedOmissions, inputSignature)
 	reasonCode := ""
 	if truncated {
 		reasonCode = "input_truncated"
@@ -227,7 +229,11 @@ func (h *AggregateHandler) Process(ctx context.Context, job task.Job) error {
 		if err != nil {
 			return err
 		}
-		if !sameMemoryInputs(inputs, current) || currentTruncated != selectionTruncated {
+		currentEligible, err := tx.CountAggregationInputs(ctx, target, h.now().UTC())
+		if err != nil {
+			return err
+		}
+		if !sameMemoryInputs(inputs, current) || currentTruncated != selectionTruncated || currentEligible != eligible {
 			return &ingest.ProviderError{Operation: "response", Retryable: true,
 				Err: errors.New("aggregate input changed during generation")}
 		}
@@ -242,9 +248,9 @@ func (h *AggregateHandler) Process(ctx context.Context, job task.Job) error {
 			ReasonCode:      reasonCode,
 			Truncated:       truncated,
 			Generator:       h.generator,
-			ProtocolVersion: "aggregate-v2",
+			ProtocolVersion: "aggregate-v3",
 			RunID:           job.ID + ":" + fmt.Sprint(job.Revision),
-			Memories:        bounded,
+			Memories:        inputs,
 		}); err != nil {
 			return err
 		}
@@ -259,30 +265,210 @@ func (h *AggregateHandler) Process(ctx context.Context, job task.Job) error {
 	})
 }
 
+func (h *AggregateHandler) finishWithoutWork(ctx context.Context, job task.Job) error {
+	return h.store.WithTx(ctx, func(ctx context.Context, tx Tx) error {
+		if err := checkedJob(ctx, tx, job); err != nil {
+			return err
+		}
+		ok, err := tx.FinishJob(ctx, job.ID, job.Revision, h.now().UTC())
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return ErrRevisionChanged
+		}
+		return nil
+	})
+}
+
+// failOutput records a fixed output-quality failure and completes the task. It
+// is used for deterministic content checks that a retry cannot repair.
+func (h *AggregateHandler) failOutput(ctx context.Context, job task.Job, target artifact.Target, reason string) error {
+	return h.store.WithTx(ctx, func(ctx context.Context, tx Tx) error {
+		if err := checkedJob(ctx, tx, job); err != nil {
+			return err
+		}
+		if _, err := h.artifacts.DisableWithReason(ctx, tx, target, reason); err != nil {
+			return err
+		}
+		if err := tx.UpsertTargetEvaluation(ctx, artifact.TargetEvaluation{
+			Kind: target.Kind, TargetKey: target.TargetKey(), ScopeKey: target.ScopeKey,
+			Topic: target.Topic, Status: artifact.TargetStatusInvalidOutput,
+			ReasonCode: reason, EvaluatedAt: h.now().UTC(),
+		}); err != nil {
+			return err
+		}
+		ok, err := tx.FinishJob(ctx, job.ID, job.Revision, h.now().UTC())
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return ErrRevisionChanged
+		}
+		return nil
+	})
+}
+
+func currentAggregateSignature(ctx context.Context, tx Tx, target artifact.Target) (string, error) {
+	item, err := tx.GetArtifactByTarget(ctx, target.Kind, target.TargetKey())
+	if errors.Is(err, artifact.ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if item.State != artifact.StateActive || item.CurrentVersion <= 0 {
+		return "", nil
+	}
+	revision, err := tx.GetArtifactRevision(ctx, item.ID, item.CurrentVersion)
+	if err != nil {
+		return "", err
+	}
+	var payload struct {
+		InputSignature string `json:"input_signature"`
+	}
+	if err := json.Unmarshal(revision.Payload, &payload); err != nil {
+		return "", nil
+	}
+	return payload.InputSignature, nil
+}
+
+func aggregateInputSignature(inputs []artifact.MemoryInput) string {
+	parts := make([]string, 0, len(inputs)*2+1)
+	for _, input := range inputs {
+		parts = append(parts, input.ID, fmt.Sprint(input.Version))
+	}
+	return task.InputHash(parts...)
+}
+
+func validateCitations(citations []artifact.Citation, allowed []artifact.MemoryInput) ([]artifact.Citation, int) {
+	versions := make(map[string]int, len(allowed))
+	for _, input := range allowed {
+		versions[input.ID] = input.Version
+	}
+	accepted := make([]artifact.Citation, 0, len(citations))
+	rejected := 0
+	for _, citation := range citations {
+		version, ok := versions[citation.MemoryID]
+		if !ok || citation.Version != version || strings.TrimSpace(citation.Point) == "" {
+			rejected++
+			continue
+		}
+		citation.Point = truncateRunes(strings.TrimSpace(citation.Point), 500)
+		citation.Section = truncateRunes(strings.TrimSpace(citation.Section), defaultAggregateTitleRunes)
+		accepted = append(accepted, citation)
+	}
+	return accepted, rejected
+}
+
+func validateOmittedInputs(omitted []artifact.OmittedInput, allowed []artifact.MemoryInput) ([]artifact.OmittedInput, int) {
+	versions := make(map[string]int, len(allowed))
+	for _, input := range allowed {
+		versions[input.ID] = input.Version
+	}
+	accepted := make([]artifact.OmittedInput, 0, len(omitted))
+	rejected := 0
+	for _, item := range omitted {
+		version, ok := versions[item.MemoryID]
+		if !ok || item.Version != version {
+			rejected++
+			continue
+		}
+		item.Reason = truncateRunes(strings.TrimSpace(item.Reason), defaultAggregateTitleRunes)
+		accepted = append(accepted, item)
+	}
+	return accepted, rejected
+}
+
+func aggregatePayload(target artifact.Target, result artifact.AggregateResult,
+	selected, included []artifact.MemoryInput, eligible int, selectionTruncated, budgetTruncated bool,
+	citations []artifact.Citation, rejectedCitations int, omitted []artifact.OmittedInput,
+	rejectedOmissions int, inputSignature string) json.RawMessage {
+	omittedCount := eligible - len(included)
+	if omittedCount < 0 {
+		omittedCount = 0
+	}
+	reasons := []string{}
+	if selectionTruncated || len(selected) < eligible {
+		reasons = append(reasons, "input_limit")
+	}
+	if budgetTruncated {
+		reasons = append(reasons, "content_budget")
+	}
+	citationIntegrity := "unknown"
+	if len(result.Citations) > 0 {
+		switch {
+		case rejectedCitations == 0:
+			citationIntegrity = "valid"
+		case len(citations) > 0:
+			citationIntegrity = "partial"
+		default:
+			citationIntegrity = "invalid"
+		}
+	}
+	coverage := "unknown"
+	if omittedCount > 0 || selectionTruncated || budgetTruncated || len(omitted) > 0 {
+		coverage = "subset"
+	}
+	payload := map[string]any{
+		"input_selection": map[string]any{
+			"eligible":  eligible,
+			"selected":  len(selected),
+			"included":  len(included),
+			"omitted":   omittedCount,
+			"truncated": selectionTruncated || budgetTruncated || omittedCount > 0,
+			"reasons":   reasons,
+		},
+		"citation_integrity": citationIntegrity,
+		"rejected_citations": rejectedCitations,
+		"rejected_omissions": rejectedOmissions,
+		"semantic_coverage":  coverage,
+		"citations":          citations,
+		"omitted_inputs":     omitted,
+		"input_signature":    inputSignature,
+		"truncated":          omittedCount > 0 || selectionTruncated || budgetTruncated,
+	}
+	if target.Kind == artifact.KindProfile {
+		markers := profileTransientMarkers(result.Content)
+		check := "passed"
+		if citationIntegrity == "invalid" {
+			check = "invalid_citation"
+		} else if len(markers) > 0 {
+			check = "transient_markers_present"
+		}
+		payload["profile_check"] = map[string]any{
+			"status":             check,
+			"input_scope":        "durable_non_event",
+			"citation_integrity": citationIntegrity,
+			"transient_markers":  markers,
+		}
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return json.RawMessage(`{"semantic_coverage":"unknown"}`)
+	}
+	return json.RawMessage(encoded)
+}
+
+func profileTransientMarkers(content string) []string {
+	markers := []string{"进行中", "进度", "即将", "本周", "下周", "今天", "明天",
+		"in progress", "next week", "tomorrow", "today", "TODO"}
+	found := []string{}
+	lower := strings.ToLower(content)
+	for _, marker := range markers {
+		if strings.Contains(lower, strings.ToLower(marker)) {
+			found = append(found, marker)
+		}
+	}
+	return found
+}
+
 func aggregateContextSize(inputs []artifact.MemoryInput) int {
 	size := 0
 	for _, input := range inputs {
 		size += len(input.Title) + len(input.Content)
 	}
 	return size
-}
-
-func (h *AggregateHandler) diagnoseSkillInput(ctx context.Context, tx Tx, target artifact.Target, now time.Time) error {
-	skillTarget := artifact.Target{Kind: artifact.KindSkill, ScopeKey: target.ScopeKey, Topic: target.Topic}
-	procedures, _, err := tx.ListAggregationInputs(ctx, skillTarget, now, 1)
-	if err != nil || len(procedures) > 0 {
-		return err
-	}
-	reason := "no_procedure_input"
-	hasProcedures, err := tx.HasProcedureInputs(ctx, target.ScopeKey, now)
-	if err != nil {
-		return err
-	}
-	if hasProcedures {
-		reason = "topic_mismatch"
-	}
-	_, err = h.artifacts.DisableWithReason(ctx, tx, skillTarget, reason)
-	return err
 }
 
 func (h *AggregateHandler) disable(ctx context.Context, job task.Job, target artifact.Target) error {
@@ -305,6 +491,9 @@ func (h *AggregateHandler) disable(ctx context.Context, job task.Job, target art
 }
 
 func aggregateTarget(key string) (artifact.Target, error) {
+	if scopeKey, ok := task.ParseScopeSummaryKey(key); ok {
+		return artifact.Target{Kind: artifact.KindScopeSummary, ScopeKey: scopeKey}, nil
+	}
 	if scopeKey, ok := task.ParseProfileKey(key); ok {
 		return artifact.Target{Kind: artifact.KindProfile, ScopeKey: scopeKey}, nil
 	}

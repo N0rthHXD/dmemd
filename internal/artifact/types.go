@@ -23,6 +23,7 @@ type Kind string
 
 const (
 	KindTopicSummary   Kind = "topic_summary"
+	KindScopeSummary   Kind = "scope_summary"
 	KindProfile        Kind = "profile"
 	KindExperienceCase Kind = "experience_case"
 	KindSkill          Kind = "skill"
@@ -31,7 +32,7 @@ const (
 // Known reports whether kind belongs to the fixed first-release set.
 func (k Kind) Known() bool {
 	switch k {
-	case KindTopicSummary, KindProfile, KindExperienceCase, KindSkill:
+	case KindTopicSummary, KindScopeSummary, KindProfile, KindExperienceCase, KindSkill:
 		return true
 	default:
 		return false
@@ -137,6 +138,8 @@ type Target struct {
 // TargetKey returns the canonical governance-task and artifact target key.
 func (t Target) TargetKey() string {
 	switch t.Kind {
+	case KindScopeSummary:
+		return task.ScopeSummaryKey(t.ScopeKey)
 	case KindProfile:
 		return task.ProfileKey(t.ScopeKey)
 	case KindSkill:
@@ -158,6 +161,12 @@ func ParseTarget(kind Kind, targetKey string) (Target, error) {
 			return Target{}, fmt.Errorf("%w: aggregate target %q", ErrInvalidInput, targetKey)
 		}
 		return Target{Kind: kind, ScopeKey: scopeKey, Topic: topic}, nil
+	case KindScopeSummary:
+		scopeKey, ok := task.ParseScopeSummaryKey(targetKey)
+		if !ok {
+			return Target{}, fmt.Errorf("%w: scope summary target %q", ErrInvalidInput, targetKey)
+		}
+		return Target{Kind: kind, ScopeKey: scopeKey}, nil
 	case KindProfile:
 		scopeKey, ok := task.ParseProfileKey(targetKey)
 		if !ok {
@@ -223,18 +232,22 @@ func SkillTargets(scopeKey string, topics []string) []Target {
 }
 
 // AggregateTargets returns the summary targets for one atomic memory's scope
-// and canonical topics (including parents) plus the scope profile.
+// and canonical topics (including parents), plus the scope overview and profile.
+// The scope overview and profile are keyed only by scope and derived type.
 func AggregateTargets(scopeKey string, topics []string) []Target {
 	scopeKey = normalizeScope(scopeKey)
 	if scopeKey == "" {
 		return nil
 	}
 	normalized := normalizeTopics(topics)
-	result := make([]Target, 0, len(normalized)+1)
+	result := make([]Target, 0, len(normalized)+2)
 	for _, topic := range normalized {
 		result = append(result, Target{Kind: KindTopicSummary, ScopeKey: scopeKey, Topic: topic})
 	}
-	result = append(result, Target{Kind: KindProfile, ScopeKey: scopeKey})
+	result = append(result,
+		Target{Kind: KindScopeSummary, ScopeKey: scopeKey},
+		Target{Kind: KindProfile, ScopeKey: scopeKey},
+	)
 	return result
 }
 
@@ -265,17 +278,19 @@ type MemoryChange struct {
 
 // MemoryInput is one bounded atomic input selected for aggregation.
 type MemoryInput struct {
-	ID         string    `json:"id"`
-	Version    int       `json:"version"`
-	Kind       string    `json:"kind"`
-	Phase      string    `json:"phase"`
-	Durability string    `json:"durability"`
-	Title      string    `json:"title"`
-	Content    string    `json:"content"`
-	ScopeKey   string    `json:"scope_key,omitempty"`
-	Topics     []string  `json:"topics"`
-	ObservedAt time.Time `json:"observed_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID         string          `json:"id"`
+	Version    int             `json:"version"`
+	Kind       string          `json:"kind"`
+	Phase      string          `json:"phase"`
+	Durability string          `json:"durability"`
+	Title      string          `json:"title"`
+	Content    string          `json:"content"`
+	ScopeKey   string          `json:"scope_key,omitempty"`
+	Topics     []string        `json:"topics"`
+	Procedure  json.RawMessage `json:"procedure,omitempty"`
+	Qualifiers json.RawMessage `json:"qualifiers,omitempty"`
+	ObservedAt time.Time       `json:"observed_at"`
+	UpdatedAt  time.Time       `json:"updated_at"`
 }
 
 // AggregateRequest is the complete bounded input for one summary or profile
@@ -285,14 +300,34 @@ type AggregateRequest struct {
 	ScopeKey  string        `json:"scope_key"`
 	Topic     string        `json:"topic,omitempty"`
 	Truncated bool          `json:"truncated"`
+	Eligible  int           `json:"eligible"`
 	Memories  []MemoryInput `json:"memories"`
+}
+
+// Citation is one service-validated mapping from a generated section or point
+// to an exact input memory revision. It explains support; it is not proof of
+// semantic completeness.
+type Citation struct {
+	Section  string `json:"section,omitempty"`
+	Point    string `json:"point"`
+	MemoryID string `json:"memory_id"`
+	Version  int    `json:"version"`
+}
+
+// OmittedInput records an input the model explicitly reported as not covered.
+type OmittedInput struct {
+	MemoryID string `json:"memory_id"`
+	Version  int    `json:"version"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 // AggregateResult is the tolerant parsed model output. Empty content is not
 // usable; an empty title receives a fixed default in the handler.
 type AggregateResult struct {
-	Title   string `json:"title"`
-	Content string `json:"content"`
+	Title         string         `json:"title"`
+	Content       string         `json:"content"`
+	Citations     []Citation     `json:"citations,omitempty"`
+	OmittedInputs []OmittedInput `json:"omitted_inputs,omitempty"`
 }
 
 // DocumentInput is the current artifact text used to build the derived FTS
@@ -341,6 +376,108 @@ type SearchHit struct {
 type GroupTarget struct {
 	Cursor string
 	Target Target
+}
+
+// TargetStatus is the externally visible state of one generation target. It
+// separates work in progress, ineligible input, generation failure, a usable
+// current version and stale/disabled history.
+type TargetStatus string
+
+const (
+	TargetStatusQueued           TargetStatus = "queued"
+	TargetStatusRunning          TargetStatus = "running"
+	TargetStatusWaiting          TargetStatus = "waiting"
+	TargetStatusActive           TargetStatus = "active"
+	TargetStatusStale            TargetStatus = "stale"
+	TargetStatusDisabled         TargetStatus = "disabled"
+	TargetStatusNoEligibleInput  TargetStatus = "no_eligible_input"
+	TargetStatusModelUnavailable TargetStatus = "model_unavailable"
+	TargetStatusGenerationFailed TargetStatus = "generation_failed"
+	TargetStatusInvalidOutput    TargetStatus = "invalid_output"
+)
+
+// Known reports whether status is part of the fixed target-status vocabulary.
+func (s TargetStatus) Known() bool {
+	switch s {
+	case TargetStatusQueued, TargetStatusRunning, TargetStatusWaiting,
+		TargetStatusActive, TargetStatusStale, TargetStatusDisabled,
+		TargetStatusNoEligibleInput, TargetStatusModelUnavailable,
+		TargetStatusGenerationFailed, TargetStatusInvalidOutput:
+		return true
+	default:
+		return false
+	}
+}
+
+// ListQuery filters current derived objects. A zero field means no filter.
+type ListQuery struct {
+	ScopeKey   string
+	Kind       Kind
+	State      State
+	ReasonCode string
+	Cursor     string
+	Limit      int
+}
+
+// ListPage is one bounded artifact-management page.
+type ListPage struct {
+	Items      []Artifact `json:"items"`
+	NextCursor string     `json:"next_cursor,omitempty"`
+}
+
+// TargetEvaluation records a target that was evaluated but produced no usable
+// artifact. It is distinct from a disabled artifact with retained history.
+type TargetEvaluation struct {
+	Kind        Kind
+	TargetKey   string
+	ScopeKey    string
+	Topic       string
+	Status      TargetStatus
+	ReasonCode  string
+	EvaluatedAt time.Time
+}
+
+// TargetQuery filters generation targets, including targets that have no
+// artifact yet. Status is the derived target status, not the artifact state.
+type TargetQuery struct {
+	ScopeKey   string
+	Kind       Kind
+	Status     TargetStatus
+	ReasonCode string
+	Cursor     string
+	Limit      int
+}
+
+// TargetRecord is one generation target with its artifact, latest job and last
+// no-artifact evaluation. Artifact is nil when no content object exists yet.
+type TargetRecord struct {
+	Kind        Kind
+	TargetKey   string
+	ScopeKey    string
+	Topic       string
+	Status      TargetStatus
+	ReasonCode  string
+	Artifact    *Artifact
+	Job         *task.Job
+	EvaluatedAt *time.Time
+	UpdatedAt   time.Time
+}
+
+// HasUsableVersion reports whether the target has produced at least one
+// immutable revision, even if the current state is stale or disabled.
+func (r TargetRecord) HasUsableVersion() bool {
+	return r.Artifact != nil && r.Artifact.CurrentVersion > 0
+}
+
+// TargetPage is one bounded generation-target page.
+type TargetPage struct {
+	Items      []TargetRecord `json:"items"`
+	NextCursor string         `json:"next_cursor,omitempty"`
+}
+
+// TargetCursor returns the stable keyset cursor for one target.
+func TargetCursor(targetKey string) string {
+	return targetKey
 }
 
 // CommitInput is one successful, usable generated version.
@@ -416,6 +553,12 @@ type Reader interface {
 	GetArtifactByTarget(ctx context.Context, kind Kind, targetKey string) (Artifact, error)
 	GetArtifactRevision(ctx context.Context, id string, version int) (Revision, error)
 	ListArtifactRevisions(ctx context.Context, id string, limit int) ([]Revision, error)
+	ListArtifacts(ctx context.Context, query ListQuery) (ListPage, error)
+}
+
+// TargetReader lists generation targets that may not have an artifact yet.
+type TargetReader interface {
+	ListTargets(ctx context.Context, query TargetQuery) (TargetPage, error)
 }
 
 // Searcher runs the derived FTS query and loads current active revisions.
@@ -437,6 +580,7 @@ type Backend interface {
 	Reader
 	Searcher
 	ReconcileReader
+	TargetReader
 }
 
 // ServiceAPI is the artifact management read capability exposed by HTTP.
@@ -444,6 +588,8 @@ type ServiceAPI interface {
 	Get(ctx context.Context, id string) (Detail, error)
 	GetVersion(ctx context.Context, id string, version int) (Detail, error)
 	ListVersions(ctx context.Context, id string, limit int) (Detail, []Revision, error)
+	List(ctx context.Context, query ListQuery) (ListPage, error)
+	ListTargets(ctx context.Context, query TargetQuery) (TargetPage, error)
 }
 
 // Tx is the artifact-scoped writable transaction. The first-release governance
@@ -471,5 +617,8 @@ type Tx interface {
 	DeleteArtifactsForMemory(ctx context.Context, memoryID string) error
 	DeleteArtifactsForRun(ctx context.Context, experienceID string) error
 	ListAggregationInputs(ctx context.Context, target Target, asOf time.Time, limit int) ([]MemoryInput, bool, error)
+	CountAggregationInputs(ctx context.Context, target Target, asOf time.Time) (int, error)
 	HasProcedureInputs(ctx context.Context, scopeKey string, asOf time.Time) (bool, error)
+	UpsertTargetEvaluation(ctx context.Context, evaluation TargetEvaluation) error
+	DeleteTargetEvaluation(ctx context.Context, kind Kind, targetKey string) error
 }

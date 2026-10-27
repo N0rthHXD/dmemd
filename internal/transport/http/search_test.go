@@ -80,7 +80,21 @@ func TestRecallResponseIncludesPartitionsWarningsAndExplanation(t *testing.T) {
 					Keyword:  &retrieval.KeywordExplanation{Rank: 1, BM25: -1.5},
 					Semantic: &retrieval.SemanticExplanation{Rank: 2, Cosine: 0.9},
 				},
+				Related: &retrieval.RelatedInfo{
+					ReasonCodes:     []string{retrieval.RelatedFactGroupMember},
+					AnchorMemoryIDs: []string{"memory-primary"},
+				},
+				Cluster: &retrieval.DisplayCluster{
+					FactGroupID: "group-1", MemberIDs: []string{"memory-1", "memory-2"}, EvidenceCount: 2,
+				},
 			}},
+			Diagnostics: &retrieval.SearchDiagnostics{
+				KeywordCandidates: 3, SemanticCandidates: 2, TermCandidates: 5,
+				KindFilterExcluded: 1, StateFilterExcluded: 1, TimeFilterExcluded: 1,
+				RankingCandidates: 2, RelatedExpanded: 1, RelatedExcluded: 1,
+				ReturnedItems: 1, ContextBudgetTruncated: 1,
+				SemanticDegradation: retrieval.WarningSemanticTimeout,
+			},
 			Summaries: []artifact.SearchHit{{
 				Artifact: artifact.Artifact{
 					ID: "artifact-1", Kind: artifact.KindTopicSummary, ScopeKey: "project:dmemd",
@@ -115,7 +129,23 @@ func TestRecallResponseIncludesPartitionsWarningsAndExplanation(t *testing.T) {
 					Cosine float64 `json:"cosine"`
 				} `json:"semantic"`
 			} `json:"explanation"`
+			Related *struct {
+				ReasonCodes     []string `json:"reason_codes"`
+				AnchorMemoryIDs []string `json:"anchor_memory_ids"`
+			} `json:"related"`
+			Cluster *struct {
+				FactGroupID   string   `json:"fact_group_id"`
+				MemberIDs     []string `json:"member_ids"`
+				EvidenceCount int      `json:"evidence_count"`
+			} `json:"cluster"`
 		} `json:"memories"`
+		Diagnostics *struct {
+			KeywordCandidates      int    `json:"keyword_candidates"`
+			KindFilterExcluded     int    `json:"kind_filter_excluded"`
+			RelatedExpanded        int    `json:"related_expanded"`
+			ContextBudgetTruncated int    `json:"context_budget_truncated"`
+			SemanticDegradation    string `json:"semantic_degradation"`
+		} `json:"diagnostics"`
 		Summaries []struct {
 			ID         string `json:"id"`
 			Kind       string `json:"kind"`
@@ -138,6 +168,22 @@ func TestRecallResponseIncludesPartitionsWarningsAndExplanation(t *testing.T) {
 	}
 	if len(decoded.Memories) != 1 || decoded.Memories[0].Explanation.Ranking != "rrf" {
 		t.Fatalf("memories = %+v", decoded.Memories)
+	}
+	item := decoded.Memories[0]
+	if item.Related == nil || len(item.Related.ReasonCodes) != 1 ||
+		item.Related.ReasonCodes[0] != retrieval.RelatedFactGroupMember ||
+		len(item.Related.AnchorMemoryIDs) != 1 || item.Related.AnchorMemoryIDs[0] != "memory-primary" {
+		t.Fatalf("related = %+v", item.Related)
+	}
+	if item.Cluster == nil || item.Cluster.FactGroupID != "group-1" ||
+		len(item.Cluster.MemberIDs) != 2 || item.Cluster.EvidenceCount != 2 {
+		t.Fatalf("cluster = %+v", item.Cluster)
+	}
+	if decoded.Diagnostics == nil || decoded.Diagnostics.KeywordCandidates != 3 ||
+		decoded.Diagnostics.KindFilterExcluded != 1 || decoded.Diagnostics.RelatedExpanded != 1 ||
+		decoded.Diagnostics.ContextBudgetTruncated != 1 ||
+		decoded.Diagnostics.SemanticDegradation != retrieval.WarningSemanticTimeout {
+		t.Fatalf("diagnostics = %+v", decoded.Diagnostics)
 	}
 	explanation := decoded.Memories[0].Explanation
 	if len(explanation.FieldWeights) != 0 || explanation.Keyword.Rank != 1 || explanation.Semantic.Rank != 2 {

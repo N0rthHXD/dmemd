@@ -56,11 +56,23 @@ const (
 const (
 	WarningSemanticUnavailable      = "semantic_unavailable"
 	WarningSemanticTimeout          = "semantic_timeout"
+	WarningSemanticConfigError      = "semantic_config_error"
+	WarningSemanticRateLimited      = "semantic_rate_limited"
+	WarningSemanticInvalidResponse  = "semantic_invalid_response"
+	WarningSemanticIndexNotReady    = "semantic_index_not_ready"
 	WarningFactConflict             = "fact_conflict"
 	WarningConflictResultsTruncated = "conflict_results_truncated"
 	WarningDerivedAsOfUnsupported   = "derived_as_of_unsupported"
 	WarningDerivedUnavailable       = "derived_unavailable"
 	WarningContextBudgetTruncated   = "context_budget_truncated"
+	WarningTemporalUncertain        = "temporal_uncertain"
+)
+
+// Association reason codes explain why a bounded related item was attached to
+// a primary hit. They are fixed service-owned values, never model text.
+const (
+	RelatedFactGroupMember = "fact_group_member"
+	RelatedConflictMember  = "conflict_member"
 )
 
 // Layer selects one knowledge level in the unified recall entry point. Layers
@@ -92,6 +104,7 @@ type Filters struct {
 	States          []memory.State
 	AssertionStatus []memory.AssertionStatus
 	AsOf            *time.Time
+	EventAt         *time.Time
 	ScopeKey        string
 	CreatedByApp    string
 	UpdatedAfter    *time.Time
@@ -222,6 +235,41 @@ func (e Explanation) MarshalJSON() ([]byte, error) {
 	return json.Marshal(output)
 }
 
+// RelatedInfo marks a bounded association that was expanded from a primary
+// hit. Anchors list the query-matching memories that justified the expansion.
+type RelatedInfo struct {
+	ReasonCodes     []string `json:"reason_codes"`
+	AnchorMemoryIDs []string `json:"anchor_memory_ids"`
+}
+
+// DisplayCluster records duplicate expressions of the same fact that were
+// folded into one display item. Every member keeps its full evidence in the
+// representative item, so folding never drops a source.
+type DisplayCluster struct {
+	FactGroupID   string   `json:"fact_group_id,omitempty"`
+	MemberIDs     []string `json:"member_ids"`
+	EvidenceCount int      `json:"evidence_count"`
+}
+
+// SearchDiagnostics reports bounded stage counts when explain=true. Counts are
+// candidate counts, not proof of semantic correctness; a relaxed count never
+// changes the returned result set.
+type SearchDiagnostics struct {
+	KeywordCandidates      int    `json:"keyword_candidates"`
+	SemanticCandidates     int    `json:"semantic_candidates"`
+	SemanticExcluded       int    `json:"semantic_excluded"`
+	TermCandidates         int    `json:"term_candidates"`
+	KindFilterExcluded     int    `json:"kind_filter_excluded"`
+	StateFilterExcluded    int    `json:"state_filter_excluded"`
+	TimeFilterExcluded     int    `json:"time_filter_excluded"`
+	RankingCandidates      int    `json:"ranking_candidates"`
+	RelatedExpanded        int    `json:"related_expanded"`
+	RelatedExcluded        int    `json:"related_excluded"`
+	ReturnedItems          int    `json:"returned_items"`
+	ContextBudgetTruncated int    `json:"context_budget_truncated"`
+	SemanticDegradation    string `json:"semantic_degradation,omitempty"`
+}
+
 // Item is one search result.
 type Item struct {
 	Memory       memory.Memory        `json:"memory"`
@@ -231,6 +279,8 @@ type Item struct {
 	EvidenceRefs []EvidenceRef        `json:"evidence_refs"`
 	Explanation  *Explanation         `json:"explanation,omitempty"`
 	ConflictRefs []memory.ConflictRef `json:"conflict_refs"`
+	Related      *RelatedInfo         `json:"related,omitempty"`
+	Cluster      *DisplayCluster      `json:"cluster,omitempty"`
 }
 
 // Retrieval reports the strategy actually executed, independent of whether a
@@ -241,10 +291,11 @@ type Retrieval struct {
 
 // Result is a single Top-K response. It has no cursor or next-page metadata.
 type Result struct {
-	Items     []Item                   `json:"items"`
-	Retrieval Retrieval                `json:"retrieval"`
-	Warnings  []string                 `json:"warnings,omitempty"`
-	Conflicts []memory.ConflictSummary `json:"conflicts"`
+	Items       []Item                   `json:"items"`
+	Retrieval   Retrieval                `json:"retrieval"`
+	Warnings    []string                 `json:"warnings,omitempty"`
+	Conflicts   []memory.ConflictSummary `json:"conflicts"`
+	Diagnostics *SearchDiagnostics       `json:"diagnostics,omitempty"`
 }
 
 // RecallRequest is the single unified recall entry. Layers default to every
@@ -272,6 +323,7 @@ type RecallResult struct {
 	Skills      []artifact.SearchHit
 	Conflicts   []memory.ConflictSummary
 	Warnings    []string
+	Diagnostics *SearchDiagnostics
 }
 
 // RebuildResult reports a successful, committed index rebuild.
@@ -293,7 +345,7 @@ type RecallService interface {
 // RelatedService exposes keyword-based context selection to ingest without
 // changing the public search request/response contract.
 type RelatedService interface {
-	RelatedContext(ctx context.Context, text string, limit int) (ContextResult, error)
+	RelatedContext(ctx context.Context, scopeKey, text string, limit int) (ContextResult, error)
 	FactTimeline(ctx context.Context, groupID string, limit int) (ContextResult, error)
 	OpenConflictsForMemories(ctx context.Context, memoryIDs []string) ([]memory.Conflict, error)
 	MemoriesByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)

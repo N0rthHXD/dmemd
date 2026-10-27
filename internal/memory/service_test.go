@@ -91,7 +91,7 @@ func TestCreateWritesSnapshotRevisionEvidenceAndIndex(t *testing.T) {
 	f := newFixture(t)
 	src := f.seedSource(t, "source-create", "desktop-assistant",
 		`{"messages":[{"id":"msg-1","role":"user","content":"以后请默认使用中文回答。"}]}`)
-	evidence := source.NewEvidence(src, "msg-1", "以后请默认使用中文回答。", "test-model", baseTime)
+	evidence := source.NewEvidence(src, source.EvidenceReference{Quote: "以后请默认使用中文回答。"}, "test-model", baseTime)
 	if evidence.Location == nil || evidence.Location.Field != "messages.0.content" ||
 		evidence.Location.Start != 0 || evidence.Location.End != 12 {
 		t.Fatalf("location = %+v", evidence.Location)
@@ -161,7 +161,7 @@ func TestCreateAndRevisionPersistExtractionPhaseAndDurability(t *testing.T) {
 		Kind: memory.KindEvent, Phase: memory.PhaseScheduled, Durability: memory.DurabilityEpisodic,
 		Title: "拍摄", Content: "2026年10月8日安排拍摄", ObservedAt: baseTime,
 		OriginSourceID: src.ID,
-		Evidence:       []source.Evidence{source.NewEvidence(src, "", "2026年10月8日安排拍摄", "model", baseTime)},
+		Evidence:       []source.Evidence{source.NewEvidence(src, source.EvidenceReference{Quote: "2026年10月8日安排拍摄"}, "model", baseTime)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -202,7 +202,7 @@ func TestCreateAndRevisionPersistExtractionPhaseAndDurability(t *testing.T) {
 func TestCreateRollsBackEveryTableOnCallerFailure(t *testing.T) {
 	f := newFixture(t)
 	src := f.seedSource(t, "source-rollback", "app", `{"text":"remember me"}`)
-	evidence := source.NewEvidence(src, "", "remember me", "model", baseTime)
+	evidence := source.NewEvidence(src, source.EvidenceReference{Quote: "remember me"}, "model", baseTime)
 	failure := errors.New("injected create failure")
 
 	err := f.store.WithTx(context.Background(), func(ctx context.Context, tx *sqlite.Tx) error {
@@ -230,7 +230,7 @@ func TestCreateRollsBackEveryTableOnCallerFailure(t *testing.T) {
 func TestReviseKeepsHistoryAndDoesNotInheritOldEvidence(t *testing.T) {
 	f := newFixture(t)
 	src := f.seedSource(t, "source-revise", "app", `{"text":"old conclusion"}`)
-	oldEvidence := source.NewEvidence(src, "", "old conclusion", "model", baseTime)
+	oldEvidence := source.NewEvidence(src, source.EvidenceReference{Quote: "old conclusion"}, "model", baseTime)
 	created, err := f.create(t, memory.CreateInput{
 		Kind: memory.KindFact, Title: "First", Content: "old conclusion",
 		ObservedAt: baseTime, CreatedByApp: "app", OriginSourceID: src.ID,
@@ -278,7 +278,7 @@ func TestReviseKeepsHistoryAndDoesNotInheritOldEvidence(t *testing.T) {
 func TestAddEvidenceCreatesVersionAndIgnoresDuplicates(t *testing.T) {
 	f := newFixture(t)
 	src := f.seedSource(t, "source-evidence", "app", `{"text":"supporting quote"}`)
-	firstEvidence := source.NewEvidence(src, "", "supporting quote", "model", baseTime)
+	firstEvidence := source.NewEvidence(src, source.EvidenceReference{Quote: "supporting quote"}, "model", baseTime)
 	created, err := f.create(t, memory.CreateInput{
 		Kind: memory.KindFact, Title: "Title", Content: "Body",
 		ObservedAt: baseTime, OriginSourceID: src.ID,
@@ -289,7 +289,7 @@ func TestAddEvidenceCreatesVersionAndIgnoresDuplicates(t *testing.T) {
 	}
 
 	f.clock.Advance(time.Minute)
-	secondEvidence := source.NewEvidence(src, "", "supporting quote", "model", f.clock.Now())
+	secondEvidence := source.NewEvidence(src, source.EvidenceReference{Quote: "supporting quote"}, "model", f.clock.Now())
 	added, err := f.revise(t, memory.ReviseInput{
 		MemoryID:  created.ID,
 		Evidence:  []source.Evidence{secondEvidence},
@@ -341,7 +341,7 @@ func TestAddEvidenceCreatesVersionAndIgnoresDuplicates(t *testing.T) {
 func TestLifecycleArchiveDeleteRestoreAndEvidenceQueries(t *testing.T) {
 	f := newFixture(t)
 	src := f.seedSource(t, "source-lifecycle", "app", `{"text":"fact"}`)
-	evidence := source.NewEvidence(src, "", "fact", "model", baseTime)
+	evidence := source.NewEvidence(src, source.EvidenceReference{Quote: "fact"}, "model", baseTime)
 	created, err := f.create(t, memory.CreateInput{
 		Kind: memory.KindFact, Title: "Fact", Content: "fact",
 		ObservedAt: baseTime, CreatedByApp: "app", OriginSourceID: src.ID,
@@ -529,7 +529,7 @@ func TestLifecycleArchiveDeleteRestoreAndEvidenceQueries(t *testing.T) {
 func TestDeleteRollsBackStateRevisionAndIndexTogether(t *testing.T) {
 	f := newFixture(t)
 	src := f.seedSource(t, "source-delete-rollback", "app", `{"text":"keep"}`)
-	evidence := source.NewEvidence(src, "", "keep", "model", baseTime)
+	evidence := source.NewEvidence(src, source.EvidenceReference{Quote: "keep"}, "model", baseTime)
 	created, err := f.create(t, memory.CreateInput{
 		Kind: memory.KindFact, Title: "Keep", Content: "keep",
 		ObservedAt: baseTime, OriginSourceID: src.ID,
@@ -595,7 +595,7 @@ func TestSourceRedactionKeepsBodyAndPreventsEvidenceRestoration(t *testing.T) {
 	f := newFixture(t)
 	src := f.seedSource(t, "source-redacted", "app",
 		`{"messages":[{"id":"m1","content":"secret quote"}]}`)
-	evidence := source.NewEvidence(src, "m1", "secret quote", "model", baseTime)
+	evidence := source.NewEvidence(src, source.EvidenceReference{Quote: "secret quote"}, "model", baseTime)
 	created, err := f.create(t, memory.CreateInput{
 		Kind: memory.KindFact, Title: "Secret", Content: "body survives",
 		ObservedAt: baseTime, OriginSourceID: src.ID,
@@ -672,8 +672,8 @@ func TestSourceRedactionKeepsBodyAndPreventsEvidenceRestoration(t *testing.T) {
 func TestPurgeRemovesDedicatedDataAndKeepsSharedEvidence(t *testing.T) {
 	f := newFixture(t)
 	src := f.seedSource(t, "source-purge", "app", `{"text":"shared and dedicated"}`)
-	dedicated := source.NewEvidence(src, "", "dedicated", "model", baseTime)
-	shared := source.NewEvidence(src, "", "shared", "model", baseTime)
+	dedicated := source.NewEvidence(src, source.EvidenceReference{Quote: "dedicated"}, "model", baseTime)
+	shared := source.NewEvidence(src, source.EvidenceReference{Quote: "shared"}, "model", baseTime)
 
 	first, err := f.create(t, memory.CreateInput{
 		Kind: memory.KindFact, Title: "First", Content: "first",
@@ -738,7 +738,7 @@ func TestPurgeRemovesDedicatedDataAndKeepsSharedEvidence(t *testing.T) {
 	third, err := f.create(t, memory.CreateInput{
 		Kind: memory.KindFact, Title: "Third", Content: "third",
 		ObservedAt: baseTime, OriginSourceID: src.ID,
-		Evidence: []source.Evidence{source.NewEvidence(src, "", "third", "model", baseTime)},
+		Evidence: []source.Evidence{source.NewEvidence(src, source.EvidenceReference{Quote: "third"}, "model", baseTime)},
 	})
 	if err != nil {
 		t.Fatal(err)

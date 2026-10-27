@@ -40,6 +40,18 @@ type CandidateReader interface {
 	LoadSearchAssemblies(ctx context.Context, keys []VersionKey) (map[VersionKey]Assembly, error)
 }
 
+// AssociationReader is the optional bounded same-fact expansion capability. A
+// backend that does not implement it simply returns main hits only.
+type AssociationReader interface {
+	LoadFactGroupMembers(ctx context.Context, groupIDs []string, limitPerGroup int) (map[string][]Candidate, error)
+}
+
+// VectorReadinessReader is the optional semantic-index readiness probe. It lets
+// an empty vector set report index_not_ready instead of implying irrelevance.
+type VectorReadinessReader interface {
+	CurrentVectorCount(ctx context.Context, profileID string, dimensions int) (documents int, current int, err error)
+}
+
 // ConflictReader loads open conflicts and fact-group timelines for consistent
 // context selection and recall decoration.
 type ConflictReader interface {

@@ -197,6 +197,7 @@ func (t *Tx) ClaimNextGovernanceJob(ctx context.Context, now time.Time) (task.Jo
 	// and future-backoff ingestion must not starve governance. Already executing
 	// governance calls are not interrupted, but no new task starts ahead of ingest.
 	var busy bool
+	bypassPriority := 0
 	if err := t.tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM ingest_jobs
 		WHERE status = 'running' OR
 		((status = 'queued' OR (status = 'waiting' AND wait_reason <> 'configuration'))
@@ -204,14 +205,32 @@ func (t *Tx) ClaimNextGovernanceJob(ctx context.Context, now time.Time) (task.Jo
 		return task.Job{}, false, fmt.Errorf("检查摄取优先级: %w", err)
 	}
 	if busy {
-		return task.Job{}, false, nil
+		// A due target older than the fairness limit gets one slot even while
+		// ingest keeps arriving. This is a bounded anti-starvation guard, not a
+		// change to ordinary ingest priority.
+		threshold := formatTime(now.UTC().Add(-t.store.governanceFairnessLimit()))
+		var starved bool
+		if err := t.tx.QueryRowContext(ctx, `SELECT EXISTS(
+			SELECT 1 FROM governance_jobs
+			WHERE (status = ? OR (status = ? AND wait_reason <> ?))
+			AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+			AND created_at <= ?)`,
+			string(task.StatusQueued), string(task.StatusWaiting), task.WaitConfiguration,
+			formatTime(now), threshold).Scan(&starved); err != nil {
+			return task.Job{}, false, fmt.Errorf("检查治理任务饥饿保护: %w", err)
+		}
+		if !starved {
+			return task.Job{}, false, nil
+		}
+		bypassPriority = 1
 	}
 	row := t.tx.QueryRowContext(ctx, `SELECT `+governanceJobColumns+` FROM governance_jobs
 		WHERE (status = ? OR (status = ? AND wait_reason <> ?))
 		AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-		ORDER BY CASE WHEN kind IN ('aggregate', 'build_skill') THEN 1 ELSE 0 END, created_at ASC, id ASC LIMIT 1`,
+		ORDER BY CASE WHEN ? = 1 THEN 0 WHEN kind IN ('aggregate', 'build_skill') THEN 1 ELSE 0 END,
+			created_at ASC, id ASC LIMIT 1`,
 		string(task.StatusQueued), string(task.StatusWaiting), task.WaitConfiguration,
-		formatTime(now))
+		formatTime(now), bypassPriority)
 	item, err := scanGovernanceJob(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return task.Job{}, false, nil

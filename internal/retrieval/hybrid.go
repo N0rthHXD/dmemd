@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 
+	"github.com/N0rthHXD/dmemd/internal/embedding"
 	"github.com/N0rthHXD/dmemd/internal/memory"
 )
 
@@ -18,9 +19,12 @@ type semanticOutcome struct {
 	err     error
 }
 
-func (s *Service) searchHybrid(ctx context.Context, groups []Group, request Request, filters Filters, topK int) (Result, error) {
+func (s *Service) searchHybrid(ctx context.Context, groups []Group, request Request, filters Filters, topK int, diagnostics *SearchDiagnostics) (Result, error) {
 	if s.encoder == nil {
-		result, err := s.searchKeyword(ctx, groups, request, filters, topK, []string{WarningSemanticUnavailable}, false)
+		if diagnostics != nil {
+			diagnostics.SemanticDegradation = WarningSemanticUnavailable
+		}
+		result, err := s.searchKeyword(ctx, groups, request, filters, topK, []string{WarningSemanticUnavailable}, false, diagnostics)
 		return result, err
 	}
 	limit := candidateLimit(topK)
@@ -63,11 +67,18 @@ func (s *Service) searchHybrid(ctx context.Context, groups []Group, request Requ
 		cancel()
 		return Result{}, semanticResult.err
 	}
+	if diagnostics != nil {
+		diagnostics.KeywordCandidates = len(keywordResult.hits)
+		diagnostics.SemanticCandidates = len(semanticResult.hits)
+	}
 	if semanticResult.warning != "" {
 		// A degraded semantic path still uses the keyword path's original
 		// scores, ordering and explanation; the already-fetched keyword
 		// candidates are reused without a second query.
-		items, err := s.assembleKeywordHits(ctx, keywordResult.hits, groups, filters, topK, request.Explain)
+		if diagnostics != nil {
+			diagnostics.SemanticDegradation = semanticResult.warning
+		}
+		items, err := s.assembleKeywordHits(ctx, keywordResult.hits, groups, filters, topK, request.Explain, diagnostics)
 		if err != nil {
 			return Result{}, err
 		}
@@ -77,7 +88,7 @@ func (s *Service) searchHybrid(ctx context.Context, groups []Group, request Requ
 			Warnings:  dedupeWarnings([]string{semanticResult.warning}),
 		}, nil
 	}
-	return s.fuseHybrid(ctx, groups, keywordResult.hits, semanticResult.hits, filters, topK, request.Explain)
+	return s.fuseHybrid(ctx, groups, keywordResult.hits, semanticResult.hits, filters, topK, request.Explain, diagnostics)
 }
 
 func (s *Service) semanticCandidates(ctx context.Context, query string, filters Filters, limit int) ([]VectorHit, string, error) {
@@ -92,10 +103,10 @@ func (s *Service) semanticCandidates(ctx context.Context, query string, filters 
 		if budgetCtx.Err() != nil {
 			return nil, WarningSemanticTimeout, nil
 		}
-		return nil, WarningSemanticUnavailable, nil
+		return nil, semanticWarning(err), nil
 	}
 	if len(vector) != s.encoder.Dimensions() {
-		return nil, WarningSemanticUnavailable, nil
+		return nil, WarningSemanticInvalidResponse, nil
 	}
 
 	hits, err := s.backend.SearchVectors(budgetCtx, VectorQuery{
@@ -113,12 +124,40 @@ func (s *Service) semanticCandidates(ctx context.Context, query string, filters 
 		if budgetCtx.Err() != nil {
 			return nil, WarningSemanticTimeout, nil
 		}
-		return nil, "", err
+		// The keyword branch already has a complete result. A vector-store
+		// failure degrades the semantic branch instead of failing recall.
+		return nil, WarningSemanticUnavailable, nil
+	}
+	if len(hits) == 0 {
+		if reader, ok := s.backend.(VectorReadinessReader); ok {
+			documents, current, readinessErr := reader.CurrentVectorCount(budgetCtx, s.encoder.ProfileID(), s.encoder.Dimensions())
+			if readinessErr == nil && documents > 0 && current == 0 {
+				return nil, WarningSemanticIndexNotReady, nil
+			}
+		}
 	}
 	return hits, "", nil
 }
 
-func (s *Service) fuseHybrid(ctx context.Context, groups []Group, keywordHits []Hit, semanticHits []VectorHit, filters Filters, topK int, explain bool) (Result, error) {
+// semanticWarning maps a sanitized provider error to one stable degradation
+// code. It never exposes an endpoint, credential, query or raw response.
+func semanticWarning(err error) string {
+	switch embedding.ErrorCode(err) {
+	case "timeout", "cancelled":
+		return WarningSemanticTimeout
+	case "http_429":
+		return WarningSemanticRateLimited
+	case "unauthorized", "http_400", "http_404", "configuration", "empty_query":
+		return WarningSemanticConfigError
+	case "dimensions_mismatch", "invalid_vector", "protocol", "count_mismatch",
+		"order_mismatch", "response_too_large", "empty_input":
+		return WarningSemanticInvalidResponse
+	default:
+		return WarningSemanticUnavailable
+	}
+}
+
+func (s *Service) fuseHybrid(ctx context.Context, groups []Group, keywordHits []Hit, semanticHits []VectorHit, filters Filters, topK int, explain bool, diagnostics *SearchDiagnostics) (Result, error) {
 	ids := make([]string, 0, len(keywordHits)+len(semanticHits))
 	seenIDs := make(map[string]struct{}, len(keywordHits)+len(semanticHits))
 	for _, hit := range keywordHits {
@@ -162,11 +201,17 @@ func (s *Service) fuseHybrid(ctx context.Context, groups []Group, keywordHits []
 	for _, hit := range semanticHits {
 		candidate, ok := candidates[hit.MemoryID]
 		if !ok || !matchesFilters(candidate.Memory, filters) || candidate.Memory.State == memory.StateDeleted {
+			if diagnostics != nil {
+				diagnostics.SemanticExcluded++
+			}
 			continue
 		}
 		if candidate.ContentHash == "" || candidate.ContentHash != hit.ContentHash {
 			// The current snapshot changed after the vector scan. A stale
 			// vector must not reinsert a result.
+			if diagnostics != nil {
+				diagnostics.SemanticExcluded++
+			}
 			continue
 		}
 		semanticRank++
@@ -189,6 +234,9 @@ func (s *Service) fuseHybrid(ctx context.Context, groups []Group, keywordHits []
 			entry.score += reciprocalRank(entry.semanticRank)
 		}
 		selected = append(selected, *entry)
+	}
+	if diagnostics != nil {
+		diagnostics.RankingCandidates = len(selected)
 	}
 	sort.SliceStable(selected, func(i, j int) bool {
 		li, lj := selected[i].candidate.Memory.AssertionStatus, selected[j].candidate.Memory.AssertionStatus

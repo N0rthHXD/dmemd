@@ -50,6 +50,11 @@ const (
 	// defaultGovernanceMaxCallsPerHour is a soft in-process budget. It is a
 	// fixed operational bound rather than a per-installation setting.
 	defaultGovernanceMaxCallsPerHour = 30
+	// DefaultGovernanceMaxWait bounds how long continuous ingest can defer a
+	// due governance target before the fairness bypass allows one task.
+	DefaultGovernanceMaxWait = 30 * time.Minute
+	// DefaultExtractionChunkRunes bounds one long-source extraction window.
+	DefaultExtractionChunkRunes = ingest.DefaultExtractionChunkRunes
 )
 
 var defaultRetryDelays = []time.Duration{5 * time.Second, 30 * time.Second, 2 * time.Minute}
@@ -89,13 +94,25 @@ type DatabaseConfig struct {
 	MaxReadConnections int      `json:"max_read_connections"`
 }
 
+// ModelTaskConfig optionally overrides the model, timeout and reasoning hint
+// for one task. Extraction, decision and governance calls are deliberately
+// separable so a cheap model cannot be mistaken for a protocol fix.
+type ModelTaskConfig struct {
+	Name            string   `json:"name,omitempty"`
+	Timeout         Duration `json:"timeout,omitempty"`
+	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
+}
+
 // ModelConfig maps to the first remote provider protocol. Credentials belong
 // only in this local, permission-restricted config file.
 type ModelConfig struct {
-	Name    string   `json:"name"`
-	BaseURL string   `json:"base_url"`
-	APIKey  string   `json:"api_key"`
-	Timeout Duration `json:"timeout"`
+	Name       string           `json:"name"`
+	BaseURL    string           `json:"base_url"`
+	APIKey     string           `json:"api_key"`
+	Timeout    Duration         `json:"timeout"`
+	Extraction *ModelTaskConfig `json:"extraction,omitempty"`
+	Decision   *ModelTaskConfig `json:"decision,omitempty"`
+	Governance *ModelTaskConfig `json:"governance,omitempty"`
 }
 
 // EmbeddingConfig is the separate document/query Embedding provider. It is
@@ -114,23 +131,26 @@ type EmbeddingConfig struct {
 // WorkerConfig controls attempt/call budgets, protocol-failure isolation and
 // transient retries. Ingestion still has one sequential executor.
 type WorkerConfig struct {
-	ProcessBudget     Duration   `json:"process_budget"`
-	ExtractionTimeout Duration   `json:"extraction_timeout"`
-	DecisionTimeout   Duration   `json:"decision_timeout"`
-	Workers           int        `json:"workers"`
-	MaxAttempts       int        `json:"max_attempts"`
-	RetryDelays       []Duration `json:"retry_delays"`
+	ProcessBudget        Duration   `json:"process_budget"`
+	ExtractionTimeout    Duration   `json:"extraction_timeout"`
+	DecisionTimeout      Duration   `json:"decision_timeout"`
+	Workers              int        `json:"workers"`
+	MaxAttempts          int        `json:"max_attempts"`
+	RetryDelays          []Duration `json:"retry_delays"`
+	ExtractionChunkRunes int        `json:"extraction_chunk_runes"`
 }
 
-// GovernanceConfig controls the single persistent governance worker. It keeps
-// only the fixed first-release knobs; call spacing and the soft hourly budget
-// remain internal operational bounds. Enabled defaults to true when omitted.
+// GovernanceConfig controls the single persistent governance worker. Call
+// spacing and the soft hourly budget remain internal operational bounds;
+// MaxWait is the bounded fairness window for continuous ingest. Enabled
+// defaults to true when omitted.
 type GovernanceConfig struct {
 	Enabled           *bool    `json:"enabled,omitempty"`
 	Debounce          Duration `json:"debounce"`
 	ReconcileInterval Duration `json:"reconcile_interval"`
 	MinCallInterval   Duration `json:"min_call_interval"`
 	MaxInputs         int      `json:"max_inputs"`
+	MaxWait           Duration `json:"max_wait"`
 }
 
 // IsEnabled reports whether background governance should run. A nil pointer is
@@ -203,12 +223,13 @@ func DefaultConfig() Config {
 			Timeout: Duration(embedding.DefaultTimeout),
 		},
 		Worker: WorkerConfig{
-			ProcessBudget:     Duration(ingest.DefaultProcessBudget),
-			ExtractionTimeout: Duration(ingest.DefaultExtractionTimeout),
-			DecisionTimeout:   Duration(ingest.DefaultDecisionTimeout),
-			Workers:           DefaultWorkerCount,
-			MaxAttempts:       DefaultMaxAttempts,
-			RetryDelays:       durations(defaultRetryDelays),
+			ProcessBudget:        Duration(ingest.DefaultProcessBudget),
+			ExtractionTimeout:    Duration(ingest.DefaultExtractionTimeout),
+			DecisionTimeout:      Duration(ingest.DefaultDecisionTimeout),
+			Workers:              DefaultWorkerCount,
+			MaxAttempts:          DefaultMaxAttempts,
+			RetryDelays:          durations(defaultRetryDelays),
+			ExtractionChunkRunes: DefaultExtractionChunkRunes,
 		},
 		Governance: GovernanceConfig{
 			Enabled:           boolPointer(true),
@@ -216,6 +237,7 @@ func DefaultConfig() Config {
 			ReconcileInterval: Duration(DefaultReconcileInterval),
 			MinCallInterval:   Duration(DefaultGovernanceMinCallInterval),
 			MaxInputs:         DefaultGovernanceMaxInputs,
+			MaxWait:           Duration(DefaultGovernanceMaxWait),
 		},
 		Log: LogConfig{Level: "info"},
 	}
@@ -336,6 +358,9 @@ func (cfg *Config) applyDefaults() {
 	if cfg.Worker.RetryDelays == nil {
 		cfg.Worker.RetryDelays = defaults.Worker.RetryDelays
 	}
+	if cfg.Worker.ExtractionChunkRunes == 0 {
+		cfg.Worker.ExtractionChunkRunes = defaults.Worker.ExtractionChunkRunes
+	}
 	// Governance values come from DefaultConfig(), so an explicit zero in a
 	// loaded file remains meaningful: debounce 0 means immediate classification
 	// and min_call_interval 0 disables call spacing in local tests.
@@ -344,6 +369,9 @@ func (cfg *Config) applyDefaults() {
 	}
 	if cfg.Governance.MaxInputs == 0 {
 		cfg.Governance.MaxInputs = defaults.Governance.MaxInputs
+	}
+	if time.Duration(cfg.Governance.MaxWait) == 0 {
+		cfg.Governance.MaxWait = defaults.Governance.MaxWait
 	}
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = defaults.Log.Level
@@ -391,6 +419,9 @@ func (cfg Config) Validate() error {
 	if cfg.Worker.ProcessBudget <= 0 || cfg.Worker.ExtractionTimeout <= 0 || cfg.Worker.DecisionTimeout <= 0 {
 		return errors.New("worker.process_budget、extraction_timeout 和 decision_timeout 必须大于 0")
 	}
+	if cfg.Worker.ExtractionChunkRunes <= 0 {
+		return errors.New("worker.extraction_chunk_runes 必须大于 0")
+	}
 	if len(cfg.Worker.RetryDelays) != 3 {
 		return errors.New("worker.retry_delays 必须包含三个递增间隔")
 	}
@@ -411,8 +442,26 @@ func (cfg Config) Validate() error {
 	if cfg.Governance.MaxInputs <= 0 {
 		return errors.New("governance.max_inputs 必须大于 0")
 	}
+	if time.Duration(cfg.Governance.MaxWait) <= 0 {
+		return errors.New("governance.max_wait 必须大于 0")
+	}
 	if time.Duration(cfg.Model.Timeout) <= 0 {
 		return errors.New("model.timeout 必须大于 0")
+	}
+	for name, task := range map[string]*ModelTaskConfig{
+		"extraction": cfg.Model.Extraction,
+		"decision":   cfg.Model.Decision,
+		"governance": cfg.Model.Governance,
+	} {
+		if task == nil {
+			continue
+		}
+		if time.Duration(task.Timeout) < 0 {
+			return fmt.Errorf("model.%s.timeout 不能为负数", name)
+		}
+		if !validReasoningEffort(task.ReasoningEffort) {
+			return fmt.Errorf("model.%s.reasoning_effort 必须是 none、minimal、low、medium 或 high", name)
+		}
 	}
 	if cfg.Model.BaseURL != "" {
 		parsed, err := url.Parse(cfg.Model.BaseURL)
@@ -427,6 +476,39 @@ func (cfg Config) Validate() error {
 		return err
 	}
 	return nil
+}
+
+// TaskTimeout returns the task-specific timeout or fallback when unset.
+func (m ModelConfig) TaskTimeout(task *ModelTaskConfig, fallback time.Duration) time.Duration {
+	if task != nil && task.Timeout > 0 {
+		return task.Timeout.Std()
+	}
+	return fallback
+}
+
+// TaskName returns the task-specific model name or the base model name.
+func (m ModelConfig) TaskName(task *ModelTaskConfig) string {
+	if task != nil && strings.TrimSpace(task.Name) != "" {
+		return strings.TrimSpace(task.Name)
+	}
+	return m.Name
+}
+
+// TaskReasoning returns the task-specific reasoning hint.
+func (m ModelConfig) TaskReasoning(task *ModelTaskConfig) string {
+	if task == nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(task.ReasoningEffort))
+}
+
+func validReasoningEffort(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "none", "minimal", "low", "medium", "high":
+		return true
+	default:
+		return false
+	}
 }
 
 // toEmbedding maps the runtime shape to the embedding package's validated

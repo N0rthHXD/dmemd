@@ -49,9 +49,11 @@ make test-quality
 
 低风险完成结果闭环由 `internal/runtime/services_test.go` 中的
 `TestProductionExperienceAndSkillAssembly` 覆盖：提交应用报告的完成结果 → 生成经验案例 →
-自动生成并启用限定作用域 Skill → 同一 recall 返回 experience/skill 分区 → 撤销结果 →
-旧案例和 Skill 退出召回并由后台重算。该测试使用本地假模型，不把生成或自报成功包装成执行
-认证，也不从 README 的命令推断已经执行成功。
+如存在 procedure 则自动生成并启用限定作用域 Skill → 同一 recall 返回 experience/skill 分区 →
+撤销结果 → 旧案例和 Skill 退出召回并由后台重算。没有 procedure 时只记录目标评估
+`no_procedure_input`，不创建空 Skill artifact；可通过 `GET /v1/artifact-targets` 区分无合格
+输入、生成失败和已有可用版本。该测试使用本地假模型，不把生成或自报成功包装成执行认证，
+也不从 README 的命令推断已经执行成功。
 
 ## 3. 真实模型语义评估（未执行）
 
@@ -68,6 +70,22 @@ go test -count=1 -run TestLiveModelQuality -v ./tests/quality
 该入口对分类、摘要和 Skill 使用与离线样例相同的标注。真实模型调用不进入默认测试或 CI。
 本次仅确认入口已编译、默认跳过；没有可用模型和凭据，未获得任何真实语义通过率、token 成本
 或 P50/P95 耗时，因此不能宣称质量验收已经由真实模型通过。
+
+### 3.1 端到端黑盒评测口径
+
+独立数据集 `dmemd-eval/2` 的黑盒 runner 已按优化方案调整，默认每个真实模型场景重复
+3 次并记录均值、方差和错误类型：
+
+- 删除 `query.match`，所有查询统一使用服务端 any 语义，不再统计 `match=all`；
+- 查询失败区分 `fact_not_mapped`（提取/映射失败）和 `retrieval_miss`（已映射但未命中），
+  并保留 Recall@k、MRR、scope、as_of、负例和空结果指标；
+- 提取评测增加日期、专有名词、条件、否定、procedure、原子性和 evidence quote 分项；
+- 冲突样本带人工复核分类，只有 `real_conflict` 进入自动裁决门禁；
+- 派生对象分别统计生成、来源完整、内容覆盖、画像事件污染、新鲜度和遗忘后退出召回。
+
+该 runner 位于 `/home/ut005426@uos/data/dmemd-eval/scripts/run_eval.py`，不属于 `make check`。
+本次没有重新执行真实模型全量评测；`reports/2026-10-23` 中的历史结果仍对应
+`dmemd-eval/1`，不能直接与 v2 口径混用。
 
 ## 4. 一万条容量实测
 
@@ -111,6 +129,8 @@ Go 1.27.3，`CGO_ENABLED=0` 构建使用的 SQLite 驱动；工作区基于提�
 
 说明：
 
+- 上表是 P1-B 前的历史容量基线。P1-B 后每个 scope 还会生成一个 `scope_summary`，且没有
+  procedure 的 Skill 目标只记录评估、不再创建空 artifact；后续容量数字需按新目标数重新采集。
 - 遗忘后的 1,200 个 queued 目标是已删除摘要/画像/Skill 的修复目标。它们只含目标键，不含
   原文；后续 Worker 没有可用输入时只会停用对象，不能恢复已删除正文或历史。
 - 单事务清理耗时包含 10,000 次记忆清除、依赖枚举和派生对象删除。它已验证首版规模下的

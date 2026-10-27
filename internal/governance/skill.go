@@ -126,7 +126,7 @@ func (h *SkillHandler) Process(ctx context.Context, job task.Job) error {
 		return err
 	}
 	if len(procedures) == 0 {
-		return h.disable(ctx, job, target, "no_procedure_input")
+		return h.disableNoInput(ctx, job, target)
 	}
 	if h.provider == nil {
 		if err := h.recordFailure(ctx, job, target, "model_unavailable"); err != nil {
@@ -182,7 +182,14 @@ func (h *SkillHandler) Process(ctx context.Context, job task.Job) error {
 		}
 		return &ingest.ProviderError{Operation: "protocol", Retryable: false, Err: ingest.ErrProtocol}
 	}
-	name, body, payload := renderSkill(target, draft)
+	if issue := draft.Issue(); issue != "" {
+		if err := h.recordFailure(ctx, job, target, "invalid_model_output"); err != nil {
+			return err
+		}
+		return &ingest.ProviderError{Operation: "protocol", Retryable: false,
+			Err: fmt.Errorf("%w: %s", ingest.ErrProtocol, issue)}
+	}
+	name, body, payload := renderSkill(target, draft, boundedProcedures)
 	reasonCode := ""
 	if truncated {
 		reasonCode = "input_truncated"
@@ -248,26 +255,51 @@ func (h *SkillHandler) recordFailure(ctx context.Context, job task.Job, target a
 		if err := checkedJob(ctx, tx, job); err != nil {
 			return err
 		}
-		_, err := h.artifacts.DisableWithReason(ctx, tx, target, reason)
-		return err
+		if _, err := h.artifacts.DisableWithReason(ctx, tx, target, reason); err != nil {
+			return err
+		}
+		return tx.UpsertTargetEvaluation(ctx, artifact.TargetEvaluation{
+			Kind: target.Kind, TargetKey: target.TargetKey(), ScopeKey: target.ScopeKey,
+			Topic: target.Topic, Status: skillEvaluationStatus(reason), ReasonCode: reason,
+			EvaluatedAt: h.now().UTC(),
+		})
 	})
 }
 
-func (h *SkillHandler) disable(ctx context.Context, job task.Job, target artifact.Target, reason string) error {
+func skillEvaluationStatus(reason string) artifact.TargetStatus {
+	switch reason {
+	case "model_unavailable":
+		return artifact.TargetStatusModelUnavailable
+	case "invalid_model_output":
+		return artifact.TargetStatusInvalidOutput
+	default:
+		return artifact.TargetStatusGenerationFailed
+	}
+}
+
+// disableNoInput records ineligibility without manufacturing an artifact. An
+// existing skill with usable history is disabled and keeps that history.
+func (h *SkillHandler) disableNoInput(ctx context.Context, job task.Job, target artifact.Target) error {
 	return h.store.WithTx(ctx, func(ctx context.Context, tx Tx) error {
 		if err := checkedJob(ctx, tx, job); err != nil {
 			return err
 		}
-		if reason == "no_procedure_input" {
-			hasProcedures, err := tx.HasProcedureInputs(ctx, target.ScopeKey, h.now().UTC())
-			if err != nil {
-				return err
-			}
-			if hasProcedures {
-				reason = "topic_mismatch"
-			}
+		reason := "no_procedure_input"
+		hasProcedures, err := tx.HasProcedureInputs(ctx, target.ScopeKey, h.now().UTC())
+		if err != nil {
+			return err
 		}
-		if _, err := h.artifacts.DisableWithReason(ctx, tx, target, reason); err != nil {
+		if hasProcedures {
+			reason = "topic_mismatch"
+		}
+		if _, _, err := h.artifacts.DisableExisting(ctx, tx, target, reason); err != nil {
+			return err
+		}
+		if err := tx.UpsertTargetEvaluation(ctx, artifact.TargetEvaluation{
+			Kind: target.Kind, TargetKey: target.TargetKey(), ScopeKey: target.ScopeKey,
+			Topic: target.Topic, Status: artifact.TargetStatusNoEligibleInput,
+			ReasonCode: reason, EvaluatedAt: h.now().UTC(),
+		}); err != nil {
 			return err
 		}
 		ok, err := tx.FinishJob(ctx, job.ID, job.Revision, h.now().UTC())
@@ -282,6 +314,13 @@ func (h *SkillHandler) disable(ctx context.Context, job task.Job, target artifac
 }
 
 func loadSkillRuns(ctx context.Context, tx Tx, targetKey, scopeKey string, limit int) ([]ExperienceRun, bool, error) {
+	_, targetTopic, _ := task.ParseSkillKey(targetKey)
+	skillID := ""
+	if item, err := tx.GetArtifactByTarget(ctx, artifact.KindSkill, targetKey); err == nil {
+		skillID = item.ID
+	} else if !errors.Is(err, artifact.ErrNotFound) {
+		return nil, false, err
+	}
 	seen := map[string]struct{}{}
 	result := []ExperienceRun{}
 	truncated := false
@@ -294,16 +333,8 @@ func loadSkillRuns(ctx context.Context, tx Tx, targetKey, scopeKey string, limit
 			result = append(result, item)
 		}
 	}
-	byScope, err := tx.ListExperienceRunsByScope(ctx, scopeKey, limit+1)
-	if err != nil {
-		return nil, false, err
-	}
-	appendRuns(byScope)
-	if len(byScope) > limit {
-		truncated = true
-	}
-	if item, err := tx.GetArtifactByTarget(ctx, artifact.KindSkill, targetKey); err == nil {
-		bySkill, err := tx.ListExperienceRunsBySkill(ctx, item.ID, limit+1)
+	if skillID != "" {
+		bySkill, err := tx.ListExperienceRunsBySkill(ctx, skillID, limit+1)
 		if err != nil {
 			return nil, false, err
 		}
@@ -311,14 +342,69 @@ func loadSkillRuns(ctx context.Context, tx Tx, targetKey, scopeKey string, limit
 		if len(bySkill) > limit {
 			truncated = true
 		}
-	} else if !errors.Is(err, artifact.ErrNotFound) {
+	}
+	// Same-scope results alone are not evidence that a report belongs to this
+	// workflow. Only an explicit skill reference or a case whose selected
+	// procedures share the target topic is admitted.
+	byScope, err := tx.ListExperienceRunsByScope(ctx, scopeKey, limit+1)
+	if err != nil {
 		return nil, false, err
+	}
+	if len(byScope) > limit {
+		truncated = true
+	}
+	for _, run := range byScope {
+		if run.SkillID != "" {
+			// An explicit reference to another skill is decisive and must not be
+			// diluted by scope membership.
+			continue
+		}
+		topics, err := experienceRunTopics(ctx, tx, run.ID)
+		if err != nil {
+			return nil, false, err
+		}
+		if targetTopic == "" {
+			if len(topics) != 0 {
+				continue
+			}
+		} else if len(topics) != 1 || !strings.EqualFold(strings.TrimSpace(topics[0]), targetTopic) {
+			// Multiple workflow topics make the association ambiguous. Only a
+			// single, exact topic is enough evidence without an explicit
+			// skill reference.
+			continue
+		}
+		appendRuns([]ExperienceRun{run})
 	}
 	if len(result) > limit {
 		result = result[:limit]
 		truncated = true
 	}
 	return result, truncated, nil
+}
+
+func experienceRunTopics(ctx context.Context, tx Tx, experienceID string) ([]string, error) {
+	targetKey := artifact.ExperienceTarget(experienceID).TargetKey()
+	item, err := tx.GetArtifactByTarget(ctx, artifact.KindExperienceCase, targetKey)
+	if errors.Is(err, artifact.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if item.CurrentVersion <= 0 {
+		return nil, nil
+	}
+	revision, err := tx.GetArtifactRevision(ctx, item.ID, item.CurrentVersion)
+	if err != nil {
+		return nil, err
+	}
+	var payload struct {
+		Topics []string `json:"topics"`
+	}
+	if err := json.Unmarshal(revision.Payload, &payload); err != nil {
+		return nil, nil
+	}
+	return payload.Topics, nil
 }
 
 func sameMemoryInputs(left, right []artifact.MemoryInput) bool {
@@ -404,7 +490,7 @@ func experienceInputs(runs []ExperienceRun) []artifact.ExperienceInput {
 	return result
 }
 
-func renderSkill(target artifact.Target, draft skill.Draft) (string, string, json.RawMessage) {
+func renderSkill(target artifact.Target, draft skill.Draft, procedures []artifact.MemoryInput) (string, string, json.RawMessage) {
 	name := truncateRunes(strings.TrimSpace(draft.Name), defaultSkillNameRunes)
 	if name == "" {
 		if target.Topic != "" {
@@ -423,20 +509,74 @@ func renderSkill(target artifact.Target, draft skill.Draft) (string, string, jso
 	}
 	body = truncateRunes(body, maxSkillContentRunes)
 	payload, err := json.Marshal(map[string]any{
-		"name":              name,
-		"description":       description,
-		"scope_key":         target.ScopeKey,
-		"topic":             target.Topic,
-		"preconditions":     nonNilStrings(draft.Preconditions),
-		"steps":             nonNilStrings(draft.Steps),
-		"stop_conditions":   nonNilStrings(draft.StopConditions),
-		"completion_checks": nonNilStrings(draft.CompletionChecks),
-		"counterexamples":   nonNilStrings(draft.Counterexamples),
+		"name":                    name,
+		"description":             description,
+		"scope_key":               target.ScopeKey,
+		"topic":                   target.Topic,
+		"preconditions":           nonNilStrings(draft.Preconditions),
+		"steps":                   nonNilStrings(draft.Steps),
+		"stop_conditions":         nonNilStrings(draft.StopConditions),
+		"completion_checks":       nonNilStrings(draft.CompletionChecks),
+		"counterexamples":         nonNilStrings(draft.Counterexamples),
+		"unknown_fields":          unknownSkillFields(procedures, draft),
+		"application_report_only": true,
 	})
 	if err != nil {
 		payload = []byte("{}")
 	}
 	return name, body, json.RawMessage(payload)
+}
+
+// unknownSkillFields makes missing optional procedure structure explicit rather
+// than filling it with invented guidance.
+func unknownSkillFields(procedures []artifact.MemoryInput, draft skill.Draft) []string {
+	given := map[string]bool{}
+	for _, procedure := range procedures {
+		if len(procedure.Procedure) == 0 {
+			continue
+		}
+		var fields struct {
+			Goal                 string   `json:"goal"`
+			Steps                []string `json:"steps"`
+			Preconditions        []string `json:"preconditions"`
+			CompletionConditions []string `json:"completion_conditions"`
+			FailureBranches      []string `json:"failure_branches"`
+		}
+		if json.Unmarshal(procedure.Procedure, &fields) != nil {
+			continue
+		}
+		if strings.TrimSpace(fields.Goal) != "" || len(cleanStrings(fields.Steps)) > 0 {
+			given["steps"] = true
+		}
+		if len(cleanStrings(fields.Preconditions)) > 0 {
+			given["preconditions"] = true
+		}
+		if len(cleanStrings(fields.CompletionConditions)) > 0 {
+			given["completion_checks"] = true
+		}
+		if len(cleanStrings(fields.FailureBranches)) > 0 {
+			given["counterexamples"] = true
+		}
+	}
+	if len(cleanStrings(draft.Steps)) > 0 {
+		given["steps"] = true
+	}
+	if len(cleanStrings(draft.Preconditions)) > 0 {
+		given["preconditions"] = true
+	}
+	if len(cleanStrings(draft.CompletionChecks)) > 0 {
+		given["completion_checks"] = true
+	}
+	if len(cleanStrings(draft.Counterexamples)) > 0 {
+		given["counterexamples"] = true
+	}
+	result := []string{}
+	for _, field := range []string{"preconditions", "steps", "completion_checks", "counterexamples"} {
+		if !given[field] {
+			result = append(result, field)
+		}
+	}
+	return result
 }
 
 func normalizeSkillBody(content string) string {

@@ -483,13 +483,14 @@ func TestPartialAndZeroCandidateResults(t *testing.T) {
 	// Extraction v2 repairs the malformed evidence of c3 without touching c1;
 	// the empty c2 is deliberately omitted and isolated.
 	f.fake.EnqueueContent(`{"candidates":[{"candidate_id":"c3","content":"另一个可用候选。","evidence":[{"quote":"另一个可用候选。"}]}]}`)
-	f.fake.EnqueueContent(`{"decisions":[{"candidate_id":"c1","action":"add"},{"candidate_id":"c2","action":"add"}]}`)
+	f.fake.EnqueueContent(`{"decisions":[{"candidate_id":"c1","action":"add"},{"candidate_id":"c3","action":"add"}]}`)
 	receipt := f.submit(t, `"可用的部分候选。另一个可用候选。"`)
 	if !f.processOne(t) {
 		t.Fatal("partial job not processed")
 	}
 	job := f.job(t, receipt.JobID)
-	if job.Status != ingest.JobSucceeded || len(job.MemoryIDs) != 2 {
+	if job.Status != ingest.JobSucceeded || len(job.MemoryIDs) != 2 || job.QualityOutcome != ingest.QualityPartial ||
+		job.ExtractionStats.IsolatedCandidates == 0 || job.ExtractionStats.RawCandidates != 3 {
 		t.Fatalf("partial job = %+v", job)
 	}
 	items, err := f.memories.List(context.Background(), memory.ListOptions{States: []memory.State{memory.StateActive}, Limit: 10})
@@ -506,8 +507,40 @@ func TestPartialAndZeroCandidateResults(t *testing.T) {
 		t.Fatal("zero job not processed")
 	}
 	zeroJob := f.job(t, zero.JobID)
-	if zeroJob.Status != ingest.JobSucceeded || zeroJob.MemoryIDs == nil || len(zeroJob.MemoryIDs) != 0 {
+	if zeroJob.Status != ingest.JobSucceeded || zeroJob.MemoryIDs == nil || len(zeroJob.MemoryIDs) != 0 ||
+		zeroJob.QualityOutcome != ingest.QualityEmpty {
 		t.Fatalf("zero job = %+v", zeroJob)
+	}
+}
+
+func TestAllUnusableCandidatesAreNotReportedAsEmpty(t *testing.T) {
+	f := newIngestStack(t)
+	invalid := `{"candidates":[{"kind":"not-a-kind","content":""}]}`
+	for i := 0; i < 6; i++ {
+		f.fake.EnqueueContent(invalid)
+	}
+	receipt := f.submit(t, `"不可用候选"`)
+	if !f.processOne(t) {
+		t.Fatal("job not processed")
+	}
+	job := f.job(t, receipt.JobID)
+	if job.Status != ingest.JobWaiting || job.WaitReason != ingest.WaitReasonProtocol {
+		t.Fatalf("first attempt = %+v", job)
+	}
+	if job.QualityOutcome != ingest.QualityUnusable || job.ExtractionStats.ParsedCandidates != 1 ||
+		job.ExtractionStats.AcceptedCandidates != 0 || job.ExtractionStats.IsolatedCandidates != 1 ||
+		len(job.Diagnostics) == 0 || len(job.MemoryIDs) != 0 {
+		t.Fatalf("unusable quality = %+v", job)
+	}
+	for i := 0; i < 2; i++ {
+		if !f.processOne(t) {
+			t.Fatal("retry job not processed")
+		}
+	}
+	final := f.job(t, receipt.JobID)
+	if final.Status != ingest.JobFailed || final.Attempts != 3 || final.QualityOutcome != ingest.QualityUnusable ||
+		len(final.MemoryIDs) != 0 {
+		t.Fatalf("final unusable job = %+v", final)
 	}
 }
 

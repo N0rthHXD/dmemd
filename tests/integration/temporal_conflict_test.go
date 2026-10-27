@@ -213,7 +213,10 @@ func TestPendingConflictDiscoveryAndResolution(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(pendingOnly.Items) != 1 || pendingOnly.Items[0].Memory.ID != pendingID || len(pendingOnly.Conflicts) != 1 || pendingOnly.Conflicts[0].ID != conflictID ||
+		if len(pendingOnly.Items) != 2 || pendingOnly.Items[0].Memory.ID != pendingID ||
+			pendingOnly.Items[1].Memory.ID != acceptedID || pendingOnly.Items[1].Related == nil ||
+			!contains(pendingOnly.Items[1].Related.ReasonCodes, retrieval.RelatedConflictMember) ||
+			len(pendingOnly.Conflicts) != 1 || pendingOnly.Conflicts[0].ID != conflictID ||
 			!contains(pendingOnly.Warnings, retrieval.WarningFactConflict) {
 			t.Fatalf("pending-only any conflict discovery mode=%s = %+v", mode, pendingOnly)
 		}

@@ -20,16 +20,24 @@ func NewFactGroup(input FactGroupInput, now time.Time) (FactGroup, error) {
 		return FactGroup{}, err
 	}
 	now = now.UTC()
-	return FactGroup{
+	conditions := NormalizeConditions(input.Conditions)
+	group := FactGroup{
 		ID:          idgen.NewUUID(),
+		ScopeKey:    NormalizeScopeKey(input.ScopeKey),
 		Subject:     strings.TrimSpace(input.Subject),
 		Predicate:   strings.TrimSpace(input.Predicate),
 		Scope:       strings.TrimSpace(input.Scope),
+		Conditions:  conditions,
 		Cardinality: cardinality,
 		Generation:  1,
 		CreatedAt:   now,
 		UpdatedAt:   now,
-	}, nil
+	}
+	group.SubjectKey = NormalizeIdentityText(group.Subject)
+	group.PredicateKey = NormalizeIdentityText(group.Predicate)
+	group.SceneKey = NormalizeIdentityText(group.Scope)
+	group.ConditionsKey = ConditionsKey(group.Conditions)
+	return group, nil
 }
 
 // ListConflicts returns a fixed-order management list.
@@ -264,11 +272,31 @@ func (s *Service) resolveSeparate(ctx context.Context, tx Tx, conflict *Conflict
 	if input.SeparateGroup == nil {
 		return fmt.Errorf("%w: separate_scope 需要新的主体或场景", ErrInvalidResolution)
 	}
-	group, err := NewFactGroup(*input.SeparateGroup, s.timestamp())
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidResolution, err)
+	// The scope of a separate group comes from the conflict members, never
+	// from model/client free text. Reuse an existing exact identity instead of
+	// violating the scoped unique index.
+	scopeKey := input.SeparateGroup.ScopeKey
+	if scopeKey == "" && len(conflict.Members) > 0 {
+		if item, err := tx.GetMemory(ctx, conflict.Members[0].MemoryID); err == nil {
+			scopeKey = item.ScopeKey
+		}
 	}
-	if err := tx.InsertFactGroup(ctx, group); err != nil {
+	identity := FactGroupIdentity{
+		ScopeKey: scopeKey, Subject: input.SeparateGroup.Subject,
+		Predicate: input.SeparateGroup.Predicate, Scope: input.SeparateGroup.Scope,
+		Conditions: input.SeparateGroup.Conditions, Cardinality: input.SeparateGroup.Cardinality,
+	}
+	group, err := tx.FindFactGroup(ctx, identity)
+	if errors.Is(err, ErrNotFound) {
+		input.SeparateGroup.ScopeKey = scopeKey
+		group, err = NewFactGroup(*input.SeparateGroup, s.timestamp())
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidResolution, err)
+		}
+		if err := tx.InsertFactGroup(ctx, group); err != nil {
+			return err
+		}
+	} else if err != nil {
 		return err
 	}
 	for _, member := range conflict.Members {
@@ -281,20 +309,27 @@ func (s *Service) resolveSeparate(ctx context.Context, tx Tx, conflict *Conflict
 			return err
 		}
 		updated, err := s.Revise(ctx, tx, ReviseInput{
-			MemoryID:        item.ID,
-			Kind:            item.Kind,
-			Title:           item.Title,
-			Content:         item.Content,
-			ObservedAt:      item.ObservedAt,
-			ValidFrom:       item.ValidFrom,
-			ValidTo:         item.ValidTo,
-			ValidFromBasis:  item.ValidFromBasis,
-			ValidToBasis:    item.ValidToBasis,
-			AssertionStatus: item.AssertionStatus,
-			FactGroupID:     group.ID,
-			Evidence:        evidence,
-			Operation:       OperationResolve,
-			Reason:          input.Reason,
+			MemoryID:           item.ID,
+			Kind:               item.Kind,
+			Title:              item.Title,
+			Content:            item.Content,
+			ObservedAt:         item.ObservedAt,
+			ObservedAtBasis:    item.ObservedAtBasis,
+			EventTime:          item.EventTime,
+			EventTimeBasis:     item.EventTimeBasis,
+			EventTimePrecision: item.EventTimePrecision,
+			ValidFrom:          item.ValidFrom,
+			ValidTo:            item.ValidTo,
+			ValidFromBasis:     item.ValidFromBasis,
+			ValidToBasis:       item.ValidToBasis,
+			Temporal:           item.Temporal,
+			AssertionStatus:    item.AssertionStatus,
+			FactGroupID:        group.ID,
+			Procedure:          item.Procedure,
+			Qualifiers:         item.Qualifiers,
+			Evidence:           evidence,
+			Operation:          OperationResolve,
+			Reason:             input.Reason,
 		})
 		if err != nil {
 			return err
@@ -343,20 +378,27 @@ func (s *Service) resolveTimeline(ctx context.Context, tx Tx, conflict *Conflict
 				return err
 			}
 			if _, err := s.Revise(ctx, tx, ReviseInput{
-				MemoryID:        item.ID,
-				Kind:            item.Kind,
-				Title:           item.Title,
-				Content:         content,
-				ObservedAt:      item.ObservedAt,
-				ValidFrom:       segment.ValidFrom,
-				ValidTo:         segment.ValidTo,
-				ValidFromBasis:  BasisInferred,
-				ValidToBasis:    BasisInferred,
-				AssertionStatus: AssertionAccepted,
-				FactGroupID:     item.FactGroupID,
-				Evidence:        evidence,
-				Operation:       OperationResolve,
-				Reason:          input.Reason,
+				MemoryID:           item.ID,
+				Kind:               item.Kind,
+				Title:              item.Title,
+				Content:            content,
+				ObservedAt:         item.ObservedAt,
+				ObservedAtBasis:    item.ObservedAtBasis,
+				EventTime:          item.EventTime,
+				EventTimeBasis:     item.EventTimeBasis,
+				EventTimePrecision: item.EventTimePrecision,
+				ValidFrom:          segment.ValidFrom,
+				ValidTo:            segment.ValidTo,
+				ValidFromBasis:     BasisInferred,
+				ValidToBasis:       BasisInferred,
+				Temporal:           item.Temporal,
+				AssertionStatus:    AssertionAccepted,
+				FactGroupID:        item.FactGroupID,
+				Procedure:          item.Procedure,
+				Qualifiers:         item.Qualifiers,
+				Evidence:           evidence,
+				Operation:          OperationResolve,
+				Reason:             input.Reason,
 			}); err != nil {
 				return err
 			}
@@ -419,19 +461,26 @@ func (s *Service) setAssertion(ctx context.Context, tx Tx, item Memory, status A
 		return err
 	}
 	_, err = s.Revise(ctx, tx, ReviseInput{
-		MemoryID:        item.ID,
-		Kind:            item.Kind,
-		Title:           item.Title,
-		Content:         item.Content,
-		ObservedAt:      item.ObservedAt,
-		ValidFrom:       item.ValidFrom,
-		ValidTo:         item.ValidTo,
-		ValidFromBasis:  item.ValidFromBasis,
-		ValidToBasis:    item.ValidToBasis,
-		AssertionStatus: status,
-		FactGroupID:     item.FactGroupID,
-		Evidence:        evidence,
-		Operation:       operation,
+		MemoryID:           item.ID,
+		Kind:               item.Kind,
+		Title:              item.Title,
+		Content:            item.Content,
+		ObservedAt:         item.ObservedAt,
+		ObservedAtBasis:    item.ObservedAtBasis,
+		EventTime:          item.EventTime,
+		EventTimeBasis:     item.EventTimeBasis,
+		EventTimePrecision: item.EventTimePrecision,
+		ValidFrom:          item.ValidFrom,
+		ValidTo:            item.ValidTo,
+		ValidFromBasis:     item.ValidFromBasis,
+		ValidToBasis:       item.ValidToBasis,
+		Temporal:           item.Temporal,
+		AssertionStatus:    status,
+		FactGroupID:        item.FactGroupID,
+		Procedure:          item.Procedure,
+		Qualifiers:         item.Qualifiers,
+		Evidence:           evidence,
+		Operation:          operation,
 	})
 	return err
 }

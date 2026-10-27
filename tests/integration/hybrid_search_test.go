@@ -266,7 +266,8 @@ func TestHybridDegradation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result.Retrieval.Mode != retrieval.ModeHybrid || len(result.Warnings) != 0 {
+		if result.Retrieval.Mode != retrieval.ModeKeyword || len(result.Warnings) != 1 ||
+			result.Warnings[0] != retrieval.WarningSemanticIndexNotReady {
 			t.Fatalf("empty-index result = %+v", result)
 		}
 		if got := hybridIDs(result); len(got) != 1 || got[0] != created.ID {

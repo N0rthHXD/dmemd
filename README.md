@@ -8,29 +8,41 @@ HTTP/1.1 JSON API，支持关键词检索与基于 Embedding 的语义混合检�
 - 统一异步接收文本、对话和结构化内容，模型提取与记忆合并由后台单 Worker 完成。
 - 原子记忆保存平面 `scope_key`、带中英文别名和父主题继承的 canonical `topics` 与审计用 `raw_topics`；治理 Worker 自动补全分类并周期性对账，
   分类结果无变化时不生成新版本。
-- 治理 Worker 自动生成有直接原子依据的主题摘要、作用域画像、经验案例和指导型 Skill，
-  保存不可变派生版本、直接来源和 FTS。原子依据或运行结果变化时同步失效；
+- 治理 Worker 自动生成有直接原子依据的主题摘要、作用域概览、作用域画像、经验案例和指导型
+  Skill，保存不可变派生版本、直接来源和 FTS。原子依据或运行结果变化时同步失效；
   `POST /v1/memories/recall` 按 `layers` 统一返回原子、摘要、经验与 Skill 分区。
+  `GET /v1/artifacts` 与 `GET /v1/artifact-targets` 分别发现派生对象和生成目标状态。
 - 应用可提交完成结果反馈（success/failure/unknown/partial_success，均视为应用报告而非执行验证），
   可选 `run_id` 去重；失败反馈自动使相关 Skill 失效并后台重建，撤销结果同步阻断依赖使用。
   Skill 自动启用并保留来源，`GET /v1/skills/{id}/content` 返回带 frontmatter 的 SKILL.md。
 - 记忆具有完整版本、证据和生命周期：创建、更正、补证、归档、删除、历史恢复与永久清除。
-- 事实有效区间与服务记录时间分离，支持 `filters.as_of` 指定历史时点召回；未知边界显式
-  标记为 `temporal_status=unknown`，不伪造月份/日期精度。
+- 记录时间、陈述/观测时间、事件时间和事实有效时间分开建模；`filters.as_of` 只查询事实有效
+  时点，`filters.event_at` 按事件发生时间查询。未知边界显式标记为 `temporal_status=unknown`，
+  不伪造月份/日期精度，也不把接收时间回退当作新事实更晚的证据。
+- 原子记忆保留必要的主体、对象、极性、数量/单位、条件和归属；结构化 procedure 随版本、
+  内容 hash、失效和永久遗忘闭包保存；模型缺失 kind 时进行有诊断的推断，不再静默按 fact 处理。
 - 两阶段模型整理：先提取独立事实，再按候选选择有限冲突上下文并按需调用决策模型；支持
   重复、补充、变化、更正、场景分离和未决冲突，非法目标不再降级为新增。
 - 断言状态（accepted/pending/rejected）、事实组、版本关系和冲突审计独立持久化。普通召回
   优先返回 accepted，再展示明确标记的 pending；未决冲突通过 `conflict_refs`、`conflicts`
   摘要和 `fact_conflict` 警告提示，rejected 不参与召回。
-- 同主体、谓词和作用域的单值事实，有当前来源的明确更正/替换证据且时间顺序可确认时，
-  自动生成 accepted 后继，关闭旧区间或拒绝旧事实，写入 `supersedes` 和 resolved 审计；
-  证据、时间、单值属性或作用域不明确时保持 pending。
+- 事实身份由显式 `scope_key`、主体、谓词、场景和必要条件共同确定，并先按身份读取同组
+  时间线，不依赖新值正文能否召回旧值。重复断言只补证；状态变化保留旧区间并生成后继；
+  明确更正拒绝旧断言；改期/取消关联同一事件；独立观测不制造冲突。每次自动演化在同一事务
+  写入 `supersedes`、不可变演化审计和必要时的 resolved 冲突；证据、时间、单值属性或
+  作用域不明确时保持 pending，并在任务的 `convergence` 中返回固定原因。
 - 冲突管理接口支持查看 open/resolved 冲突与成员检测版本，并通过
   `choose/timeline/separate_scope/reject_all` 显式裁决；版本变化返回 409。
 - 关键词检索使用 NFC/大小写规范化与中文词典分词，基于 SQLite FTS5/BM25，支持过滤、
   可读摘要、证据引用和按需解释。
-- 混合检索并行执行关键词与 Embedding 余弦召回，按 RRF 融合；语义模型不可用或超时时
-  自动降级为关键词结果，并通过 `warnings` 返回稳定代码。Embedding 默认关闭。
+- 混合检索并行执行关键词与 Embedding 余弦召回，按 RRF 融合；语义模型不可用、限流、
+  超时、响应非法或索引未就绪时自动降级为关键词结果，并通过 `warnings` 返回稳定代码。
+  `GET /v1/embedding/status` 提供当前配置指纹、端点（无凭据）、文档/当前向量覆盖、待生成/
+  失败任务与重建原因；`POST /v1/embedding/probe` 显式检查连接和响应形状。Embedding 默认关闭。
+- 召回先返回主命中，再只在剩余 `top_k` 名额内展开同事实组成员和未决冲突成员；关联项保留
+  相同 scope/kind/state/时间过滤并带 `related` 标记。同一事实的完全重复表述折叠为
+  `cluster`，合并成员证据但不合并否定、条件或时间不同的事实。`explain=true` 返回有界的
+  候选、过滤、重排和预算阶段计数。
 - 提供架构规定的全部本地 HTTP API、用户数据目录单实例锁和优雅关闭。
 - 当前没有认证、分页、幂等键、条件请求或独立前端。
 
@@ -97,23 +109,33 @@ HTTP 端口冲突；进程崩溃后锁由操作系统释放，可直接重新启
 
 `worker.process_budget` 默认 `600s`，覆盖一次完整处理尝试；`worker.extraction_timeout`
 默认 `180s`，`worker.decision_timeout` 默认 `300s`，分别限制每次提取/决策及其修复调用。
-调用同时受剩余处理预算约束，摄取调用不会再被治理使用的 `model.timeout`（默认 `60s`）截短。
+`model.extraction`、`model.decision`、`model.governance` 可分别覆盖模型名、超时和
+`reasoning_effort`（`none/minimal/low/medium/high`）；留空时回落到 `model.name`/`model.timeout`。
+按任务拆分配置不等于用更快的模型修复协议或语义问题：规范化、证据校验和来源约束仍由服务
+统一执行。`worker.extraction_chunk_runes` 默认 `12000`，超过预算的来源按稳定片段分块提取，
+块间携带只读上下文用于指代和重复消解；单条超长字段本身也按固定片段切分，超大块会带
+`extraction_chunk_oversized` 诊断。每来源仍最多接受 64 个候选，超出部分保留前 64 个并显式
+记录 `candidate_limit_exceeded` 和 `partial`，不再静默截断或让整个来源不可用。
+
 waiting/failed 任务返回稳定的 `stage` 和 `reason_code`，例如 `extraction` +
 `process_budget_exceeded` 或 `decision` + `model_timeout`。`separate` 的非法目标字段直接移除；
-`change` 的多目标结果仅定向修复一次，不猜测目标，也不重做已通过的同批决策。
+`change` 的多目标结果仅定向修复一次，不猜测目标，也不重做已通过的同批决策。无相关事实、
+无事实组且候选身份完整时，多候选批次可确定性新增而不调用决策模型；空关键词结果本身
+不被当成“全库确无相关事实”。
 
-分类、主题摘要、作用域画像和周期性对账由一个独立治理 Worker 执行；治理故障只降级后台
+分类、主题摘要、作用域概览、作用域画像和周期性对账由一个独立治理 Worker 执行；治理故障只降级后台
 整理，不关闭 HTTP、原子查询或输入持久化。`governance.enabled=false` 只停止后台整理，原子
 写入和查询继续可用。默认 `governance.debounce` 为 30 秒、对账间隔 15 分钟、单次派生输入
 上限 64 条，治理模型调用受进程内软限速（默认最少间隔 2 分钟、每小时约 30 次）约束。配置
-只有 `enabled`、`debounce`、`reconcile_interval`、`min_call_interval`、`max_inputs` 五个
-治理项，示例见 `configs/dmemd.example.json`。
+包含 `enabled`、`debounce`、`reconcile_interval`、`min_call_interval`、`max_inputs` 和
+`max_wait`；`max_wait` 默认 30 分钟，表示连续摄取最多可推迟一个已到期治理目标多久，
+超过后允许一次公平领取。示例见 `configs/dmemd.example.json`。
 
 治理领取任务时让位于正在运行或已到期的摄取任务；摄取退避/等待配置期间不阻塞治理。
 分类和冲突复查优先于 aggregate/Skill 批量生成。同一 scope/topic 只有一个待办目标，新的
 原子版本在同一事务中替代旧待办 revision 并重新 debounce，旧 revision 不再执行或提交。
 已发出的治理模型请求不抢占取消。日志按 `topic_summary`、`profile`、`skill` 独立记录调用数、
-失败数和耗时，沿用共享治理限流预算，不记录原文或模型响应。
+失败数、队列年龄和耗时，沿用共享治理限流预算，不记录原文或模型响应。
 
 有新的相关版本或证据时，治理 Worker 会自动复查未决冲突；只有当前成员集合本身足以证明结果
 时才自动裁决，复杂重叠和未知边界保持隔离。未决冲突成员不会进入摘要、经验案例或 Skill
@@ -122,27 +144,40 @@ waiting/failed 任务返回稳定的 `stage` 和 `reason_code`，例如 `extract
 仍只是清除原文的逻辑操作。
 
 `POST /v1/memories/recall` 是唯一召回入口，默认返回原子记忆、摘要、经验和 Skill 分区；
-`layers` 可只选部分层。主题摘要、作用域画像、经验案例与 Skill 由治理 Worker 自动生成并
-保存直接原子/运行依据；依据修改、归档、删除或结果撤销时旧内容同步退出默认召回，随后
-后台重算。历史可通过 `GET /v1/artifacts/{id}` 和 `/history/{version}` 查看。经验结果来自
-应用报告，Skill 只提供可修正的指导文本，不提供真实性、执行成功或安全认证。
+`layers` 可只选部分层。主题摘要、作用域概览、作用域画像、经验案例与 Skill 由治理 Worker
+自动生成并保存直接原子/运行依据；依据修改、归档、删除或结果撤销时旧内容同步退出默认召回，
+随后后台重算。历史可通过 `GET /v1/artifacts/{id}` 和 `/history/{version}` 查看；
+`GET /v1/artifacts` 按 scope/kind/state/reason 发现对象，`GET /v1/artifact-targets` 同时返回
+尚无对象的目标、排队/运行/等待任务、无合格输入、生成失败、已有可用版本和 stale 状态。
+经验结果来自应用报告，Skill 只提供可修正的指导文本，不提供真实性、执行成功或安全认证。
 
 ### 派生质量与来源审计
 
-内置 `taxonomy-v1` 包含 containers → kubernetes/docker/oom/deployment、work →
-studio/course/training/project、travel → hong-kong/wuhan/guangzhou/itinerary。
-例如 `K8s`、`节点内存耗尽` 会保存为 `topics=[containers,kubernetes,oom]`，原始拼写保留在
-`raw_topics`。父主题摘要直接聚合子主题的原子事实，不再聚合子摘要；未知业务标签保留为扩展叶子。
+内置 `taxonomy-v1` 只保留通用概念；`K8s`、`节点内存耗尽` 会保存为
+`topics=[containers,kubernetes,oom]`，原始拼写保留在 `raw_topics`。未知业务实体保留为
+作用域内扩展标签，不按 `/` 机械拆成层级；只有每一段都是已知概念时才展开已知父子关系。
+父主题摘要直接聚合子主题的原子事实，不再聚合子摘要。`scope_summary` 是仅由 scope 和派生
+类型确定目标的通用概览，综合现状、约束、关键历史和计划；Profile 不再承担项目进度摘要。
 
 - Profile 只接收 `durability=durable`、无事件 phase、无结束边界的 fact/preference/procedure，
-  未知持久性、一次性事件、临时进度和单次行程不进入画像。
-- 摘要输入受条数、单条字数和总字数限制，超限持久化 `truncated=true`。不能确定正文逐条覆盖时，
-  正文添加子集覆盖声明，payload 记录 `coverage=full/subset`，不把“生成成功”等同于“完整覆盖”。
-- 经验案例正文始终附带“这是应用报告，不代表独立验证”，结果状态由服务保留，不能被模型升级。
-- Skill 必须有 procedure 输入；没有 procedure 时保存 `disabled/no_procedure_input`，同 scope 下
-  存在 procedure 但 topic 不匹配时保存 `topic_mismatch`。模型未配置、生成失败和无效输出分别记录
-  `model_unavailable`、`model_generation_failed`、`invalid_model_output`，原有任务重试策略继续生效。
-  诊断由 `GET /v1/artifacts/{id}` 的 `artifact.reason_code` 返回，不需要已有可用 revision。
+  未知持久性、一次性事件、临时进度和单次行程不进入画像；生成文本另记录 durability/引用检查。
+- 原子记忆返回服务派生的 `retention_reason`（明确意图、未来适用、持久知识、一次性事件、
+  临时上下文或未分类）。服务不会仅凭通用信号自动丢弃低价值候选；低价值判断只进入
+  `retention` 诊断，便于同时观察噪声写入和有用信息漏记。临时性只影响展示和后续维护审阅，
+  不触发自动 TTL 或不可逆删除；显式“不要记/不要保存”仍由摄取硬边界排除，不能被 repair
+  或后续重试复活。
+- 摘要输入受条数、单条字数和总字数限制。payload 分开记录 `input_selection`（合格、选入、
+  实际包含、省略数量和原因）、`citation_integrity`、`semantic_coverage` 及合法 `citations`/
+  `omitted_inputs`；无法确定正文是否覆盖时使用 `unknown`，服务已知省略时使用 `subset`，
+  不靠正文追加子集声明冒充质量。
+  输入签名相同的活跃目标不再重复调用模型；旧/新主题和父主题变化仍会使目标失效。
+- 经验案例正文始终附带“这是应用报告，不代表独立验证”的等效声明（按来源语言渲染），结果状态
+  由服务保留，不能被模型升级。
+- Skill 先检查 procedure 资格；没有输入的目标只记录 `no_eligible_input` 评估，不再创建空
+  artifact。已有 Skill 失去来源时仍立即 `stale/disabled` 并保留历史。同 scope 的经验不会
+  自动进入 Skill；只有显式 Skill 引用或经验案例中同一工作流主题才相关。模型未配置、生成失败、
+  输出不合格分别记录 `model_unavailable`、`model_generation_failed`、`invalid_model_output`，
+  激活要求可用 revision、直接来源和结构化内容检查。
 - 每个 revision 保存精确 memory/version、应用结果引用、生成 `run_id`、taxonomy/generator/protocol
   version、截断标记及内容 hash；独立的不可变 `provenance` 清单可发现数据库依赖丢失。
   正文、kind、时间、断言、fact group、主题或生命周期变化立即使依赖及旧/新主题目标 stale，
@@ -162,8 +197,12 @@ studio/course/training/project、travel → hong-kong/wuhan/guangzhou/itinerary�
 `embedding.enabled=true` 时需配置端点、模型版本、维数和超时；`min_similarity` 应按
 模型用相关/不相关样例校准。配置只包含这些必要项，不提供输入前缀、重试或查询预算的
 细粒度开关。启用后启动时会重建派生搜索文档，为缺失或配置不匹配的向量建立持久化任务，
-并由独立 Worker 在后台生成。Embedding 故障不影响 `/readyz`，
-`hybrid` 检索会降级并返回 `warnings`。配置示例见 `configs/dmemd.example.json`。
+并由独立 Worker 在后台生成。模型、维数或文档构造方式变化会登记重建原因，旧向量退出当前
+配置召回，只有 profile、维数和内容 hash 全部匹配的向量参与语义分支。Embedding 故障不影响
+`/readyz`，`hybrid` 检索会降级并返回 `warnings`；`GET /v1/embedding/status` 区分配置
+不匹配、索引未就绪、积压和失败任务，存在文档但当前向量为零时返回
+`semantic_index_not_ready`，不会把空向量结果解释为语义不相关。配置示例见
+`configs/dmemd.example.json`。
 
 ## HTTP API 调用示例
 
@@ -211,8 +250,15 @@ curl -sS http://127.0.0.1:18432/v1/ingest-jobs/33333333-3333-4333-8333-333333333
 ```
 
 任务成功后可读取 `memory_ids`、`conflict_ids`、`pending_memory_ids` 和固定
-`warnings`；失败时 `error` 是脱敏摘要，不包含完整模型响应或原始输入。`succeeded` 表示
-处理完成，不保证所有断言都被采纳。
+`warnings`；`quality_outcome` 区分合法空提取（`empty`）、全部安全处理（`complete`）、
+部分候选隔离（`partial`）和候选全部不可用（`unusable`），`extraction_stats` 给出原始/
+规范化/repair/拆分/隔离/接受/分块/丢弃等阶段计数，`diagnostics` 只含候选 ID、字段、固定
+代码和最终处置。`retention` 按固定原因分别记录保留与未保留候选，便于同时观察噪声写入和
+有用信息漏记；它只用于诊断，不会自动删除记忆。`timings` 给出排队年龄、提取、规范化、
+repair、上下文、决策和提交耗时，`model_usage`/`efficiency` 给出调用数、token 和每个有效
+原子的成本；`queue_age_seconds`、`stale_seconds`、`retry_reason` 用于发现长期等待和重试
+原因。失败时 `error` 是脱敏摘要，不包含完整模型响应或原始输入。`succeeded` 表示处理完成，
+不保证所有断言都被采纳。
 
 ### 历史时点召回与冲突
 
@@ -226,6 +272,16 @@ curl -sS -X POST http://127.0.0.1:18432/v1/memories/recall \
 curl -sS http://127.0.0.1:18432/v1/memory-conflicts?status=open&limit=50
 curl -sS http://127.0.0.1:18432/v1/memory-conflicts/<conflict-id>
 ```
+
+按事件发生时间查询历史或未来安排：
+
+```sh
+curl -sS -X POST http://127.0.0.1:18432/v1/memories/recall \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"复诊","filters":{"event_at":"2026-11-20T12:00:00Z"},"layers":["atomic"]}'
+```
+
+`event_at` 只匹配 `event_time` 精度窗口覆盖该时刻的 event；事件时间未知的记录不会作为确定发生结果返回。
 
 裁决请求必须携带 `revision` 与详情中的全部 `member_versions`：
 
@@ -254,10 +310,21 @@ curl -sS -X POST http://127.0.0.1:18432/v1/memories/recall \
 # 查询会过滤受控停用词，但不设置最低命中数；
 # 结果按 BM25 名次与词项覆盖率做有界重排
 
-# 混合召回；语义不可用时自动降级为关键词并返回 warnings
+# 混合召回；语义不可用、限流、超时、响应非法或索引未就绪时自动降级为关键词并返回 warnings
 curl -sS -X POST http://127.0.0.1:18432/v1/memories/recall \
   -H 'Content-Type: application/json' \
   -d '{"query":"吃饭有什么忌口","mode":"hybrid","top_k":10}'
+
+# explain=true 返回候选/过滤/重排/预算阶段计数；关联项带 related，重复事实折叠为 cluster
+curl -sS -X POST http://127.0.0.1:18432/v1/memories/recall \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"回答 语言","layers":["atomic"],"explain":true}'
+
+# Embedding 配置指纹、向量覆盖率、待生成/失败任务和重建原因
+curl -sS http://127.0.0.1:18432/v1/embedding/status
+
+# 显式检查端点和响应形状；结果不持久化，不影响 readyz 或普通召回
+curl -sS -X POST http://127.0.0.1:18432/v1/embedding/probe
 
 curl -sS http://127.0.0.1:18432/v1/memories/11111111-1111-4111-8111-111111111111
 ```

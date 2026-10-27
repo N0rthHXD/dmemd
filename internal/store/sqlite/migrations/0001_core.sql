@@ -23,7 +23,7 @@ CREATE TABLE schema_meta (
     value TEXT NOT NULL
 );
 
-INSERT INTO schema_meta(key, value) VALUES ('contract', 'dmemd-p2-2026-10-26');
+INSERT INTO schema_meta(key, value) VALUES ('contract', 'dmemd-p5-2026-10-27');
 
 CREATE TABLE memories (
     id                TEXT NOT NULL PRIMARY KEY,
@@ -39,12 +39,22 @@ CREATE TABLE memories (
                       CHECK (assertion_status IN ('accepted', 'pending', 'rejected')),
     version           INTEGER NOT NULL,
     observed_at       TEXT NOT NULL,
+    observed_at_basis TEXT NOT NULL DEFAULT 'recorded'
+                      CHECK (observed_at_basis IN ('explicit', 'inferred', 'unknown', 'recorded')),
+    event_time        TEXT,
+    event_time_basis  TEXT NOT NULL DEFAULT 'unknown'
+                      CHECK (event_time_basis IN ('explicit', 'inferred', 'unknown')),
+    event_time_precision TEXT NOT NULL DEFAULT 'unknown'
+                      CHECK (event_time_precision IN ('unknown', 'year', 'month', 'day', 'hour', 'minute', 'second')),
     valid_from        TEXT,
     valid_to          TEXT,
     valid_from_basis  TEXT NOT NULL DEFAULT 'unknown'
                       CHECK (valid_from_basis IN ('explicit', 'inferred', 'unknown')),
     valid_to_basis    TEXT NOT NULL DEFAULT 'unknown'
                       CHECK (valid_to_basis IN ('explicit', 'inferred', 'unknown')),
+    temporal_json     TEXT NOT NULL DEFAULT '{}',
+    procedure_json    TEXT NOT NULL DEFAULT '',
+    qualifiers_json   TEXT NOT NULL DEFAULT '',
     fact_group_id     TEXT REFERENCES memory_fact_groups(id) ON DELETE SET NULL,
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL,
@@ -56,6 +66,7 @@ CREATE TABLE memories (
     CHECK (version >= 1),
     CHECK ((valid_from IS NULL) = (valid_from_basis = 'unknown')),
     CHECK ((valid_to IS NULL) = (valid_to_basis = 'unknown')),
+    CHECK ((event_time IS NULL) = (event_time_basis = 'unknown')),
     CHECK (valid_from IS NULL OR valid_to IS NULL OR valid_from < valid_to)
 );
 
@@ -66,6 +77,7 @@ CREATE INDEX idx_memories_created_by_app ON memories(created_by_app);
 CREATE INDEX idx_memories_assertion_status ON memories(assertion_status);
 CREATE INDEX idx_memories_fact_group ON memories(fact_group_id);
 CREATE INDEX idx_memories_valid_range ON memories(valid_from, valid_to);
+CREATE INDEX idx_memories_event_time ON memories(event_time);
 CREATE INDEX idx_memories_scope_key ON memories(scope_key);
 
 -- A revision stores a complete snapshot. Evidence is linked separately so one
@@ -87,12 +99,22 @@ CREATE TABLE memory_revisions (
     assertion_status  TEXT NOT NULL DEFAULT 'accepted'
                       CHECK (assertion_status IN ('accepted', 'pending', 'rejected')),
     observed_at       TEXT NOT NULL,
+    observed_at_basis TEXT NOT NULL DEFAULT 'recorded'
+                      CHECK (observed_at_basis IN ('explicit', 'inferred', 'unknown', 'recorded')),
+    event_time        TEXT,
+    event_time_basis  TEXT NOT NULL DEFAULT 'unknown'
+                      CHECK (event_time_basis IN ('explicit', 'inferred', 'unknown')),
+    event_time_precision TEXT NOT NULL DEFAULT 'unknown'
+                      CHECK (event_time_precision IN ('unknown', 'year', 'month', 'day', 'hour', 'minute', 'second')),
     valid_from        TEXT,
     valid_to          TEXT,
     valid_from_basis  TEXT NOT NULL DEFAULT 'unknown'
                       CHECK (valid_from_basis IN ('explicit', 'inferred', 'unknown')),
     valid_to_basis    TEXT NOT NULL DEFAULT 'unknown'
                       CHECK (valid_to_basis IN ('explicit', 'inferred', 'unknown')),
+    temporal_json     TEXT NOT NULL DEFAULT '{}',
+    procedure_json    TEXT NOT NULL DEFAULT '',
+    qualifiers_json   TEXT NOT NULL DEFAULT '',
     fact_group_id     TEXT REFERENCES memory_fact_groups(id) ON DELETE SET NULL,
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL,
@@ -105,6 +127,7 @@ CREATE TABLE memory_revisions (
     FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE,
     CHECK ((valid_from IS NULL) = (valid_from_basis = 'unknown')),
     CHECK ((valid_to IS NULL) = (valid_to_basis = 'unknown')),
+    CHECK ((event_time IS NULL) = (event_time_basis = 'unknown')),
     CHECK (valid_from IS NULL OR valid_to IS NULL OR valid_from < valid_to)
 );
 
@@ -153,6 +176,14 @@ CREATE TABLE ingest_jobs (
     conflict_ids    TEXT NOT NULL DEFAULT '[]',
     pending_memory_ids TEXT NOT NULL DEFAULT '[]',
     warnings        TEXT NOT NULL DEFAULT '[]',
+    quality_outcome TEXT NOT NULL DEFAULT '' CHECK (quality_outcome IN
+                    ('', 'empty', 'complete', 'partial', 'unusable')),
+    extraction_stats TEXT NOT NULL DEFAULT '{}',
+    retention_stats TEXT NOT NULL DEFAULT '{}',
+    timings         TEXT NOT NULL DEFAULT '{}',
+    model_usage     TEXT NOT NULL DEFAULT '{}',
+    diagnostics     TEXT NOT NULL DEFAULT '[]',
+    convergence_diagnostics TEXT NOT NULL DEFAULT '[]',
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     started_at      TEXT,

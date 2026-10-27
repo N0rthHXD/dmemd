@@ -110,6 +110,10 @@ func (s *Store) ArtifactIntegrityCheck(ctx context.Context) (artifact.IntegrityR
 				Version int    `json:"version"`
 			} `json:"memory_refs"`
 			ExperienceRefs []string `json:"experience_refs"`
+			Citations      []struct {
+				MemoryID string `json:"memory_id"`
+				Version  int    `json:"version"`
+			} `json:"citations"`
 		}
 		if json.Unmarshal(r.Payload, &payload) == nil && payload.Truncated != nil && *payload.Truncated != r.Truncated {
 			add("truncation_mismatch")
@@ -125,6 +129,18 @@ func (s *Store) ArtifactIntegrityCheck(ctx context.Context) (artifact.IntegrityR
 			}
 			if !sameRefSet(refs, r.MemoryRefs) || !sameRunRefSet(runs, r.RunRefs) {
 				add("payload_dependency_mismatch")
+			}
+		}
+		if len(payload.Citations) > 0 {
+			allowed := make(map[artifact.MemoryRef]bool, len(r.MemoryRefs))
+			for _, ref := range r.MemoryRefs {
+				allowed[ref] = true
+			}
+			for _, citation := range payload.Citations {
+				if !allowed[artifact.MemoryRef{MemoryID: citation.MemoryID, Version: citation.Version}] {
+					add("invalid_citation")
+					break
+				}
 			}
 		}
 		for _, ref := range p.MemoryRefs {

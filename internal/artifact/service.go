@@ -142,6 +142,23 @@ func (s *Service) Search(ctx context.Context, query SearchQuery) ([]SearchHit, e
 	return s.backend.SearchArtifacts(ctx, query)
 }
 
+// List returns a bounded keyset page of current derived objects.
+func (s *Service) List(ctx context.Context, query ListQuery) (ListPage, error) {
+	if query.Limit <= 0 {
+		query.Limit = 50
+	}
+	return s.backend.ListArtifacts(ctx, query)
+}
+
+// ListTargets returns a bounded page that also includes evaluated targets with
+// no artifact yet, so callers can distinguish "not eligible" from failure.
+func (s *Service) ListTargets(ctx context.Context, query TargetQuery) (TargetPage, error) {
+	if query.Limit <= 0 {
+		query.Limit = 50
+	}
+	return s.backend.ListTargets(ctx, query)
+}
+
 // ListStaleTargets returns stale targets for bounded reconciliation.
 func (s *Service) ListStaleTargets(ctx context.Context, after string, limit int) ([]Target, error) {
 	if limit <= 0 {
@@ -292,6 +309,9 @@ func (s *Service) Commit(ctx context.Context, tx Tx, input CommitInput) (Artifac
 	if err := tx.UpdateArtifact(ctx, item); err != nil {
 		return Artifact{}, err
 	}
+	if err := tx.DeleteTargetEvaluation(ctx, input.Kind, input.TargetKey); err != nil {
+		return Artifact{}, err
+	}
 	return item, nil
 }
 
@@ -336,6 +356,32 @@ func (s *Service) DisableWithReason(ctx context.Context, tx Tx, target Target, r
 		return Artifact{}, err
 	}
 	return item, nil
+}
+
+// DisableExisting updates an existing content object to disabled without
+// manufacturing an empty artifact for a target that never had a usable
+// revision. The boolean reports whether the object existed.
+func (s *Service) DisableExisting(ctx context.Context, tx Tx, target Target, reason string) (Artifact, bool, error) {
+	now := s.now().UTC()
+	item, err := tx.GetArtifactByTarget(ctx, target.Kind, target.TargetKey())
+	if errors.Is(err, ErrNotFound) {
+		return Artifact{}, false, nil
+	}
+	if err != nil {
+		return Artifact{}, false, err
+	}
+	if item.State != StateDisabled || item.ReasonCode != reason {
+		item.State = StateDisabled
+		item.ReasonCode = reason
+		item.UpdatedAt = now
+		if err := tx.UpdateArtifact(ctx, item); err != nil {
+			return Artifact{}, false, err
+		}
+	}
+	if err := tx.DeleteArtifactSearchDocument(ctx, item.ID); err != nil {
+		return Artifact{}, false, err
+	}
+	return item, true, nil
 }
 
 // MemoryChanged applies synchronous invalidation and registers derived work in
@@ -418,9 +464,11 @@ func (s *Service) MemoryChanged(ctx context.Context, tx Tx, change MemoryChange)
 
 // ExperienceChanged queues the skill targets that can consume a new, changed or
 // retracted application result. The case itself is already invalidated by its
-// own handler; this hook keeps skills from lagging behind a new counterexample.
+// own handler; this hook keeps related skills from lagging behind a new
+// counterexample. Only the same workflow topic or an explicit skill reference
+// is related; sharing a scope alone is insufficient.
 func (s *Service) ExperienceChanged(ctx context.Context, tx Tx, scopeKey string, topics []string,
-	experienceID, reason string, nextAttempt time.Time) error {
+	skillID, experienceID, reason string, nextAttempt time.Time) error {
 	scopeKey = normalizeScope(scopeKey)
 	if scopeKey == "" {
 		return nil
@@ -435,11 +483,23 @@ func (s *Service) ExperienceChanged(ctx context.Context, tx Tx, scopeKey string,
 	for _, item := range existing {
 		existingByTarget[item.TargetKey] = item
 	}
+	relatedTopics := map[string]bool{}
+	for _, topic := range normalizeTopics(topics) {
+		if topic != "" {
+			relatedTopics[topic] = true
+		}
+	}
+	workflowTopics := len(relatedTopics) == 1
 	// Candidate topic skills are registered so a new experience can create a
 	// skill that does not exist yet. Existing stale work is left to its pending
 	// task: its input selection reads recorded runs directly, so case generation
 	// must not bump the same target a second time.
 	for _, target := range SkillTargets(scopeKey, topics) {
+		if !workflowTopics && len(relatedTopics) > 0 {
+			// An experience spanning several workflows is not enough evidence
+			// to attach itself to a new skill target.
+			break
+		}
 		if target.Topic == "" && len(existing) > 0 {
 			// A scope-level fallback skill is only useful when the scope has no
 			// topic-specific guidance to consume the experience.
@@ -452,11 +512,14 @@ func (s *Service) ExperienceChanged(ctx context.Context, tx Tx, scopeKey string,
 		targets[target.TargetKey()] = target
 	}
 	for _, item := range existing {
-		if item.State == StateStale {
-			continue
-		}
 		target, err := TargetForArtifact(item)
 		if err != nil {
+			continue
+		}
+		explicit := skillID != "" && item.ID == skillID
+		sameWorkflow := workflowTopics && target.Topic != "" && relatedTopics[target.Topic]
+		scopeFallback := target.Topic == "" && len(relatedTopics) == 0
+		if !explicit && !sameWorkflow && !scopeFallback {
 			continue
 		}
 		if item.State == StateActive && experienceID != "" && artifactHasRun(ctx, tx, item, experienceID) {
@@ -580,7 +643,7 @@ func validateCommitTarget(input CommitInput) error {
 		return fmt.Errorf("%w: missing target", ErrInvalidInput)
 	}
 	switch input.Kind {
-	case KindTopicSummary, KindProfile:
+	case KindTopicSummary, KindScopeSummary, KindProfile:
 		if strings.TrimSpace(input.ScopeKey) == "" {
 			return fmt.Errorf("%w: missing scope", ErrInvalidInput)
 		}
@@ -681,6 +744,8 @@ func ContentHash(title, content string, payload, provenance json.RawMessage) str
 
 func defaultTitle(input CommitInput) string {
 	switch input.Kind {
+	case KindScopeSummary:
+		return input.ScopeKey + " 概览"
 	case KindProfile:
 		return input.ScopeKey + " 画像"
 	case KindExperienceCase:

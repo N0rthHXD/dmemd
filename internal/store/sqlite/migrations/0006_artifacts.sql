@@ -6,7 +6,7 @@
 CREATE TABLE artifacts (
     id              TEXT NOT NULL PRIMARY KEY,
     kind            TEXT NOT NULL CHECK (kind IN
-                     ('topic_summary', 'profile', 'experience_case', 'skill')),
+                     ('topic_summary', 'scope_summary', 'profile', 'experience_case', 'skill')),
     target_key      TEXT NOT NULL,
     scope_key       TEXT NOT NULL DEFAULT '',
     topic           TEXT NOT NULL DEFAULT '',
@@ -93,3 +93,23 @@ CREATE TRIGGER artifact_search_docs_au AFTER UPDATE ON artifact_search_docs BEGI
     INSERT INTO artifact_fts(rowid, title_terms, content_terms)
     VALUES (new.row_id, new.title_terms, new.content_terms);
 END;
+
+-- A target may be evaluated without producing any artifact. Keeping this
+-- separate from `artifacts` distinguishes "not eligible yet" from a disabled or
+-- failed content object with retained history. A successful commit clears the
+-- evaluation row for its target.
+CREATE TABLE derived_target_evaluations (
+    kind            TEXT NOT NULL CHECK (kind IN
+                     ('topic_summary', 'scope_summary', 'profile', 'experience_case', 'skill')),
+    target_key      TEXT NOT NULL,
+    scope_key       TEXT NOT NULL DEFAULT '',
+    topic           TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL CHECK (status IN
+                     ('no_eligible_input', 'model_unavailable', 'generation_failed', 'invalid_output')),
+    reason_code     TEXT NOT NULL DEFAULT '',
+    evaluated_at    TEXT NOT NULL,
+    PRIMARY KEY (kind, target_key)
+);
+
+CREATE INDEX idx_derived_target_evaluations_scope
+    ON derived_target_evaluations(scope_key, kind, evaluated_at);

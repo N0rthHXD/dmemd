@@ -137,7 +137,7 @@ func (h *AggregateHandler) processExperience(ctx context.Context, job task.Job) 
 			return err
 		}
 		if err := h.artifacts.ExperienceChanged(ctx, tx, latest.ScopeKey, topics,
-			experienceID, "experience-case:"+experienceID, h.now().UTC()); err != nil {
+			latest.SkillID, experienceID, "experience-case:"+experienceID, h.now().UTC()); err != nil {
 			return err
 		}
 		ok, err := tx.FinishJob(ctx, job.ID, job.Revision, h.now().UTC())
@@ -203,14 +203,20 @@ func renderExperienceCase(run ExperienceRun, result artifact.ExperienceResult,
 	problem = truncateRunes(problem, defaultAggregateTitleRunes)
 	preconditions := nonEmpty(result.Preconditions, run.Conditions)
 	actions := nonEmpty(result.Actions, run.Actions)
+	language := experienceLanguage(run, memories)
 	content := strings.TrimSpace(result.Content)
 	if content == "" {
 		content = renderExperienceText(problem, preconditions, actions, run.Outcome,
-			result.Lessons, result.FailureModes)
+			result.Lessons, result.FailureModes, language)
 	}
 	content = truncateRunes(content, maxAggregateContentRunes)
 	// This service-owned statement cannot be omitted by model-authored content.
-	content = "这是应用报告，不代表独立验证。结果：" + string(run.Outcome) + "。\n\n" + content
+	if language == "en" {
+		content = "This is an application report, not independently verified. Outcome: " +
+			string(run.Outcome) + ".\n\n" + content
+	} else {
+		content = "这是应用报告，不代表独立验证。结果：" + string(run.Outcome) + "。\n\n" + content
+	}
 
 	memoryRefs := make([]map[string]any, 0, len(memories))
 	for _, memory := range memories {
@@ -222,6 +228,8 @@ func renderExperienceCase(run ExperienceRun, result artifact.ExperienceResult,
 	payload, err := json.Marshal(map[string]any{
 		"problem":         problem,
 		"scope_key":       run.ScopeKey,
+		"topics":          memoryTopics(memories),
+		"language":        language,
 		"preconditions":   preconditions,
 		"actions":         actions,
 		"outcome":         string(run.Outcome),
@@ -238,8 +246,28 @@ func renderExperienceCase(run ExperienceRun, result artifact.ExperienceResult,
 }
 
 func renderExperienceText(problem string, preconditions, actions []string, outcome ExperienceOutcome,
-	lessons, failureModes []string) string {
+	lessons, failureModes []string, language string) string {
 	var builder strings.Builder
+	if language == "en" {
+		builder.WriteString("Problem: ")
+		builder.WriteString(problem)
+		builder.WriteString("\n\nConditions:\n")
+		writeBulletsWithFallback(&builder, preconditions, "- not provided\n")
+		builder.WriteString("\nActions:\n")
+		writeBulletsWithFallback(&builder, actions, "- not provided\n")
+		builder.WriteString("\nOutcome (application report): ")
+		builder.WriteString(string(outcome))
+		builder.WriteString("\n")
+		if len(lessons) > 0 {
+			builder.WriteString("\nLessons:\n")
+			writeBulletsWithFallback(&builder, lessons, "- not provided\n")
+		}
+		if len(failureModes) > 0 {
+			builder.WriteString("\nFailure modes:\n")
+			writeBulletsWithFallback(&builder, failureModes, "- not provided\n")
+		}
+		return strings.TrimSpace(builder.String())
+	}
 	builder.WriteString("问题：")
 	builder.WriteString(problem)
 	builder.WriteString("\n\n条件：\n")
@@ -260,9 +288,37 @@ func renderExperienceText(problem string, preconditions, actions []string, outco
 	return strings.TrimSpace(builder.String())
 }
 
+func experienceLanguage(run ExperienceRun, memories []artifact.MemoryInput) string {
+	text := run.Goal + strings.Join(run.Conditions, "") + strings.Join(run.Actions, "")
+	for _, memory := range memories {
+		text += memory.Title + memory.Content
+	}
+	if text == "" {
+		return "zh"
+	}
+	cjk, total := 0, 0
+	for _, r := range text {
+		if r == ' ' || r == '\n' || r == '\t' {
+			continue
+		}
+		total++
+		if r >= 0x4e00 && r <= 0x9fff {
+			cjk++
+		}
+	}
+	if total > 0 && cjk*2 < total {
+		return "en"
+	}
+	return "zh"
+}
+
 func writeBullets(builder *strings.Builder, values []string) {
+	writeBulletsWithFallback(builder, values, "- 未提供\n")
+}
+
+func writeBulletsWithFallback(builder *strings.Builder, values []string, fallback string) {
 	if len(values) == 0 {
-		builder.WriteString("- 未提供\n")
+		builder.WriteString(fallback)
 		return
 	}
 	for _, value := range values {

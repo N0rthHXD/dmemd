@@ -18,3 +18,21 @@ func TestCanonicalAliasesAndAncestors(t *testing.T) {
 		t.Fatalf("raw = %v", got)
 	}
 }
+
+func TestCanonicalSplitsOnlyKnownConceptPaths(t *testing.T) {
+	known := Canonical([]string{"containers/docker"})
+	if !reflect.DeepEqual(known, []string{"containers", "docker"}) {
+		t.Fatalf("known path = %v", known)
+	}
+	unknown := Canonical([]string{"atlas/river"})
+	if !reflect.DeepEqual(unknown, []string{"atlas/river"}) {
+		t.Fatalf("unknown path was split: %v", unknown)
+	}
+	mixed := Canonical([]string{"containers/unknown-project"})
+	if !reflect.DeepEqual(mixed, []string{"containers/unknown-project"}) {
+		t.Fatalf("mixed path was split: %v", mixed)
+	}
+	if got := Raw([]string{"containers/docker"}); !reflect.DeepEqual(got, []string{"containers/docker"}) {
+		t.Fatalf("raw path = %v", got)
+	}
+}

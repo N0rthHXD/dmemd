@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/N0rthHXD/dmemd/internal/artifact"
+	"github.com/N0rthHXD/dmemd/internal/embedding"
 	"github.com/N0rthHXD/dmemd/internal/governance"
 	"github.com/N0rthHXD/dmemd/internal/ingest"
 	"github.com/N0rthHXD/dmemd/internal/memory"
@@ -26,12 +27,13 @@ type Services struct {
 	Experiences governance.ExperienceService
 	Skills      skill.ContentService
 	Forget      governance.ForgetService
+	Embedding   embedding.DiagnosticAPI
 }
 
 func (s Services) configured() bool {
 	return s.Ingest != nil || s.Memories != nil || s.Conflicts != nil || s.Sources != nil ||
 		s.Search != nil || s.Artifacts != nil || s.Experiences != nil || s.Skills != nil ||
-		s.Forget != nil
+		s.Forget != nil || s.Embedding != nil
 }
 
 // Options configures the HTTP transport. Ready checks database readiness before
@@ -75,6 +77,8 @@ func (h *handler) businessRoutes() http.Handler {
 	mux.HandleFunc("POST /v1/forget", h.forget)
 	mux.HandleFunc("GET /v1/memories", h.listMemories)
 	mux.HandleFunc("POST /v1/memories/recall", h.recallMemories)
+	mux.HandleFunc("GET /v1/artifacts", h.listArtifacts)
+	mux.HandleFunc("GET /v1/artifact-targets", h.listArtifactTargets)
 	mux.HandleFunc("GET /v1/artifacts/{id}", h.getArtifact)
 	mux.HandleFunc("GET /v1/artifacts/{id}/history/{version}", h.getArtifactHistoryEntry)
 	mux.HandleFunc("GET /v1/skills/{id}/content", h.getSkillContent)
@@ -92,6 +96,8 @@ func (h *handler) businessRoutes() http.Handler {
 	mux.HandleFunc("GET /v1/sources/{id}", h.getSource)
 	mux.HandleFunc("DELETE /v1/sources/{id}", h.redactSource)
 	mux.HandleFunc("GET /v1/ingest-jobs/{id}", h.getJob)
+	mux.HandleFunc("GET /v1/embedding/status", h.embeddingStatus)
+	mux.HandleFunc("POST /v1/embedding/probe", h.embeddingProbe)
 	mux.HandleFunc("/", h.notFound)
 	return mux
 }
@@ -183,4 +189,12 @@ func (h *handler) requireForget(w http.ResponseWriter) (governance.ForgetService
 		return nil, false
 	}
 	return h.services.Forget, true
+}
+
+func (h *handler) requireEmbedding(w http.ResponseWriter) (embedding.DiagnosticAPI, bool) {
+	if h.services.Embedding == nil {
+		h.writeUnavailable(w)
+		return nil, false
+	}
+	return h.services.Embedding, true
 }

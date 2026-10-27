@@ -59,6 +59,13 @@ func (s *Store) Search(ctx context.Context, query retrieval.Query) ([]retrieval.
 		conditions = append(conditions, "(m.valid_to IS NULL OR ? < m.valid_to)")
 		args = append(args, formatTime(*query.Filters.AsOf))
 	}
+	if query.Filters.EventAt != nil {
+		// The lower bound is a coarse guard; retrieval re-checks the exact
+		// precision window in Go after loading the snapshot.
+		lower := query.Filters.EventAt.AddDate(-1, 0, -1)
+		conditions = append(conditions, "m.event_time IS NOT NULL AND m.event_time <= ? AND m.event_time >= ?")
+		args = append(args, formatTime(*query.Filters.EventAt), formatTime(lower))
+	}
 	if query.Filters.CreatedByApp != "" {
 		conditions = append(conditions, "m.created_by_app = ?")
 		args = append(args, query.Filters.CreatedByApp)

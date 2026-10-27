@@ -105,33 +105,54 @@ func (s *Service) Search(ctx context.Context, request Request) (Result, error) {
 	}
 	groups := queryGroups(request.Query)
 	filters, filtersOK := sanitizeFilters(request.Filters)
-	if filters.AsOf == nil {
+	if filters.AsOf == nil && filters.EventAt == nil {
 		asOf := time.Now().UTC()
 		filters.AsOf = &asOf
 	}
+	var diagnostics *SearchDiagnostics
+	if request.Explain {
+		diagnostics = &SearchDiagnostics{}
+	}
 	if len(groups) == 0 || !filtersOK {
 		return Result{
-			Items:     []Item{},
-			Retrieval: Retrieval{Mode: mode},
-			Conflicts: []memory.ConflictSummary{},
+			Items:       []Item{},
+			Retrieval:   Retrieval{Mode: mode},
+			Conflicts:   []memory.ConflictSummary{},
+			Diagnostics: diagnostics,
 		}, nil
 	}
 	var result Result
 	if mode == ModeHybrid {
-		result, err = s.searchHybrid(ctx, groups, request, filters, topK)
+		result, err = s.searchHybrid(ctx, groups, request, filters, topK, diagnostics)
 	} else {
-		result, err = s.searchKeyword(ctx, groups, request, filters, topK, nil, true)
+		result, err = s.searchKeyword(ctx, groups, request, filters, topK, nil, true, diagnostics)
 	}
 	if err != nil {
 		return Result{}, err
 	}
-	return s.decorateConflicts(ctx, result, groups, filters)
+	// Fold duplicate primary expressions before association so repeated copies
+	// cannot consume the small budget reserved for related context.
+	result.Items = clusterDisplayItems(result.Items)
+	if err := s.expandAssociations(ctx, &result, groups, filters, topK, diagnostics); err != nil {
+		return Result{}, err
+	}
+	result, err = s.decorateConflicts(ctx, result, groups, filters)
+	if err != nil {
+		return Result{}, err
+	}
+	result.Items = clusterDisplayItems(result.Items)
+	if diagnostics != nil {
+		s.populateFilterDiagnostics(ctx, groups, filters, diagnostics)
+		diagnostics.ReturnedItems = len(result.Items)
+		result.Diagnostics = diagnostics
+	}
+	return result, nil
 }
 
 // RelatedContext selects bounded consistency context for one candidate fact.
 // It deliberately bypasses the public current-time filter so historical,
 // pending and archived assertions can be judged.
-func (s *Service) RelatedContext(ctx context.Context, text string, limit int) (ContextResult, error) {
+func (s *Service) RelatedContext(ctx context.Context, scopeKey, text string, limit int) (ContextResult, error) {
 	if limit <= 0 {
 		limit = DefaultRelatedLimit
 	}
@@ -145,8 +166,9 @@ func (s *Service) RelatedContext(ctx context.Context, text string, limit int) (C
 	contextFilters := Filters{
 		States:          []memory.State{memory.StateActive, memory.StateArchived},
 		AssertionStatus: []memory.AssertionStatus{memory.AssertionAccepted, memory.AssertionPending},
+		ScopeKey:        scopeKey,
 	}
-	result, err := s.searchKeyword(ctx, groups, Request{}, contextFilters, limit+1, nil, false)
+	result, err := s.searchKeyword(ctx, groups, Request{}, contextFilters, limit+1, nil, false, nil)
 	if err != nil {
 		return ContextResult{}, err
 	}
@@ -398,7 +420,7 @@ func (s *Service) RebuildIndex(ctx context.Context) (RebuildResult, error) {
 	return result, nil
 }
 
-func (s *Service) searchKeyword(ctx context.Context, groups []Group, request Request, filters Filters, topK int, warnings []string, optimize bool) (Result, error) {
+func (s *Service) searchKeyword(ctx context.Context, groups []Group, request Request, filters Filters, topK int, warnings []string, optimize bool, diagnostics *SearchDiagnostics) (Result, error) {
 	result := Result{
 		Items:     []Item{},
 		Retrieval: Retrieval{Mode: ModeKeyword},
@@ -426,11 +448,14 @@ func (s *Service) searchKeyword(ctx context.Context, groups []Group, request Req
 	if err != nil {
 		return Result{}, err
 	}
+	if diagnostics != nil {
+		diagnostics.KeywordCandidates = len(hits)
+	}
 	var assembled []Item
 	if optimize {
-		assembled, err = s.assembleCoverageRerankedKeywordHits(ctx, hits, groups, filters, topK, request.Explain)
+		assembled, err = s.assembleCoverageRerankedKeywordHits(ctx, hits, groups, filters, topK, request.Explain, diagnostics)
 	} else {
-		assembled, err = s.assembleKeywordHits(ctx, hits, groups, filters, topK, request.Explain)
+		assembled, err = s.assembleKeywordHits(ctx, hits, groups, filters, topK, request.Explain, diagnostics)
 	}
 	if err != nil {
 		return Result{}, err
@@ -448,7 +473,7 @@ type rankedCandidate struct {
 	score        float64
 }
 
-func (s *Service) assembleKeywordHits(ctx context.Context, hits []Hit, groups []Group, filters Filters, limit int, explain bool) ([]Item, error) {
+func (s *Service) assembleKeywordHits(ctx context.Context, hits []Hit, groups []Group, filters Filters, limit int, explain bool, diagnostics *SearchDiagnostics) ([]Item, error) {
 	if len(hits) == 0 {
 		return []Item{}, nil
 	}
@@ -469,6 +494,9 @@ func (s *Service) assembleKeywordHits(ctx context.Context, hits []Hit, groups []
 		position := len(selected) + 1
 		entry := rankedCandidate{candidate: candidate, keyword: &hit, keywordRank: position, score: -hit.BM25}
 		selected = append(selected, entry)
+	}
+	if diagnostics != nil {
+		diagnostics.RankingCandidates = len(selected)
 	}
 	sort.SliceStable(selected, func(i, j int) bool {
 		li, lj := selected[i].candidate.Memory.AssertionStatus, selected[j].candidate.Memory.AssertionStatus
@@ -493,7 +521,7 @@ const keywordCoverageWeight = 0.005
 // a hard minimum-coverage filter hurts natural-language recall, so coverage
 // may only move candidates within the BM25 candidate set. Candidates remain in
 // BM25 order as the stable fallback for equal scores.
-func (s *Service) assembleCoverageRerankedKeywordHits(ctx context.Context, hits []Hit, groups []Group, filters Filters, topK int, explain bool) ([]Item, error) {
+func (s *Service) assembleCoverageRerankedKeywordHits(ctx context.Context, hits []Hit, groups []Group, filters Filters, topK int, explain bool, diagnostics *SearchDiagnostics) ([]Item, error) {
 	if len(hits) == 0 || len(groups) == 0 {
 		return []Item{}, nil
 	}
@@ -519,6 +547,9 @@ func (s *Service) assembleCoverageRerankedKeywordHits(ctx context.Context, hits 
 			keywordRank: index + 1,
 			score:       reciprocalRank(index+1) + keywordCoverageWeight*coverage,
 		})
+	}
+	if diagnostics != nil {
+		diagnostics.RankingCandidates = len(selected)
 	}
 	sort.SliceStable(selected, func(i, j int) bool {
 		li, lj := selected[i].candidate.Memory.AssertionStatus, selected[j].candidate.Memory.AssertionStatus
@@ -713,6 +744,9 @@ func matchesFilters(item memory.Memory, filters Filters) bool {
 		return false
 	}
 	if filters.AsOf != nil && !memory.Contains(item.ValidFrom, item.ValidTo, *filters.AsOf) {
+		return false
+	}
+	if filters.EventAt != nil && (item.Kind != memory.KindEvent || !memory.EventContains(item, *filters.EventAt)) {
 		return false
 	}
 	return true

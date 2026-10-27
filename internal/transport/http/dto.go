@@ -7,6 +7,7 @@ import (
 
 	"github.com/N0rthHXD/dmemd/internal/artifact"
 	"github.com/N0rthHXD/dmemd/internal/governance"
+	"github.com/N0rthHXD/dmemd/internal/governance/task"
 	"github.com/N0rthHXD/dmemd/internal/ingest"
 	"github.com/N0rthHXD/dmemd/internal/memory"
 	"github.com/N0rthHXD/dmemd/internal/retrieval"
@@ -23,29 +24,72 @@ type submitResponse struct {
 	Status   string `json:"status"`
 }
 
+type temporalDetailDTO struct {
+	Text          string `json:"text,omitempty"`
+	Precision     string `json:"precision,omitempty"`
+	TimezoneKnown bool   `json:"timezone_known"`
+}
+
+type temporalDetailsDTO struct {
+	Observed  temporalDetailDTO `json:"observed"`
+	Event     temporalDetailDTO `json:"event"`
+	ValidFrom temporalDetailDTO `json:"valid_from"`
+	ValidTo   temporalDetailDTO `json:"valid_to"`
+}
+
+type quantityDTO struct {
+	Value string `json:"value"`
+	Unit  string `json:"unit,omitempty"`
+}
+
+type qualifiersDTO struct {
+	Entities    []string     `json:"entities,omitempty"`
+	Quantity    *quantityDTO `json:"quantity,omitempty"`
+	Conditions  []string     `json:"conditions,omitempty"`
+	Polarity    string       `json:"polarity,omitempty"`
+	Certainty   string       `json:"certainty,omitempty"`
+	Attribution string       `json:"attribution,omitempty"`
+}
+
+type procedureDTO struct {
+	Goal                 string   `json:"goal,omitempty"`
+	Steps                []string `json:"steps,omitempty"`
+	Preconditions        []string `json:"preconditions,omitempty"`
+	CompletionConditions []string `json:"completion_conditions,omitempty"`
+	FailureBranches      []string `json:"failure_branches,omitempty"`
+}
+
 type memoryDTO struct {
-	ID              string     `json:"id"`
-	Kind            string     `json:"kind"`
-	Phase           string     `json:"phase"`
-	Durability      string     `json:"durability"`
-	Title           string     `json:"title"`
-	Content         string     `json:"content"`
-	State           string     `json:"state"`
-	AssertionStatus string     `json:"assertion_status"`
-	Version         int        `json:"version"`
-	ObservedAt      time.Time  `json:"observed_at"`
-	ValidFrom       *time.Time `json:"valid_from"`
-	ValidTo         *time.Time `json:"valid_to"`
-	ValidFromBasis  string     `json:"valid_from_basis"`
-	ValidToBasis    string     `json:"valid_to_basis"`
-	FactGroupID     string     `json:"fact_group_id,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
-	CreatedByApp    string     `json:"created_by_app,omitempty"`
-	OriginSourceID  string     `json:"origin_source_id,omitempty"`
-	ScopeKey        string     `json:"scope_key,omitempty"`
-	Topics          []string   `json:"topics"`
-	RawTopics       []string   `json:"raw_topics"`
+	ID                 string             `json:"id"`
+	Kind               string             `json:"kind"`
+	Phase              string             `json:"phase"`
+	Durability         string             `json:"durability"`
+	Title              string             `json:"title"`
+	Content            string             `json:"content"`
+	State              string             `json:"state"`
+	AssertionStatus    string             `json:"assertion_status"`
+	Version            int                `json:"version"`
+	ObservedAt         time.Time          `json:"observed_at"`
+	ObservedAtBasis    string             `json:"observed_at_basis"`
+	EventTime          *time.Time         `json:"event_time"`
+	EventTimeBasis     string             `json:"event_time_basis"`
+	EventTimePrecision string             `json:"event_time_precision"`
+	ValidFrom          *time.Time         `json:"valid_from"`
+	ValidTo            *time.Time         `json:"valid_to"`
+	ValidFromBasis     string             `json:"valid_from_basis"`
+	ValidToBasis       string             `json:"valid_to_basis"`
+	Temporal           temporalDetailsDTO `json:"temporal"`
+	FactGroupID        string             `json:"fact_group_id,omitempty"`
+	CreatedAt          time.Time          `json:"created_at"`
+	UpdatedAt          time.Time          `json:"updated_at"`
+	CreatedByApp       string             `json:"created_by_app,omitempty"`
+	OriginSourceID     string             `json:"origin_source_id,omitempty"`
+	ScopeKey           string             `json:"scope_key,omitempty"`
+	Procedure          *procedureDTO      `json:"procedure,omitempty"`
+	Qualifiers         *qualifiersDTO     `json:"qualifiers,omitempty"`
+	Topics             []string           `json:"topics"`
+	RawTopics          []string           `json:"raw_topics"`
+	RetentionReason    string             `json:"retention_reason"`
 }
 
 type memoryListResponse struct {
@@ -64,9 +108,22 @@ type relationDTO struct {
 	ToVersionChanged   bool      `json:"to_version_changed"`
 }
 
+type evolutionDTO struct {
+	ID           string    `json:"id"`
+	FactGroupID  string    `json:"fact_group_id,omitempty"`
+	FromMemoryID string    `json:"from_memory_id"`
+	FromVersion  int       `json:"from_version"`
+	ToMemoryID   string    `json:"to_memory_id"`
+	ToVersion    int       `json:"to_version"`
+	Action       string    `json:"action"`
+	ReasonCode   string    `json:"reason_code,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
 type memoryDetailDTO struct {
 	memoryDTO
-	Relations []relationDTO `json:"relations"`
+	Relations []relationDTO  `json:"relations"`
+	Evolution []evolutionDTO `json:"evolution"`
 }
 
 type deleteResponse struct {
@@ -142,15 +199,44 @@ type conflictRefDTO struct {
 	ReasonCode string `json:"reason_code"`
 }
 
+type relatedDTO struct {
+	ReasonCodes     []string `json:"reason_codes"`
+	AnchorMemoryIDs []string `json:"anchor_memory_ids"`
+}
+
+type displayClusterDTO struct {
+	FactGroupID   string   `json:"fact_group_id,omitempty"`
+	MemberIDs     []string `json:"member_ids"`
+	EvidenceCount int      `json:"evidence_count"`
+}
+
+type searchDiagnosticsDTO struct {
+	KeywordCandidates      int    `json:"keyword_candidates"`
+	SemanticCandidates     int    `json:"semantic_candidates"`
+	SemanticExcluded       int    `json:"semantic_excluded"`
+	TermCandidates         int    `json:"term_candidates"`
+	KindFilterExcluded     int    `json:"kind_filter_excluded"`
+	StateFilterExcluded    int    `json:"state_filter_excluded"`
+	TimeFilterExcluded     int    `json:"time_filter_excluded"`
+	RankingCandidates      int    `json:"ranking_candidates"`
+	RelatedExpanded        int    `json:"related_expanded"`
+	RelatedExcluded        int    `json:"related_excluded"`
+	ReturnedItems          int    `json:"returned_items"`
+	ContextBudgetTruncated int    `json:"context_budget_truncated"`
+	SemanticDegradation    string `json:"semantic_degradation,omitempty"`
+}
+
 type searchItemDTO struct {
-	Memory         memoryDTO        `json:"memory"`
-	Score          float64          `json:"score"`
-	Snippet        string           `json:"snippet"`
-	MatchedTerms   []string         `json:"matched_terms"`
-	EvidenceRefs   []evidenceRefDTO `json:"evidence_refs"`
-	Explanation    *explanationDTO  `json:"explanation,omitempty"`
-	TemporalStatus string           `json:"temporal_status"`
-	ConflictRefs   []conflictRefDTO `json:"conflict_refs"`
+	Memory         memoryDTO          `json:"memory"`
+	Score          float64            `json:"score"`
+	Snippet        string             `json:"snippet"`
+	MatchedTerms   []string           `json:"matched_terms"`
+	EvidenceRefs   []evidenceRefDTO   `json:"evidence_refs"`
+	Explanation    *explanationDTO    `json:"explanation,omitempty"`
+	TemporalStatus string             `json:"temporal_status"`
+	ConflictRefs   []conflictRefDTO   `json:"conflict_refs"`
+	Related        *relatedDTO        `json:"related,omitempty"`
+	Cluster        *displayClusterDTO `json:"cluster,omitempty"`
 }
 
 type conflictSummaryDTO struct {
@@ -166,10 +252,11 @@ type retrievalDTO struct {
 }
 
 type searchResponse struct {
-	Items     []searchItemDTO      `json:"items"`
-	Retrieval retrievalDTO         `json:"retrieval"`
-	Warnings  []string             `json:"warnings,omitempty"`
-	Conflicts []conflictSummaryDTO `json:"conflicts"`
+	Items       []searchItemDTO       `json:"items"`
+	Retrieval   retrievalDTO          `json:"retrieval"`
+	Warnings    []string              `json:"warnings,omitempty"`
+	Conflicts   []conflictSummaryDTO  `json:"conflicts"`
+	Diagnostics *searchDiagnosticsDTO `json:"diagnostics,omitempty"`
 }
 
 type artifactMemoryRefDTO struct {
@@ -235,13 +322,52 @@ type artifactDetailResponse struct {
 	Revision *artifactRevisionDTO `json:"revision,omitempty"`
 }
 
+type artifactListResponse struct {
+	Items      []artifactMetaDTO `json:"items"`
+	NextCursor string            `json:"next_cursor,omitempty"`
+}
+
+type artifactTargetJobDTO struct {
+	Status              string     `json:"status"`
+	WaitReason          string     `json:"wait_reason,omitempty"`
+	LastErrorCode       string     `json:"last_error_code,omitempty"`
+	RetryReason         string     `json:"retry_reason,omitempty"`
+	Attempts            int        `json:"attempts"`
+	ConsecutiveFailures int        `json:"consecutive_failures"`
+	AgeSeconds          int64      `json:"age_seconds"`
+	StaleSeconds        int64      `json:"stale_seconds"`
+	UpdatedAt           time.Time  `json:"updated_at,omitempty"`
+	StartedAt           *time.Time `json:"started_at,omitempty"`
+	FinishedAt          *time.Time `json:"finished_at,omitempty"`
+}
+
+type artifactTargetDTO struct {
+	Kind             string                `json:"kind"`
+	TargetKey        string                `json:"target_key"`
+	ScopeKey         string                `json:"scope_key,omitempty"`
+	Topic            string                `json:"topic,omitempty"`
+	Status           string                `json:"status"`
+	ReasonCode       string                `json:"reason_code,omitempty"`
+	HasUsableVersion bool                  `json:"has_usable_version"`
+	Artifact         *artifactMetaDTO      `json:"artifact,omitempty"`
+	Job              *artifactTargetJobDTO `json:"job,omitempty"`
+	EvaluatedAt      *time.Time            `json:"evaluated_at,omitempty"`
+	UpdatedAt        time.Time             `json:"updated_at"`
+}
+
+type artifactTargetListResponse struct {
+	Items      []artifactTargetDTO `json:"items"`
+	NextCursor string              `json:"next_cursor,omitempty"`
+}
+
 type recallResponse struct {
-	Memories    []searchItemDTO      `json:"memories"`
-	Summaries   []artifactItemDTO    `json:"summaries"`
-	Experiences []artifactItemDTO    `json:"experiences"`
-	Skills      []artifactItemDTO    `json:"skills"`
-	Conflicts   []conflictSummaryDTO `json:"conflicts"`
-	Warnings    []string             `json:"warnings"`
+	Memories    []searchItemDTO       `json:"memories"`
+	Summaries   []artifactItemDTO     `json:"summaries"`
+	Experiences []artifactItemDTO     `json:"experiences"`
+	Skills      []artifactItemDTO     `json:"skills"`
+	Conflicts   []conflictSummaryDTO  `json:"conflicts"`
+	Warnings    []string              `json:"warnings"`
+	Diagnostics *searchDiagnosticsDTO `json:"diagnostics,omitempty"`
 }
 
 type experienceReceiptResponse struct {
@@ -292,24 +418,105 @@ type forgetResponse struct {
 }
 
 type jobDTO struct {
-	ID               string     `json:"id"`
-	SourceID         string     `json:"source_id"`
-	Status           string     `json:"status"`
-	Attempts         int        `json:"attempts"`
-	ProtocolFailures int        `json:"protocol_failures"`
-	WaitReason       string     `json:"wait_reason,omitempty"`
-	Stage            string     `json:"stage,omitempty"`
-	ReasonCode       string     `json:"reason_code,omitempty"`
-	NextAttemptAt    *time.Time `json:"next_attempt_at,omitempty"`
-	Error            string     `json:"error,omitempty"`
-	MemoryIDs        []string   `json:"memory_ids"`
-	ConflictIDs      []string   `json:"conflict_ids"`
-	PendingMemoryIDs []string   `json:"pending_memory_ids"`
-	Warnings         []string   `json:"warnings"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
-	StartedAt        *time.Time `json:"started_at,omitempty"`
-	FinishedAt       *time.Time `json:"finished_at,omitempty"`
+	ID               string                        `json:"id"`
+	SourceID         string                        `json:"source_id"`
+	Status           string                        `json:"status"`
+	Attempts         int                           `json:"attempts"`
+	ProtocolFailures int                           `json:"protocol_failures"`
+	WaitReason       string                        `json:"wait_reason,omitempty"`
+	Stage            string                        `json:"stage,omitempty"`
+	ReasonCode       string                        `json:"reason_code,omitempty"`
+	NextAttemptAt    *time.Time                    `json:"next_attempt_at,omitempty"`
+	Error            string                        `json:"error,omitempty"`
+	MemoryIDs        []string                      `json:"memory_ids"`
+	ConflictIDs      []string                      `json:"conflict_ids"`
+	PendingMemoryIDs []string                      `json:"pending_memory_ids"`
+	Warnings         []string                      `json:"warnings"`
+	QualityOutcome   string                        `json:"quality_outcome,omitempty"`
+	ExtractionStats  jobExtractionStatsDTO         `json:"extraction_stats"`
+	Retention        jobRetentionStatsDTO          `json:"retention"`
+	Timings          jobTimingsDTO                 `json:"timings"`
+	ModelUsage       jobModelUsageDTO              `json:"model_usage"`
+	Efficiency       jobEfficiencyDTO              `json:"efficiency"`
+	Diagnostics      []jobExtractionDiagnosticDTO  `json:"diagnostics"`
+	Convergence      []jobConvergenceDiagnosticDTO `json:"convergence"`
+	QueueAgeSeconds  int64                         `json:"queue_age_seconds"`
+	StaleSeconds     int64                         `json:"stale_seconds"`
+	RetryReason      string                        `json:"retry_reason,omitempty"`
+	CreatedAt        time.Time                     `json:"created_at"`
+	UpdatedAt        time.Time                     `json:"updated_at"`
+	StartedAt        *time.Time                    `json:"started_at,omitempty"`
+	FinishedAt       *time.Time                    `json:"finished_at,omitempty"`
+}
+
+type jobExtractionStatsDTO struct {
+	RawCandidates           int `json:"raw_candidates"`
+	ParsedCandidates        int `json:"parsed_candidates"`
+	NormalizedCandidates    int `json:"normalized_candidates"`
+	Normalizations          int `json:"normalizations"`
+	RepairAttempts          int `json:"repair_attempts"`
+	RepairedCandidates      int `json:"repaired_candidates"`
+	RepairSucceeded         int `json:"repair_succeeded"`
+	RepairFailed            int `json:"repair_failed"`
+	RepairTimedOut          int `json:"repair_timed_out"`
+	RepairInvalidOutput     int `json:"repair_invalid_output"`
+	ExcludedCandidates      int `json:"excluded_candidates"`
+	IsolatedCandidates      int `json:"isolated_candidates"`
+	AcceptedCandidates      int `json:"accepted_candidates"`
+	SkippedCandidates       int `json:"skipped_candidates"`
+	MemoryWrites            int `json:"memory_writes"`
+	ExtractionChunks        int `json:"extraction_chunks"`
+	ExtractionChunkFailures int `json:"extraction_chunk_failures"`
+	DroppedCandidates       int `json:"dropped_candidates"`
+	CrossChunkDuplicates    int `json:"cross_chunk_duplicates"`
+	ContextOnlyCandidates   int `json:"context_only_candidates"`
+}
+
+type jobRetentionStatsDTO struct {
+	Retained            int            `json:"retained"`
+	NotRetained         int            `json:"not_retained"`
+	ByReason            map[string]int `json:"by_reason"`
+	NotRetainedByReason map[string]int `json:"not_retained_by_reason"`
+}
+
+type jobTimingsDTO struct {
+	QueueAgeMillis      int64 `json:"queue_age_ms"`
+	ExtractionMillis    int64 `json:"extraction_ms"`
+	NormalizationMillis int64 `json:"normalization_ms"`
+	RepairMillis        int64 `json:"repair_ms"`
+	ContextMillis       int64 `json:"context_ms"`
+	DecisionMillis      int64 `json:"decision_ms"`
+	CommitMillis        int64 `json:"commit_ms"`
+	TotalMillis         int64 `json:"total_ms"`
+}
+
+type jobModelUsageDTO struct {
+	Calls        int `json:"calls"`
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	TotalTokens  int `json:"total_tokens"`
+}
+
+type jobEfficiencyDTO struct {
+	Memories        int     `json:"memories"`
+	ModelCalls      int     `json:"model_calls"`
+	TotalTokens     int     `json:"total_tokens"`
+	CallsPerMemory  float64 `json:"calls_per_memory"`
+	TokensPerMemory float64 `json:"tokens_per_memory"`
+}
+
+type jobExtractionDiagnosticDTO struct {
+	CandidateID string `json:"candidate_id,omitempty"`
+	Field       string `json:"field,omitempty"`
+	Code        string `json:"code"`
+	Stage       string `json:"stage"`
+	Disposition string `json:"disposition"`
+}
+
+type jobConvergenceDiagnosticDTO struct {
+	CandidateID string `json:"candidate_id,omitempty"`
+	GroupID     string `json:"group_id,omitempty"`
+	Code        string `json:"code"`
 }
 
 type conflictMemberDTO struct {
@@ -345,29 +552,81 @@ type conflictListResponse struct {
 
 func memoryFromDomain(item memory.Memory) memoryDTO {
 	return memoryDTO{
-		ID:              item.ID,
-		Kind:            string(item.Kind),
-		Phase:           string(item.Phase),
-		Durability:      string(item.Durability),
-		Title:           item.Title,
-		Content:         item.Content,
-		State:           string(item.State),
-		AssertionStatus: string(item.AssertionStatus),
-		Version:         item.Version,
-		ObservedAt:      item.ObservedAt.UTC(),
-		ValidFrom:       utcPointer(item.ValidFrom),
-		ValidTo:         utcPointer(item.ValidTo),
-		ValidFromBasis:  string(item.ValidFromBasis),
-		ValidToBasis:    string(item.ValidToBasis),
-		FactGroupID:     item.FactGroupID,
-		CreatedAt:       item.CreatedAt.UTC(),
-		UpdatedAt:       item.UpdatedAt.UTC(),
-		CreatedByApp:    item.CreatedByApp,
-		OriginSourceID:  item.OriginSourceID,
-		ScopeKey:        item.ScopeKey,
-		Topics:          nonNilStrings(item.Topics),
-		RawTopics:       nonNilStrings(item.RawTopics),
+		ID:                 item.ID,
+		Kind:               string(item.Kind),
+		Phase:              string(item.Phase),
+		Durability:         string(item.Durability),
+		Title:              item.Title,
+		Content:            item.Content,
+		State:              string(item.State),
+		AssertionStatus:    string(item.AssertionStatus),
+		Version:            item.Version,
+		ObservedAt:         item.ObservedAt.UTC(),
+		ObservedAtBasis:    string(item.ObservedAtBasis),
+		EventTime:          utcPointer(item.EventTime),
+		EventTimeBasis:     string(item.EventTimeBasis),
+		EventTimePrecision: string(item.EventTimePrecision),
+		ValidFrom:          utcPointer(item.ValidFrom),
+		ValidTo:            utcPointer(item.ValidTo),
+		ValidFromBasis:     string(item.ValidFromBasis),
+		ValidToBasis:       string(item.ValidToBasis),
+		Temporal:           temporalDetailsFromDomain(item.Temporal),
+		FactGroupID:        item.FactGroupID,
+		CreatedAt:          item.CreatedAt.UTC(),
+		UpdatedAt:          item.UpdatedAt.UTC(),
+		CreatedByApp:       item.CreatedByApp,
+		OriginSourceID:     item.OriginSourceID,
+		ScopeKey:           item.ScopeKey,
+		Procedure:          procedureFromDomain(item.Procedure),
+		Qualifiers:         qualifiersFromDomain(item.Qualifiers),
+		Topics:             nonNilStrings(item.Topics),
+		RawTopics:          nonNilStrings(item.RawTopics),
+		RetentionReason: string(memory.ClassifyRetention(item.Kind, item.Phase, item.Durability,
+			item.EventTime, item.ValidTo, time.Now().UTC())),
 	}
+}
+
+func temporalDetailsFromDomain(item memory.TemporalDetails) temporalDetailsDTO {
+	return temporalDetailsDTO{
+		Observed:  temporalDetailFromDomain(item.Observed),
+		Event:     temporalDetailFromDomain(item.Event),
+		ValidFrom: temporalDetailFromDomain(item.ValidFrom),
+		ValidTo:   temporalDetailFromDomain(item.ValidTo),
+	}
+}
+
+func temporalDetailFromDomain(item memory.TemporalDetail) temporalDetailDTO {
+	return temporalDetailDTO{Text: item.Text, Precision: string(item.Precision), TimezoneKnown: item.TimezoneKnown}
+}
+
+func procedureFromDomain(item *memory.Procedure) *procedureDTO {
+	if item == nil {
+		return nil
+	}
+	return &procedureDTO{
+		Goal:                 item.Goal,
+		Steps:                nonNilStrings(item.Steps),
+		Preconditions:        nonNilStrings(item.Preconditions),
+		CompletionConditions: nonNilStrings(item.CompletionConditions),
+		FailureBranches:      nonNilStrings(item.FailureBranches),
+	}
+}
+
+func qualifiersFromDomain(item *memory.AssertionQualifiers) *qualifiersDTO {
+	if item == nil {
+		return nil
+	}
+	result := &qualifiersDTO{
+		Entities:    nonNilStrings(item.Entities),
+		Conditions:  nonNilStrings(item.Conditions),
+		Polarity:    string(item.Polarity),
+		Certainty:   string(item.Certainty),
+		Attribution: item.Attribution,
+	}
+	if item.Quantity != nil {
+		result.Quantity = &quantityDTO{Value: item.Quantity.Value, Unit: item.Quantity.Unit}
+	}
+	return result
 }
 
 func relationsFromDomain(items []memory.Relation) []relationDTO {
@@ -383,6 +642,20 @@ func relationsFromDomain(items []memory.Relation) []relationDTO {
 			CreatedAt:          item.CreatedAt.UTC(),
 			FromVersionChanged: item.FromVersionChanged,
 			ToVersionChanged:   item.ToVersionChanged,
+		})
+	}
+	return result
+}
+
+func evolutionFromDomain(items []memory.EvolutionEvent) []evolutionDTO {
+	result := make([]evolutionDTO, 0, len(items))
+	for _, item := range items {
+		result = append(result, evolutionDTO{
+			ID: item.ID, FactGroupID: item.FactGroupID,
+			FromMemoryID: item.FromMemoryID, FromVersion: item.FromVersion,
+			ToMemoryID: item.ToMemoryID, ToVersion: item.ToVersion,
+			Action: item.Action, ReasonCode: item.ReasonCode,
+			CreatedAt: item.CreatedAt.UTC(),
 		})
 	}
 	return result
@@ -486,6 +759,21 @@ func searchResultFromDomain(result retrieval.Result) searchResponse {
 				}
 			}
 		}
+		var related *relatedDTO
+		if item.Related != nil {
+			related = &relatedDTO{
+				ReasonCodes:     nonNilStrings(item.Related.ReasonCodes),
+				AnchorMemoryIDs: nonNilStrings(item.Related.AnchorMemoryIDs),
+			}
+		}
+		var cluster *displayClusterDTO
+		if item.Cluster != nil {
+			cluster = &displayClusterDTO{
+				FactGroupID:   item.Cluster.FactGroupID,
+				MemberIDs:     nonNilStrings(item.Cluster.MemberIDs),
+				EvidenceCount: item.Cluster.EvidenceCount,
+			}
+		}
 		items = append(items, searchItemDTO{
 			Memory:         memoryFromDomain(item.Memory),
 			Score:          item.Score,
@@ -495,6 +783,8 @@ func searchResultFromDomain(result retrieval.Result) searchResponse {
 			Explanation:    explanation,
 			TemporalStatus: temporalStatus,
 			ConflictRefs:   conflictRefs,
+			Related:        related,
+			Cluster:        cluster,
 		})
 	}
 	mode := string(result.Retrieval.Mode)
@@ -520,10 +810,32 @@ func searchResultFromDomain(result retrieval.Result) searchResponse {
 		})
 	}
 	return searchResponse{
-		Items:     items,
-		Retrieval: retrievalDTO{Mode: mode},
-		Warnings:  warnings,
-		Conflicts: conflicts,
+		Items:       items,
+		Retrieval:   retrievalDTO{Mode: mode},
+		Warnings:    warnings,
+		Conflicts:   conflicts,
+		Diagnostics: searchDiagnosticsFromDomain(result.Diagnostics),
+	}
+}
+
+func searchDiagnosticsFromDomain(value *retrieval.SearchDiagnostics) *searchDiagnosticsDTO {
+	if value == nil {
+		return nil
+	}
+	return &searchDiagnosticsDTO{
+		KeywordCandidates:      value.KeywordCandidates,
+		SemanticCandidates:     value.SemanticCandidates,
+		SemanticExcluded:       value.SemanticExcluded,
+		TermCandidates:         value.TermCandidates,
+		KindFilterExcluded:     value.KindFilterExcluded,
+		StateFilterExcluded:    value.StateFilterExcluded,
+		TimeFilterExcluded:     value.TimeFilterExcluded,
+		RankingCandidates:      value.RankingCandidates,
+		RelatedExpanded:        value.RelatedExpanded,
+		RelatedExcluded:        value.RelatedExcluded,
+		ReturnedItems:          value.ReturnedItems,
+		ContextBudgetTruncated: value.ContextBudgetTruncated,
+		SemanticDegradation:    value.SemanticDegradation,
 	}
 }
 
@@ -623,11 +935,72 @@ func artifactDetailFromDomain(item artifact.Detail) artifactDetailResponse {
 	return result
 }
 
+func artifactListFromDomain(page artifact.ListPage) artifactListResponse {
+	items := make([]artifactMetaDTO, 0, len(page.Items))
+	for _, item := range page.Items {
+		items = append(items, artifactMetaFromDomain(item))
+	}
+	return artifactListResponse{Items: items, NextCursor: page.NextCursor}
+}
+
+func artifactTargetListFromDomain(page artifact.TargetPage) artifactTargetListResponse {
+	items := make([]artifactTargetDTO, 0, len(page.Items))
+	for _, record := range page.Items {
+		item := artifactTargetDTO{
+			Kind:             string(record.Kind),
+			TargetKey:        record.TargetKey,
+			ScopeKey:         record.ScopeKey,
+			Topic:            record.Topic,
+			Status:           string(record.Status),
+			ReasonCode:       record.ReasonCode,
+			HasUsableVersion: record.HasUsableVersion(),
+			UpdatedAt:        record.UpdatedAt.UTC(),
+		}
+		if record.Artifact != nil {
+			meta := artifactMetaFromDomain(*record.Artifact)
+			item.Artifact = &meta
+		}
+		if record.Job != nil {
+			now := time.Now().UTC()
+			retryReason := record.Job.LastErrorCode
+			if retryReason == "" {
+				retryReason = record.Job.WaitReason
+			}
+			job := artifactTargetJobDTO{
+				Status:              string(record.Job.Status),
+				WaitReason:          record.Job.WaitReason,
+				LastErrorCode:       record.Job.LastErrorCode,
+				RetryReason:         retryReason,
+				Attempts:            record.Job.Attempts,
+				ConsecutiveFailures: record.Job.ConsecutiveFailures,
+				AgeSeconds:          secondsBetween(record.Job.CreatedAt, now),
+			}
+			if !record.Job.UpdatedAt.IsZero() {
+				job.UpdatedAt = record.Job.UpdatedAt.UTC()
+				if record.Job.Status == task.StatusQueued || record.Job.Status == task.StatusRunning ||
+					record.Job.Status == task.StatusWaiting {
+					job.StaleSeconds = secondsBetween(record.Job.UpdatedAt, now)
+				}
+			}
+			job.StartedAt = utcPointer(record.Job.StartedAt)
+			job.FinishedAt = utcPointer(record.Job.FinishedAt)
+			item.Job = &job
+		}
+		if record.EvaluatedAt != nil {
+			evaluatedAt := record.EvaluatedAt.UTC()
+			item.EvaluatedAt = &evaluatedAt
+		}
+		items = append(items, item)
+	}
+	return artifactTargetListResponse{Items: items, NextCursor: page.NextCursor}
+}
+
 func recallFromDomain(result retrieval.RecallResult) recallResponse {
 	atomic := searchResultFromDomain(retrieval.Result{
-		Items:     result.Memories,
-		Conflicts: result.Conflicts,
-		Warnings:  result.Warnings,
+		Items:       result.Memories,
+		Conflicts:   result.Conflicts,
+		Warnings:    result.Warnings,
+		Diagnostics: result.Diagnostics,
 	})
 	return recallResponse{
 		Memories:    atomic.Items,
@@ -636,6 +1009,7 @@ func recallFromDomain(result retrieval.RecallResult) recallResponse {
 		Skills:      artifactItemsFromDomain(result.Skills),
 		Conflicts:   atomic.Conflicts,
 		Warnings:    nonNilStrings(atomic.Warnings),
+		Diagnostics: atomic.Diagnostics,
 	}
 }
 
@@ -669,6 +1043,49 @@ func jobFromDomain(item ingest.Job) jobDTO {
 	if memoryIDs == nil {
 		memoryIDs = []string{}
 	}
+	diagnostics := make([]jobExtractionDiagnosticDTO, 0, len(item.Diagnostics))
+	for _, diagnostic := range item.Diagnostics {
+		diagnostics = append(diagnostics, jobExtractionDiagnosticDTO{
+			CandidateID: diagnostic.CandidateID,
+			Field:       diagnostic.Field,
+			Code:        diagnostic.Code,
+			Stage:       diagnostic.Stage,
+			Disposition: diagnostic.Disposition,
+		})
+	}
+	convergence := make([]jobConvergenceDiagnosticDTO, 0, len(item.Convergence))
+	for _, diagnostic := range item.Convergence {
+		convergence = append(convergence, jobConvergenceDiagnosticDTO{
+			CandidateID: diagnostic.CandidateID,
+			GroupID:     diagnostic.GroupID,
+			Code:        diagnostic.Code,
+		})
+	}
+	item.Retention.Normalize()
+	now := time.Now().UTC()
+	queueAgeSeconds := int64(0)
+	if !item.CreatedAt.IsZero() {
+		reference := now
+		if item.StartedAt != nil {
+			reference = item.StartedAt.UTC()
+		}
+		queueAgeSeconds = secondsBetween(item.CreatedAt, reference)
+	}
+	staleSeconds := int64(0)
+	if item.Status == ingest.JobQueued || item.Status == ingest.JobRunning || item.Status == ingest.JobWaiting {
+		staleSeconds = secondsBetween(item.UpdatedAt, now)
+	}
+	retryReason := item.ReasonCode
+	if retryReason == "" {
+		retryReason = item.WaitReason
+	}
+	memories := len(item.MemoryIDs)
+	efficiency := jobEfficiencyDTO{Memories: memories, ModelCalls: item.ModelUsage.Calls,
+		TotalTokens: item.ModelUsage.TotalTokens()}
+	if memories > 0 {
+		efficiency.CallsPerMemory = float64(item.ModelUsage.Calls) / float64(memories)
+		efficiency.TokensPerMemory = float64(item.ModelUsage.TotalTokens()) / float64(memories)
+	}
 	result := jobDTO{
 		ID:               item.ID,
 		SourceID:         item.SourceID,
@@ -678,18 +1095,81 @@ func jobFromDomain(item ingest.Job) jobDTO {
 		WaitReason:       item.WaitReason,
 		Stage:            item.Stage,
 		ReasonCode:       item.ReasonCode,
+		RetryReason:      retryReason,
 		NextAttemptAt:    utcPointer(item.NextAttemptAt),
 		Error:            item.Error,
 		MemoryIDs:        memoryIDs,
 		ConflictIDs:      nonNilStrings(item.ConflictIDs),
 		PendingMemoryIDs: nonNilStrings(item.PendingMemoryIDs),
 		Warnings:         nonNilStrings(item.Warnings),
-		CreatedAt:        item.CreatedAt.UTC(),
-		UpdatedAt:        item.UpdatedAt.UTC(),
-		StartedAt:        utcPointer(item.StartedAt),
-		FinishedAt:       utcPointer(item.FinishedAt),
+		QualityOutcome:   string(item.QualityOutcome),
+		ExtractionStats: jobExtractionStatsDTO{
+			RawCandidates:           item.ExtractionStats.RawCandidates,
+			ParsedCandidates:        item.ExtractionStats.ParsedCandidates,
+			NormalizedCandidates:    item.ExtractionStats.NormalizedCandidates,
+			Normalizations:          item.ExtractionStats.Normalizations,
+			RepairAttempts:          item.ExtractionStats.RepairAttempts,
+			RepairedCandidates:      item.ExtractionStats.RepairedCandidates,
+			RepairSucceeded:         item.ExtractionStats.RepairSucceeded,
+			RepairFailed:            item.ExtractionStats.RepairFailed,
+			RepairTimedOut:          item.ExtractionStats.RepairTimedOut,
+			RepairInvalidOutput:     item.ExtractionStats.RepairInvalidOutput,
+			ExcludedCandidates:      item.ExtractionStats.ExcludedCandidates,
+			IsolatedCandidates:      item.ExtractionStats.IsolatedCandidates,
+			AcceptedCandidates:      item.ExtractionStats.AcceptedCandidates,
+			SkippedCandidates:       item.ExtractionStats.SkippedCandidates,
+			MemoryWrites:            item.ExtractionStats.MemoryWrites,
+			ExtractionChunks:        item.ExtractionStats.ExtractionChunks,
+			ExtractionChunkFailures: item.ExtractionStats.ExtractionChunkFailures,
+			DroppedCandidates:       item.ExtractionStats.DroppedCandidates,
+			CrossChunkDuplicates:    item.ExtractionStats.CrossChunkDuplicates,
+			ContextOnlyCandidates:   item.ExtractionStats.ContextOnlyCandidates,
+		},
+		Retention: jobRetentionStatsDTO{
+			Retained:            item.Retention.Retained,
+			NotRetained:         item.Retention.NotRetained,
+			ByReason:            nonNilCounts(item.Retention.ByReason),
+			NotRetainedByReason: nonNilCounts(item.Retention.NotRetainedByReason),
+		},
+		Timings: jobTimingsDTO{
+			QueueAgeMillis:      item.Timings.QueueAgeMillis,
+			ExtractionMillis:    item.Timings.ExtractionMillis,
+			NormalizationMillis: item.Timings.NormalizationMillis,
+			RepairMillis:        item.Timings.RepairMillis,
+			ContextMillis:       item.Timings.ContextMillis,
+			DecisionMillis:      item.Timings.DecisionMillis,
+			CommitMillis:        item.Timings.CommitMillis,
+			TotalMillis:         item.Timings.TotalMillis,
+		},
+		ModelUsage: jobModelUsageDTO{
+			Calls: item.ModelUsage.Calls, InputTokens: item.ModelUsage.InputTokens,
+			OutputTokens: item.ModelUsage.OutputTokens, TotalTokens: item.ModelUsage.TotalTokens(),
+		},
+		Efficiency:      efficiency,
+		Diagnostics:     diagnostics,
+		Convergence:     convergence,
+		QueueAgeSeconds: queueAgeSeconds,
+		StaleSeconds:    staleSeconds,
+		CreatedAt:       item.CreatedAt.UTC(),
+		UpdatedAt:       item.UpdatedAt.UTC(),
+		StartedAt:       utcPointer(item.StartedAt),
+		FinishedAt:      utcPointer(item.FinishedAt),
 	}
 	return result
+}
+
+func nonNilCounts(values map[string]int) map[string]int {
+	if values == nil {
+		return map[string]int{}
+	}
+	return values
+}
+
+func secondsBetween(from, to time.Time) int64 {
+	if from.IsZero() || to.IsZero() || to.Before(from) {
+		return 0
+	}
+	return int64(to.Sub(from) / time.Second)
 }
 
 func conflictFromDomain(item memory.Conflict) conflictDTO {

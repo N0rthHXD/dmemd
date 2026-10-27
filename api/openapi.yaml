@@ -37,6 +37,8 @@ tags:
     description: Application-reported completion results and explicit retraction
   - name: skills
     description: Rendered guidance skills with traceable sources
+  - name: embedding
+    description: Explicit semantic-index configuration, coverage and degradation diagnostics
   - name: health
     description: Process liveness and database readiness
 
@@ -209,6 +211,12 @@ paths:
         results with derived_unavailable and never waits for generation.
         Experiences are application reports, not verified execution results;
         skills are guidance only and carry no execution or safety certification.
+        After primary hits, atomic recall may append bounded same-fact and
+        unresolved-conflict members with a related marker. Association obeys the
+        same scope/kind/state/time filters and only uses remaining top_k room.
+        Exact duplicate expressions of one fact are folded into a display
+        cluster that preserves every member ID and the union of evidence.
+        explain=true adds optional bounded stage counts under diagnostics.
       operationId: recallMemories
       requestBody:
         required: true
@@ -300,6 +308,113 @@ paths:
                 skills: []
                 conflicts: []
                 warnings: []
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v1/artifacts:
+    get:
+      tags: [memories]
+      summary: List current derived artifacts
+      description: |
+        Bounded keyset page of current derived objects. Filters do not change
+        recall visibility; stale and disabled objects remain readable for
+        management and audit.
+      operationId: listArtifacts
+      parameters:
+        - name: scope_key
+          in: query
+          schema:
+            type: string
+        - name: kind
+          in: query
+          schema:
+            type: string
+            enum: [topic_summary, scope_summary, profile, experience_case, skill]
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [active, stale, disabled]
+        - name: reason_code
+          in: query
+          schema:
+            type: string
+        - name: cursor
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: Current artifacts in stable target order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v1/artifact-targets:
+    get:
+      tags: [memories]
+      summary: List derived generation targets and their state
+      description: |
+        Includes targets that have never produced an artifact. This separates
+        "not eligible yet" from a disabled or failed content object, queued,
+        running and waiting work, a usable current version and stale content.
+      operationId: listArtifactTargets
+      parameters:
+        - name: scope_key
+          in: query
+          schema:
+            type: string
+        - name: kind
+          in: query
+          schema:
+            type: string
+            enum: [topic_summary, scope_summary, profile, experience_case, skill]
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [queued, running, waiting, active, stale, disabled,
+              no_eligible_input, model_unavailable, generation_failed, invalid_output]
+        - name: reason_code
+          in: query
+          schema:
+            type: string
+        - name: cursor
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: Generation targets in stable target order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactTargetList'
         '400':
           $ref: '#/components/responses/BadRequest'
         '500':
@@ -654,7 +769,7 @@ paths:
                         location:
                           field: messages.0.content
                           start: 0
-                          end: 13
+                          end: 12
                         model_name: example-model
                         redacted: false
                         created_at: '2026-10-20T02:00:01Z'
@@ -764,7 +879,7 @@ paths:
                     location:
                       field: messages.0.content
                       start: 0
-                      end: 13
+                      end: 12
                     model_name: example-model
                     redacted: false
                     created_at: '2026-10-20T02:00:01Z'
@@ -1020,6 +1135,48 @@ paths:
                 source_id: 22222222-2222-4222-8222-222222222222
                 status: succeeded
                 attempts: 1
+                quality_outcome: complete
+                extraction_stats:
+                  raw_candidates: 1
+                  parsed_candidates: 1
+                  normalized_candidates: 0
+                  normalizations: 0
+                  repair_attempts: 0
+                  repaired_candidates: 0
+                  repair_succeeded: 0
+                  repair_failed: 0
+                  repair_timed_out: 0
+                  repair_invalid_output: 0
+                  excluded_candidates: 0
+                  isolated_candidates: 0
+                  accepted_candidates: 1
+                  skipped_candidates: 0
+                  memory_writes: 1
+                  extraction_chunks: 1
+                  extraction_chunk_failures: 0
+                  dropped_candidates: 0
+                  cross_chunk_duplicates: 0
+                  context_only_candidates: 0
+                retention:
+                  retained: 1
+                  not_retained: 0
+                  by_reason: {explicit_intent: 1}
+                  not_retained_by_reason: {}
+                timings:
+                  queue_age_ms: 1000
+                  extraction_ms: 900
+                  normalization_ms: 3
+                  repair_ms: 0
+                  context_ms: 20
+                  decision_ms: 0
+                  commit_ms: 15
+                  total_ms: 938
+                model_usage: {calls: 1, input_tokens: 120, output_tokens: 40, total_tokens: 160}
+                efficiency: {memories: 1, model_calls: 1, total_tokens: 160, calls_per_memory: 1, tokens_per_memory: 160}
+                queue_age_seconds: 1
+                stale_seconds: 0
+                diagnostics: []
+                convergence: []
                 memory_ids: [11111111-1111-4111-8111-111111111111]
                 created_at: '2026-10-20T02:00:01Z'
                 updated_at: '2026-10-20T02:00:03Z'
@@ -1029,6 +1186,84 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v1/embedding/status:
+    get:
+      tags: [embedding]
+      summary: Read semantic configuration and vector coverage diagnostics
+      description: |
+        Reports the configured model, credential-free endpoint, dimensions and
+        profile fingerprint alongside durable coverage counts. current_vectors
+        only counts vectors matching the active profile, dimensions and current
+        document content hash. stale_vectors and missing_vectors are excluded
+        from recall and drive rebuild_required. A non-empty index with zero
+        current vectors reports index_not_ready instead of implying semantic
+        irrelevance. The response never contains an API key, source text, query
+        text, vector values or a raw provider response.
+      operationId: getEmbeddingStatus
+      responses:
+        '200':
+          description: Embedding diagnostics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmbeddingStatus'
+              example:
+                enabled: true
+                model: embedding-model
+                endpoint: http://127.0.0.1:9999/v1
+                dimensions: 1024
+                min_similarity: 0.25
+                profile_id: 6f2a2f8b1d9e4c3a8b7f6e5d4c3b2a19
+                index_version: dmemd-embedding-v1
+                registered_profile_id: 6f2a2f8b1d9e4c3a8b7f6e5d4c3b2a19
+                registered_index_version: dmemd-embedding-v1
+                config_fingerprint_match: true
+                rebuild_required: false
+                documents: 120
+                current_vectors: 120
+                stale_vectors: 0
+                missing_vectors: 0
+                pending_jobs: 0
+                failed_jobs: 0
+                failed_codes: []
+                indexed_profiles:
+                  - profile_id: 6f2a2f8b1d9e4c3a8b7f6e5d4c3b2a19
+                    vectors: 120
+                coverage: 1.0
+                ready: true
+                reason_code: ready
+                checked_at: '2026-10-27T04:00:00Z'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/embedding/probe:
+    post:
+      tags: [embedding]
+      summary: Explicitly check the embedding endpoint and response shape
+      description: |
+        Makes one bounded online-model call with a fixed header-free probe text.
+        It distinguishes disabled configuration, authorization, rate limiting,
+        timeout, network/server failure and an invalid vector response. The result
+        is not persisted and never affects readiness or recall.
+      operationId: probeEmbedding
+      responses:
+        '200':
+          description: Probe result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmbeddingProbe'
+              example:
+                attempted: true
+                success: true
+                code: ok
+                dimensions: 1024
+                duration_ms: 42
+                checked_at: '2026-10-27T04:00:00Z'
         '503':
           $ref: '#/components/responses/Unavailable'
 
@@ -1185,7 +1420,8 @@ components:
     Memory:
       type: object
       required: [id, kind, phase, durability, title, content, state, assertion_status, version, observed_at,
-        valid_from_basis, valid_to_basis, topics, raw_topics, created_at, updated_at]
+        observed_at_basis, event_time_basis, event_time_precision, valid_from_basis, valid_to_basis,
+        temporal, topics, raw_topics, created_at, updated_at]
       properties:
         id:
           type: string
@@ -1218,6 +1454,26 @@ components:
         observed_at:
           type: string
           format: date-time
+          description: >-
+            When the source made or observed the statement. A missing value is
+            filled from source receipt time and marked basis=recorded; that
+            fallback is never evidence that the assertion itself happened later.
+        observed_at_basis:
+          type: string
+          enum: [explicit, inferred, unknown, recorded]
+        event_time:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            When a scheduled or occurred event happens. Kept separate from fact
+            validity so a future plan remains visible to a current plan query.
+        event_time_basis:
+          type: string
+          enum: [explicit, inferred, unknown]
+        event_time_precision:
+          type: string
+          enum: [unknown, year, month, day, hour, minute, second]
         valid_from:
           type: string
           format: date-time
@@ -1234,6 +1490,12 @@ components:
         valid_to_basis:
           type: string
           enum: [explicit, inferred, unknown]
+        temporal:
+          $ref: '#/components/schemas/TemporalDetails'
+        procedure:
+          $ref: '#/components/schemas/Procedure'
+        qualifiers:
+          $ref: '#/components/schemas/AssertionQualifiers'
         fact_group_id:
           type: string
           format: uuid
@@ -1264,6 +1526,92 @@ components:
           items:
             type: string
           example: [K8s, 节点内存耗尽]
+        retention_reason:
+          type: string
+          description: >-
+            Service-derived retention reason. Informational only; it never
+            deletes the memory or changes assertion status. Temporary context
+            remains stored and visible for review.
+          enum: [explicit_intent, future_applicability, durable_knowledge,
+            episodic_event, temporary_context, unclassified]
+
+    TemporalDetail:
+      type: object
+      properties:
+        text:
+          type: string
+          description: Source date wording preserved for fidelity
+        precision:
+          type: string
+          enum: [unknown, year, month, day, hour, minute, second]
+        timezone_known:
+          type: boolean
+          description: False when the source stated a calendar date without a timezone
+
+    TemporalDetails:
+      type: object
+      required: [observed, event, valid_from, valid_to]
+      properties:
+        observed:
+          $ref: '#/components/schemas/TemporalDetail'
+        event:
+          $ref: '#/components/schemas/TemporalDetail'
+        valid_from:
+          $ref: '#/components/schemas/TemporalDetail'
+        valid_to:
+          $ref: '#/components/schemas/TemporalDetail'
+
+    Procedure:
+      type: object
+      description: Optional structured reusable workflow stored in the immutable revision
+      properties:
+        goal:
+          type: string
+        steps:
+          type: array
+          items:
+            type: string
+        preconditions:
+          type: array
+          items:
+            type: string
+        completion_conditions:
+          type: array
+          items:
+            type: string
+        failure_branches:
+          type: array
+          items:
+            type: string
+
+    AssertionQualifiers:
+      type: object
+      description: General qualifiers retained with an assertion; the content remains authoritative
+      properties:
+        entities:
+          type: array
+          items:
+            type: string
+        quantity:
+          type: object
+          required: [value]
+          properties:
+            value:
+              type: string
+            unit:
+              type: string
+        conditions:
+          type: array
+          items:
+            type: string
+        polarity:
+          type: string
+          enum: [unknown, positive, negative, mixed]
+        certainty:
+          type: string
+          enum: [unknown, asserted, uncertain, reported, hypothetical]
+        attribution:
+          type: string
 
     Relation:
       type: object
@@ -1298,12 +1646,17 @@ components:
       allOf:
         - $ref: '#/components/schemas/Memory'
         - type: object
-          required: [relations]
+          required: [relations, evolution]
           properties:
             relations:
               type: array
               items:
                 $ref: '#/components/schemas/Relation'
+            evolution:
+              type: array
+              description: Deterministic supersession/correction audit touching this memory.
+              items:
+                $ref: '#/components/schemas/EvolutionEvent'
 
     MemoryList:
       type: object
@@ -1485,6 +1838,9 @@ components:
         explain:
           type: boolean
           default: false
+          description: >-
+            Adds per-item explanation and bounded response diagnostics. Stage
+            counts never change the returned result set and contain no content.
 
     SearchFilters:
       type: object
@@ -1503,8 +1859,20 @@ components:
           type: string
           format: date-time
           description: >-
-            Fact validity instant. Missing pins request start once; an explicit
-            malformed value returns 400. Independent from updated_after/before.
+            Fact validity instant, not the system knowledge-time snapshot.
+            Missing pins request start once; an explicit malformed value returns
+            400. Independent from updated_after/before. A result whose validity
+            bounds are unknown remains visible with temporal_status=unknown and
+            a temporal_uncertain warning on an explicit historical query.
+        event_at:
+          type: string
+          format: date-time
+          description: >-
+            Event occurrence instant. Matches only events whose stored event_time
+            and precision cover this instant; events with unknown event time are
+            excluded. When provided without as_of, fact validity is not pinned
+            to the current time, so past and scheduled occurrences stay
+            queryable by their own event time.
         created_by_app:
           type: string
         updated_after:
@@ -1521,14 +1889,16 @@ components:
         memories:
           type: array
           description: >-
-            Atomic fact, preference, event and procedure results. Accepted
-            assertions first, then labelled pending alternatives; rejected
-            assertions are never recalled. Pending items emit fact_conflict.
+            Atomic fact, preference, event and procedure results. Among primary
+            hits, accepted assertions precede labelled pending alternatives;
+            rejected assertions are never recalled. Bounded related items follow
+            the primary hits and keep their own assertion status and related
+            marker. Pending items emit fact_conflict.
           items:
             $ref: '#/components/schemas/SearchItem'
         summaries:
           type: array
-          description: Active topic_summary and profile artifacts.
+          description: Active topic_summary, scope_summary and profile artifacts.
           items:
             $ref: '#/components/schemas/ArtifactItem'
         experiences:
@@ -1557,9 +1927,14 @@ components:
           description: Stable deduplicated warning codes.
           items:
             type: string
-            enum: [semantic_unavailable, semantic_timeout, fact_conflict,
-              conflict_results_truncated, derived_as_of_unsupported,
-              derived_unavailable, context_budget_truncated]
+            enum: [semantic_unavailable, semantic_timeout,
+              semantic_config_error, semantic_rate_limited,
+              semantic_invalid_response, semantic_index_not_ready,
+              fact_conflict, conflict_results_truncated,
+              derived_as_of_unsupported, derived_unavailable,
+              context_budget_truncated, temporal_uncertain]
+        diagnostics:
+          $ref: '#/components/schemas/SearchDiagnostics'
 
     ArtifactMemoryRef:
       type: object
@@ -1680,7 +2055,7 @@ components:
           type: string
         kind:
           type: string
-          enum: [topic_summary, profile, experience_case, skill]
+          enum: [topic_summary, scope_summary, profile, experience_case, skill]
         version:
           type: integer
           minimum: 1
@@ -1722,12 +2097,12 @@ components:
       properties:
         reason_code:
           type: string
-          description: Current diagnostic such as no_procedure_input, topic_mismatch, model_generation_failed, invalid_model_output, model_unavailable or no_eligible_input; readable even before a first revision exists
+          description: Current diagnostic such as no_procedure_input, topic_mismatch, model_generation_failed, invalid_model_output, invalid_profile_content, model_unavailable or no_eligible_input; readable even before a first revision exists
         id:
           type: string
         kind:
           type: string
-          enum: [topic_summary, profile, experience_case, skill]
+          enum: [topic_summary, scope_summary, profile, experience_case, skill]
         target_key:
           type: string
         scope_key:
@@ -1762,7 +2137,14 @@ components:
           type: string
         payload:
           type: object
-          description: Structured payload; summaries include coverage (full/subset) and truncated; experience cases include the application-reported outcome and verification disclaimer
+          description: >-
+            Structured payload. Summaries record input_selection
+            (eligible/selected/included/omitted counts and reasons),
+            citation_integrity, semantic_coverage (unknown/subset), validated
+            citations and omitted_inputs; semantic coverage is unknown when the
+            service cannot determine it and subset when omission is known. Profiles additionally
+            record profile_check. Experience cases include the
+            application-reported outcome and verification disclaimer.
         content_hash:
           type: string
           description: SHA-256 of title, body, serialized payload and immutable provenance, separated by NUL bytes
@@ -1828,6 +2210,100 @@ components:
         revision:
           $ref: '#/components/schemas/ArtifactRevision'
 
+    ArtifactList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ArtifactMeta'
+        next_cursor:
+          type: string
+
+    ArtifactTargetJob:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [queued, running, waiting, succeeded, failed, cancelled]
+        wait_reason:
+          type: string
+        last_error_code:
+          type: string
+        retry_reason:
+          type: string
+          description: Fixed wait or error reason, safe for monitoring
+        attempts:
+          type: integer
+          minimum: 0
+        consecutive_failures:
+          type: integer
+          minimum: 0
+        age_seconds:
+          type: integer
+          minimum: 0
+          description: Age of the durable target, including time deferred by ingest priority
+        stale_seconds:
+          type: integer
+          minimum: 0
+          description: Time since the queued, running or waiting task last changed state
+        updated_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+
+    ArtifactTarget:
+      type: object
+      required: [kind, target_key, status, has_usable_version, updated_at]
+      properties:
+        kind:
+          type: string
+          enum: [topic_summary, scope_summary, profile, experience_case, skill]
+        target_key:
+          type: string
+        scope_key:
+          type: string
+        topic:
+          type: string
+        status:
+          type: string
+          enum: [queued, running, waiting, active, stale, disabled,
+            no_eligible_input, model_unavailable, generation_failed, invalid_output]
+        reason_code:
+          type: string
+          description: Fixed reason such as no_procedure_input, topic_mismatch, model_generation_failed or invalid_model_output
+        has_usable_version:
+          type: boolean
+          description: True when the artifact has at least one immutable revision, even if it is currently stale or disabled
+        artifact:
+          $ref: '#/components/schemas/ArtifactMeta'
+        job:
+          $ref: '#/components/schemas/ArtifactTargetJob'
+        evaluated_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ArtifactTargetList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ArtifactTarget'
+        next_cursor:
+          type: string
+
     SearchItem:
       type: object
       required: [memory, score, snippet, matched_terms, evidence_refs,
@@ -1840,8 +2316,10 @@ components:
           description: >-
             Keyword mode uses a bounded BM25-rank and term-coverage fusion.
             Hybrid mode uses the RRF score. Accepted assertions precede pending
-            assertions regardless of score; scores compare relevance within the
-            same assertion status in this result set.
+            primary assertions regardless of score; scores compare relevance
+            within the same assertion status in this result set. Bounded related
+            items use score 0 because they were expanded by an explicit
+            association rather than matched by the query.
         snippet:
           type: string
           description: >-
@@ -1869,6 +2347,215 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ConflictRef'
+        related:
+          type: object
+          description: >-
+            Present only on bounded association expansion. Related items follow
+            primary hits, obey exactly the same scope, kind, state, assertion and
+            time filters, and never displace a primary Top-K hit.
+          required: [reason_codes, anchor_memory_ids]
+          properties:
+            reason_codes:
+              type: array
+              items:
+                type: string
+                enum: [fact_group_member, conflict_member]
+            anchor_memory_ids:
+              type: array
+              items:
+                type: string
+                format: uuid
+        cluster:
+          type: object
+          description: >-
+            Present when exact duplicate expressions of the same fact were folded
+            into this display item. member_ids lists every folded memory and
+            evidence_refs contains the union of their evidence. Different
+            negation, conditions, time ranges, kinds, states or assertion status
+            are never folded.
+          required: [member_ids, evidence_count]
+          properties:
+            fact_group_id:
+              type: string
+              format: uuid
+            member_ids:
+              type: array
+              items:
+                type: string
+                format: uuid
+            evidence_count:
+              type: integer
+              minimum: 0
+
+    SearchDiagnostics:
+      type: object
+      description: >-
+        Stable, bounded stage counts returned only when explain=true. Counts are
+        candidate counts and never proof of semantic correctness. Filter-exclusion
+        counts come from count-only relaxations that retain scope and other
+        boundaries and never change the returned result set.
+      required: [keyword_candidates, semantic_candidates, semantic_excluded,
+        term_candidates, kind_filter_excluded, state_filter_excluded,
+        time_filter_excluded, ranking_candidates, related_expanded,
+        related_excluded, returned_items, context_budget_truncated]
+      properties:
+        keyword_candidates:
+          type: integer
+          minimum: 0
+        semantic_candidates:
+          type: integer
+          minimum: 0
+        semantic_excluded:
+          type: integer
+          minimum: 0
+        term_candidates:
+          type: integer
+          minimum: 0
+        kind_filter_excluded:
+          type: integer
+          minimum: 0
+          description: >-
+            Additional same-scope term hits excluded by the requested kind filter.
+            It does not assert that memory classification is wrong.
+        state_filter_excluded:
+          type: integer
+          minimum: 0
+        time_filter_excluded:
+          type: integer
+          minimum: 0
+        ranking_candidates:
+          type: integer
+          minimum: 0
+        related_expanded:
+          type: integer
+          minimum: 0
+        related_excluded:
+          type: integer
+          minimum: 0
+        returned_items:
+          type: integer
+          minimum: 0
+        context_budget_truncated:
+          type: integer
+          minimum: 0
+        semantic_degradation:
+          type: string
+          description: Stable warning code when the semantic branch degraded.
+
+    EmbeddingStatus:
+      type: object
+      required: [enabled, min_similarity, index_version,
+        config_fingerprint_match, rebuild_required, documents, current_vectors,
+        stale_vectors, missing_vectors, pending_jobs, failed_jobs, failed_codes,
+        indexed_profiles, coverage, ready, reason_code, checked_at]
+      properties:
+        enabled:
+          type: boolean
+        model:
+          type: string
+        endpoint:
+          type: string
+          description: Credential-free endpoint identity
+        dimensions:
+          type: integer
+          minimum: 0
+        min_similarity:
+          type: number
+        profile_id:
+          type: string
+        index_version:
+          type: string
+        registered_profile_id:
+          type: string
+        registered_index_version:
+          type: string
+        config_fingerprint_match:
+          type: boolean
+        rebuild_required:
+          type: boolean
+        rebuild_reason:
+          type: string
+          description: >-
+            Fixed reason such as profile_changed, profile_registered,
+            index_version_changed, vectors_stale, vectors_missing or jobs_pending.
+        rebuild_registered_at:
+          type: string
+          format: date-time
+        documents:
+          type: integer
+          minimum: 0
+        current_vectors:
+          type: integer
+          minimum: 0
+        stale_vectors:
+          type: integer
+          minimum: 0
+        missing_vectors:
+          type: integer
+          minimum: 0
+        pending_jobs:
+          type: integer
+          minimum: 0
+        failed_jobs:
+          type: integer
+          minimum: 0
+        failed_codes:
+          type: array
+          items:
+            type: object
+            required: [code, count]
+            properties:
+              code:
+                type: string
+              count:
+                type: integer
+                minimum: 0
+        indexed_profiles:
+          type: array
+          items:
+            type: object
+            required: [profile_id, vectors]
+            properties:
+              profile_id:
+                type: string
+              vectors:
+                type: integer
+                minimum: 0
+        coverage:
+          type: number
+          minimum: 0
+          maximum: 1
+        ready:
+          type: boolean
+        reason_code:
+          type: string
+          enum: [ready, disabled, no_documents, config_mismatch,
+            index_not_ready, backlog, failed_jobs]
+        checked_at:
+          type: string
+          format: date-time
+
+    EmbeddingProbe:
+      type: object
+      required: [attempted, success, code, duration_ms, checked_at]
+      properties:
+        attempted:
+          type: boolean
+        success:
+          type: boolean
+        code:
+          type: string
+          description: >-
+            ok, disabled, unauthorized, config_error, rate_limited, timeout,
+            cancelled, invalid_response, unavailable or a sanitized provider code
+        dimensions:
+          type: integer
+        duration_ms:
+          type: integer
+          minimum: 0
+        checked_at:
+          type: string
+          format: date-time
 
     EvidenceRef:
       type: object
@@ -2012,7 +2699,8 @@ components:
     Job:
       type: object
       required: [id, source_id, status, attempts, protocol_failures, memory_ids, conflict_ids,
-        pending_memory_ids, warnings, created_at, updated_at]
+        pending_memory_ids, warnings, extraction_stats, retention, timings, model_usage,
+        efficiency, diagnostics, convergence, created_at, updated_at]
       properties:
         id:
           type: string
@@ -2075,6 +2763,123 @@ components:
           description: Stable warning codes such as fact_conflict or context_truncated
           items:
             type: string
+        quality_outcome:
+          type: string
+          description: |
+            Business result for the latest attempt, separate from scheduling
+            status. empty means the model selected no candidates; complete means
+            every non-excluded candidate was safely handled; partial means some
+            candidates were isolated; unusable means non-empty candidates could
+            not be made safe and the job is retrying or failed.
+          enum: [empty, complete, partial, unusable]
+        extraction_stats:
+          type: object
+          description: |
+            Fixed stage counts for the latest attempt. Counts distinguish raw
+            model candidates, repaired/split candidates and final dispositions.
+          required: [raw_candidates, parsed_candidates, normalized_candidates, normalizations,
+            repair_attempts, repaired_candidates, repair_succeeded, repair_failed,
+            repair_timed_out, repair_invalid_output, excluded_candidates,
+            isolated_candidates, accepted_candidates, skipped_candidates, memory_writes,
+            extraction_chunks, extraction_chunk_failures, dropped_candidates,
+            cross_chunk_duplicates, context_only_candidates]
+          properties:
+            raw_candidates: {type: integer, minimum: 0}
+            parsed_candidates: {type: integer, minimum: 0}
+            normalized_candidates: {type: integer, minimum: 0}
+            normalizations: {type: integer, minimum: 0}
+            repair_attempts: {type: integer, minimum: 0}
+            repaired_candidates: {type: integer, minimum: 0}
+            repair_succeeded: {type: integer, minimum: 0}
+            repair_failed: {type: integer, minimum: 0}
+            repair_timed_out: {type: integer, minimum: 0}
+            repair_invalid_output: {type: integer, minimum: 0}
+            excluded_candidates: {type: integer, minimum: 0}
+            isolated_candidates: {type: integer, minimum: 0}
+            accepted_candidates: {type: integer, minimum: 0}
+            skipped_candidates: {type: integer, minimum: 0}
+            memory_writes: {type: integer, minimum: 0}
+            extraction_chunks: {type: integer, minimum: 0}
+            extraction_chunk_failures: {type: integer, minimum: 0}
+            dropped_candidates: {type: integer, minimum: 0}
+            cross_chunk_duplicates: {type: integer, minimum: 0}
+            context_only_candidates: {type: integer, minimum: 0}
+        retention:
+          type: object
+          description: >-
+            Service-derived retained candidates and fixed non-retention codes:
+            explicit_exclusion, cross_chunk_context, cross_chunk_duplicate,
+            candidate_limit, invalid_candidate, decision_skip, empty_extraction
+            or chunk_failure. This never claims semantic correctness and never
+            triggers automatic deletion or a default TTL.
+          required: [retained, not_retained, by_reason, not_retained_by_reason]
+          properties:
+            retained: {type: integer, minimum: 0}
+            not_retained: {type: integer, minimum: 0}
+            by_reason:
+              type: object
+              additionalProperties: {type: integer, minimum: 0}
+            not_retained_by_reason:
+              type: object
+              additionalProperties: {type: integer, minimum: 0}
+        timings:
+          type: object
+          description: >-
+            Wall-clock stage breakdown in milliseconds. queue_age_ms runs from
+            durable job creation to this attempt and therefore includes earlier
+            waits on a retry; the other fields measure the current attempt.
+          required: [queue_age_ms, extraction_ms, normalization_ms, repair_ms,
+            context_ms, decision_ms, commit_ms, total_ms]
+          properties:
+            queue_age_ms: {type: integer, minimum: 0}
+            extraction_ms: {type: integer, minimum: 0}
+            normalization_ms: {type: integer, minimum: 0}
+            repair_ms: {type: integer, minimum: 0}
+            context_ms: {type: integer, minimum: 0}
+            decision_ms: {type: integer, minimum: 0}
+            commit_ms: {type: integer, minimum: 0}
+            total_ms: {type: integer, minimum: 0}
+        model_usage:
+          type: object
+          required: [calls, input_tokens, output_tokens, total_tokens]
+          properties:
+            calls: {type: integer, minimum: 0}
+            input_tokens: {type: integer, minimum: 0}
+            output_tokens: {type: integer, minimum: 0}
+            total_tokens: {type: integer, minimum: 0}
+        efficiency:
+          type: object
+          description: Per-effective-atom call and token cost for this attempt
+          required: [memories, model_calls, total_tokens, calls_per_memory, tokens_per_memory]
+          properties:
+            memories: {type: integer, minimum: 0}
+            model_calls: {type: integer, minimum: 0}
+            total_tokens: {type: integer, minimum: 0}
+            calls_per_memory: {type: number, minimum: 0}
+            tokens_per_memory: {type: number, minimum: 0}
+        queue_age_seconds:
+          type: integer
+          minimum: 0
+        stale_seconds:
+          type: integer
+          minimum: 0
+        retry_reason:
+          type: string
+        diagnostics:
+          type: array
+          description: |
+            Candidate-level, source-free diagnostics for the latest attempt.
+            Entries contain fixed codes only; never source text or raw model
+            responses.
+          items:
+            $ref: '#/components/schemas/ExtractionDiagnostic'
+        convergence:
+          type: array
+          description: |
+            Fixed reasons why a candidate with an existing scoped identity was
+            not automatically converged. Codes never contain source text.
+          items:
+            $ref: '#/components/schemas/ConvergenceDiagnostic'
         created_at:
           type: string
           format: date-time
@@ -2087,6 +2892,71 @@ components:
         finished_at:
           type: string
           format: date-time
+
+    ConvergenceDiagnostic:
+      type: object
+      required: [code]
+      properties:
+        candidate_id:
+          type: string
+        group_id:
+          type: string
+          format: uuid
+        code:
+          type: string
+          enum: [identity_ambiguous, missing_update_evidence, time_unknown,
+            cardinality_unknown, context_truncated]
+
+    EvolutionEvent:
+      type: object
+      required: [id, from_memory_id, from_version, to_memory_id, to_version, action, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        fact_group_id:
+          type: string
+          format: uuid
+        from_memory_id:
+          type: string
+          format: uuid
+        from_version:
+          type: integer
+          minimum: 1
+        to_memory_id:
+          type: string
+          format: uuid
+        to_version:
+          type: integer
+          minimum: 1
+        action:
+          type: string
+          enum: [change, correction, reschedule, cancel, supersede]
+        reason_code:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    ExtractionDiagnostic:
+      type: object
+      required: [code, stage, disposition]
+      properties:
+        candidate_id:
+          type: string
+          description: Service-assigned candidate ID; empty for a whole-response failure
+        field:
+          type: string
+          description: Protocol field path such as evidence[0].segment_id
+        code:
+          type: string
+          description: Stable diagnostic code
+        stage:
+          type: string
+          enum: [normalize, validate, repair, isolate, extraction]
+        disposition:
+          type: string
+          enum: [normalized, accepted, repaired, isolated, excluded]
 
     ConflictMember:
       type: object

@@ -36,7 +36,7 @@ func TestRedactClearsSourceEvidenceAndCancelsOnlyPendingJobs(t *testing.T) {
 		Content:   []byte(`{"messages":[{"id":"m1","content":"sensitive quote"}]}`),
 		CreatedAt: serviceTime,
 	}
-	evidence := source.NewEvidence(src, "m1", "sensitive quote", "model", serviceTime)
+	evidence := source.NewEvidence(src, source.EvidenceReference{Quote: "sensitive quote"}, "model", serviceTime)
 	jobs := []ingest.Job{
 		{ID: "job-queued", SourceID: src.ID, Status: ingest.JobQueued, CreatedAt: serviceTime, UpdatedAt: serviceTime},
 		{ID: "job-running", SourceID: src.ID, Status: ingest.JobRunning, Attempts: 1, CreatedAt: serviceTime, UpdatedAt: serviceTime},
@@ -146,7 +146,7 @@ func TestRedactRollsBackWhenAnyStepFails(t *testing.T) {
 	src := source.Source{
 		ID: "source-rollback", Content: []byte(`{"text":"keep me"}`), CreatedAt: serviceTime,
 	}
-	evidence := source.NewEvidence(src, "", "keep me", "model", serviceTime)
+	evidence := source.NewEvidence(src, source.EvidenceReference{Quote: "keep me"}, "model", serviceTime)
 	job := ingest.Job{
 		ID: "job-rollback", SourceID: src.ID, Status: ingest.JobQueued,
 		CreatedAt: serviceTime, UpdatedAt: serviceTime,
@@ -249,7 +249,7 @@ func TestNewEvidenceUsesGeneratedIDAndSourceStatus(t *testing.T) {
 	src := source.Source{
 		ID: "source-evidence", Content: []byte(`{"messages":[{"id":"m1","content":"你好世界"}]}`),
 	}
-	item := source.NewEvidence(src, "m1", "世界", "model", serviceTime)
+	item := source.NewEvidence(src, source.EvidenceReference{Quote: "世界"}, "model", serviceTime)
 	if item.ID == "" {
 		t.Fatal("evidence ID is empty")
 	}
@@ -265,7 +265,7 @@ func TestNewEvidenceUsesGeneratedIDAndSourceStatus(t *testing.T) {
 	redactedAt := serviceTime.Add(time.Hour)
 	redacted := source.NewEvidence(source.Source{
 		ID: "source-redacted", Redacted: true, RedactedAt: &redactedAt,
-	}, "m1", "世界", "model", serviceTime)
+	}, source.EvidenceReference{Quote: "世界"}, "model", serviceTime)
 	if !redacted.Redacted || redacted.Quote != "" || redacted.Location != nil ||
 		redacted.RedactedAt == nil || !redacted.RedactedAt.Equal(redactedAt) {
 		t.Fatalf("redacted evidence = %+v", redacted)

@@ -56,7 +56,7 @@ func TestForgetSourceClosesOverEvidenceInAnyRevision(t *testing.T) {
 			item := f.create(t, memory.CreateInput{
 				Kind: memory.KindFact, Content: "项目使用 SQLite。", ObservedAt: f.now,
 				OriginSourceID: other.ID, ScopeKey: "project:dmemd",
-				Evidence: []source.Evidence{source.NewEvidence(src, "", "项目使用 SQLite。", "test", f.now)},
+				Evidence: []source.Evidence{source.NewEvidence(src, source.EvidenceReference{Quote: "项目使用 SQLite。"}, "test", f.now)},
 			})
 			unrelated := f.createMemory(t, other.ID)
 			if historical {

@@ -242,7 +242,9 @@ func TestAggregateCreatesActiveTopicSummaryAndProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if detail.Revision == nil || !strings.Contains(detail.Revision.Content, "项目使用 SQLite。") || !strings.Contains(detail.Revision.Content, "覆盖说明") {
+	if detail.Revision == nil || !strings.Contains(detail.Revision.Content, "项目使用 SQLite。") ||
+		!strings.Contains(string(detail.Revision.Payload), `"eligible":1`) ||
+		!strings.Contains(string(detail.Revision.Payload), `"semantic_coverage":"unknown"`) {
 		t.Fatalf("summary detail = %+v", detail)
 	}
 	if len(detail.Revision.MemoryRefs) != 1 || detail.Revision.MemoryRefs[0].MemoryID != created.ID ||
@@ -253,7 +255,7 @@ func TestAggregateCreatesActiveTopicSummaryAndProfile(t *testing.T) {
 	if profile.State != artifact.StateActive || profile.CurrentVersion != 1 {
 		t.Fatalf("profile = %+v", profile)
 	}
-	if calls.Load() != 3 { // go, sqlite, profile
+	if calls.Load() != 4 { // go, sqlite, scope overview, profile
 		t.Fatalf("model calls = %d", calls.Load())
 	}
 }
@@ -702,5 +704,10 @@ func TestInputLimitMarksPartialSummary(t *testing.T) {
 	}
 	if detail.Revision == nil || !detail.Revision.Truncated || detail.Revision.ReasonCode != "input_truncated" {
 		t.Fatalf("truncated revision = %+v", detail.Revision)
+	}
+	if !strings.Contains(string(detail.Revision.Payload), `"eligible":2`) ||
+		!strings.Contains(string(detail.Revision.Payload), `"omitted":1`) ||
+		!strings.Contains(string(detail.Revision.Payload), `"input_limit"`) {
+		t.Fatalf("input selection payload = %s", detail.Revision.Payload)
 	}
 }

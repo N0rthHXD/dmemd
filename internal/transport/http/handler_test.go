@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/N0rthHXD/dmemd/internal/embedding"
 	"github.com/N0rthHXD/dmemd/internal/ingest"
 	"github.com/N0rthHXD/dmemd/internal/memory"
 	"github.com/N0rthHXD/dmemd/internal/retrieval"
@@ -57,6 +58,20 @@ func (s stubSearch) Recall(ctx context.Context, request retrieval.RecallRequest)
 	return s.recall(ctx, request)
 }
 
+type stubEmbedding struct {
+	embedding.DiagnosticAPI
+	status func(context.Context) (embedding.Status, error)
+	probe  func(context.Context) embedding.Probe
+}
+
+func (s stubEmbedding) Status(ctx context.Context) (embedding.Status, error) {
+	return s.status(ctx)
+}
+
+func (s stubEmbedding) Probe(ctx context.Context) embedding.Probe {
+	return s.probe(ctx)
+}
+
 func serve(t *testing.T, services Services, ready func(context.Context) error, request *http.Request) *httptest.ResponseRecorder {
 	t.Helper()
 	handler := New(Options{Services: services, Ready: ready})
@@ -77,6 +92,36 @@ func TestHealthAndReadiness(t *testing.T) {
 	response = serve(t, Services{}, nil, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "ready") {
 		t.Fatalf("readyz = %d %q", response.Code, response.Body.String())
+	}
+}
+
+func TestEmbeddingStatusAndProbeRoutes(t *testing.T) {
+	embeddingService := stubEmbedding{
+		status: func(context.Context) (embedding.Status, error) {
+			return embedding.Status{
+				Enabled: true, ProfileID: "profile", Documents: 2, CurrentVectors: 1,
+				Coverage: 0.5, Ready: false, ReasonCode: embedding.StatusBacklog,
+				FailedCodes: []embedding.ErrorCount{}, IndexedProfiles: []embedding.ProfileCount{},
+			}, nil
+		},
+		probe: func(context.Context) embedding.Probe {
+			return embedding.Probe{Attempted: true, Success: true, Code: "ok", Dimensions: 3}
+		},
+	}
+	response := serve(t, Services{Embedding: embeddingService}, nil,
+		httptest.NewRequest(http.MethodGet, "/v1/embedding/status", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"reason_code":"backlog"`) ||
+		!strings.Contains(response.Body.String(), `"coverage":0.5`) {
+		t.Fatalf("embedding status = %d %q", response.Code, response.Body.String())
+	}
+	response = serve(t, Services{Embedding: embeddingService}, nil,
+		httptest.NewRequest(http.MethodPost, "/v1/embedding/probe", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"code":"ok"`) {
+		t.Fatalf("embedding probe = %d %q", response.Code, response.Body.String())
+	}
+	response = serve(t, Services{}, nil, httptest.NewRequest(http.MethodGet, "/v1/embedding/status", nil))
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("unconfigured embedding status = %d", response.Code)
 	}
 }
 

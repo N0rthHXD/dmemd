@@ -52,7 +52,8 @@ func TestP1HierarchyRawTopicsAndNewMemberInvalidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(detail.Revision.MemoryRefs) != 2 || !strings.Contains(detail.Revision.Content, "覆盖说明") {
+	if len(detail.Revision.MemoryRefs) != 2 ||
+		!strings.Contains(string(detail.Revision.Payload), `"selected":2`) {
 		t.Fatalf("parent coverage = %+v", detail.Revision)
 	}
 	report, err := f.store.ArtifactIntegrityCheck(context.Background())
@@ -143,9 +144,8 @@ func TestP1ProfileDurabilityGateAndSkillDiagnostic(t *testing.T) {
 		return artifact.AggregateResult{Content: req.Memories[0].Content}, nil
 	}))
 	processDue(t, w)
-	s := f.artifactByTarget(t, artifact.KindSkill, task.SkillKey("user", "work"))
-	if s.State != artifact.StateDisabled || s.ReasonCode != "topic_mismatch" {
-		t.Fatalf("diagnostic = %+v", s)
+	if _, err := f.store.GetArtifactByTarget(context.Background(), artifact.KindSkill, task.SkillKey("user", "work")); !errors.Is(err, artifact.ErrNotFound) {
+		t.Fatalf("topic summary must not create an empty skill artifact: %v", err)
 	}
 }
 

@@ -219,6 +219,10 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 	}
 
 	started := time.Now()
+	queueAge := int64(0)
+	if !claimed.CreatedAt.IsZero() && started.After(claimed.CreatedAt) {
+		queueAge = started.Sub(claimed.CreatedAt).Milliseconds()
+	}
 	err := handler.Process(ctx, claimed)
 	duration := time.Since(started).Milliseconds()
 	if err == nil {
@@ -226,6 +230,7 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 			"job_id", claimed.ID,
 			"kind", claimed.Kind,
 			"attempts", claimed.Attempts,
+			"queue_age_ms", queueAge,
 			"duration_ms", duration,
 		)
 		return true, nil

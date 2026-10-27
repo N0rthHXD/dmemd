@@ -15,6 +15,8 @@ import (
 type stubArtifacts struct {
 	get     func(context.Context, string) (artifact.Detail, error)
 	version func(context.Context, string, int) (artifact.Detail, error)
+	list    func(context.Context, artifact.ListQuery) (artifact.ListPage, error)
+	targets func(context.Context, artifact.TargetQuery) (artifact.TargetPage, error)
 }
 
 func (s stubArtifacts) Get(ctx context.Context, id string) (artifact.Detail, error) {
@@ -27,6 +29,20 @@ func (s stubArtifacts) GetVersion(ctx context.Context, id string, version int) (
 
 func (s stubArtifacts) ListVersions(context.Context, string, int) (artifact.Detail, []artifact.Revision, error) {
 	return artifact.Detail{}, nil, nil
+}
+
+func (s stubArtifacts) List(ctx context.Context, query artifact.ListQuery) (artifact.ListPage, error) {
+	if s.list == nil {
+		return artifact.ListPage{}, nil
+	}
+	return s.list(ctx, query)
+}
+
+func (s stubArtifacts) ListTargets(ctx context.Context, query artifact.TargetQuery) (artifact.TargetPage, error) {
+	if s.targets == nil {
+		return artifact.TargetPage{}, nil
+	}
+	return s.targets(ctx, query)
 }
 
 func TestArtifactReadRoutesReturnCurrentAndHistoricalRevisions(t *testing.T) {
@@ -107,6 +123,52 @@ func TestArtifactDisabledDiagnosticWithoutRevision(t *testing.T) {
 	response := serve(t, services, nil, httptest.NewRequest(http.MethodGet, "/v1/artifacts/skill-1", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"reason_code":"no_procedure_input"`) {
 		t.Fatalf("diagnostic = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestArtifactListAndTargetRoutesExposeLifecycleState(t *testing.T) {
+	updated := time.Date(2026, 10, 22, 8, 0, 0, 0, time.UTC)
+	evaluated := updated.Add(time.Minute)
+	services := Services{Artifacts: stubArtifacts{
+		list: func(_ context.Context, query artifact.ListQuery) (artifact.ListPage, error) {
+			if query.ScopeKey != "project:dmemd" || query.Kind != artifact.KindScopeSummary ||
+				query.State != artifact.StateActive || query.Limit != 10 {
+				t.Fatalf("list query = %+v", query)
+			}
+			return artifact.ListPage{Items: []artifact.Artifact{{
+				ID: "scope-1", Kind: artifact.KindScopeSummary,
+				TargetKey: "scope_summary:x", ScopeKey: "project:dmemd",
+				CurrentVersion: 1, State: artifact.StateActive, UpdatedAt: updated,
+			}}, NextCursor: "next"}, nil
+		},
+		targets: func(_ context.Context, query artifact.TargetQuery) (artifact.TargetPage, error) {
+			if query.ScopeKey != "project:dmemd" || query.Status != artifact.TargetStatusNoEligibleInput {
+				t.Fatalf("target query = %+v", query)
+			}
+			return artifact.TargetPage{Items: []artifact.TargetRecord{{
+				Kind: artifact.KindSkill, TargetKey: "skill:x", ScopeKey: "project:dmemd",
+				Topic: "missing", Status: artifact.TargetStatusNoEligibleInput,
+				ReasonCode: "no_procedure_input", EvaluatedAt: &evaluated, UpdatedAt: evaluated,
+			}}}, nil
+		},
+	}}
+	response := serve(t, services, nil, httptest.NewRequest(http.MethodGet,
+		"/v1/artifacts?scope_key=project:dmemd&kind=scope_summary&state=active&limit=10", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"next_cursor":"next"`) ||
+		!strings.Contains(response.Body.String(), `"kind":"scope_summary"`) {
+		t.Fatalf("artifact list = %d %s", response.Code, response.Body.String())
+	}
+	response = serve(t, services, nil, httptest.NewRequest(http.MethodGet,
+		"/v1/artifact-targets?scope_key=project:dmemd&status=no_eligible_input", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"has_usable_version":false`) ||
+		!strings.Contains(response.Body.String(), `"reason_code":"no_procedure_input"`) ||
+		!strings.Contains(response.Body.String(), `"evaluated_at":"2026-10-22T08:01:00Z"`) {
+		t.Fatalf("target list = %d %s", response.Code, response.Body.String())
+	}
+	response = serve(t, services, nil, httptest.NewRequest(http.MethodGet,
+		"/v1/artifacts?kind=unknown", nil))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid list query = %d", response.Code)
 	}
 }
 

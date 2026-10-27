@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -30,6 +31,7 @@ type mergeResult struct {
 	PendingMemoryIDs []string
 	Warnings         []string
 	Decisions        []mergeDecision
+	Convergence      []ConvergenceDiagnostic
 }
 
 type mergeDecision struct {
@@ -58,6 +60,13 @@ type mergePlan struct {
 	warnings          []string
 	catalogGeneration int64
 	decided           map[string]struct{}
+
+	// Context completeness is tracked per candidate and per fact group. A
+	// truncated unrelated keyword result must not downgrade every safe update
+	// in the source.
+	incompleteCandidates map[string]struct{}
+	incompleteGroups     map[string]struct{}
+	convergenceReasons   map[string]ConvergenceDiagnostic
 }
 
 type applyState struct {
@@ -68,6 +77,127 @@ type applyState struct {
 	pendingIDs  map[string]struct{}
 	warnings    []string
 	decisions   []mergeDecision
+	convergence map[string]ConvergenceDiagnostic
+}
+
+func (p *mergePlan) candidateComplete(candidateID string) bool {
+	if _, bad := p.incompleteCandidates[candidateID]; bad {
+		return false
+	}
+	if len(p.incompleteCandidates) == 0 && len(p.incompleteGroups) == 0 && !p.complete {
+		return false
+	}
+	return true
+}
+
+func (p *mergePlan) groupComplete(groupID string) bool {
+	if groupID == "" {
+		return true
+	}
+	if _, bad := p.incompleteGroups[groupID]; bad {
+		return false
+	}
+	if len(p.incompleteCandidates) == 0 && len(p.incompleteGroups) == 0 && !p.complete {
+		return false
+	}
+	return true
+}
+
+func (p *mergePlan) markIncompleteCandidate(candidateID string) {
+	if p.incompleteCandidates == nil {
+		p.incompleteCandidates = make(map[string]struct{})
+	}
+	p.incompleteCandidates[candidateID] = struct{}{}
+}
+
+func (p *mergePlan) markIncompleteGroup(groupID string) {
+	if groupID == "" {
+		return
+	}
+	if p.incompleteGroups == nil {
+		p.incompleteGroups = make(map[string]struct{})
+	}
+	p.incompleteGroups[groupID] = struct{}{}
+}
+
+func (p *mergePlan) recordConvergence(candidateID, groupID, code string) {
+	if code == "" {
+		return
+	}
+	if p.convergenceReasons == nil {
+		p.convergenceReasons = make(map[string]ConvergenceDiagnostic)
+	}
+	if _, exists := p.convergenceReasons[candidateID]; exists {
+		return
+	}
+	p.convergenceReasons[candidateID] = ConvergenceDiagnostic{
+		CandidateID: candidateID, GroupID: groupID, Code: code,
+	}
+}
+
+// transitionOrdered allows several mentions of one fact in a single source
+// only when their verified evidence positions establish an order. Candidate ID
+// order is never used as a substitute for source order.
+func (p *mergePlan) transitionOrdered(candidateID string) bool {
+	if len(p.candidates) <= 1 {
+		return true
+	}
+	candidate, ok := p.candidates[candidateID]
+	if !ok {
+		return true
+	}
+	identity, ok := candidateGroupIdentity(p.source.ScopeKey, candidate)
+	if !ok {
+		return false
+	}
+	position := candidateSourceOrder(p.source, candidate)
+	for _, other := range p.candidates {
+		if other.CandidateID == candidateID {
+			continue
+		}
+		otherIdentity, ok := candidateGroupIdentity(p.source.ScopeKey, other)
+		if !ok || !sameFactGroupIdentity(identity, otherIdentity) {
+			continue
+		}
+		otherPosition := candidateSourceOrder(p.source, other)
+		if otherPosition == position && normalizeComparable(other.Content) != normalizeComparable(candidate.Content) {
+			return false
+		}
+	}
+	return true
+}
+
+func (p *mergePlan) decisionContextComplete(decision Decision) bool {
+	if !p.candidateComplete(decision.CandidateID) {
+		return false
+	}
+	if decision.TargetGroupID != "" && !p.groupComplete(decision.TargetGroupID) {
+		return false
+	}
+	for _, id := range decision.TargetMemoryIDs {
+		item, ok := p.related[id]
+		if ok && item.FactGroupID != "" && !p.groupComplete(item.FactGroupID) {
+			return false
+		}
+	}
+	return true
+}
+
+func (p *mergePlan) convergenceDiagnostics() []ConvergenceDiagnostic {
+	if len(p.convergenceReasons) == 0 {
+		return []ConvergenceDiagnostic{}
+	}
+	result := make([]ConvergenceDiagnostic, 0, len(p.convergenceReasons))
+	for _, item := range p.convergenceReasons {
+		result = append(result, item)
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].CandidateID != result[j].CandidateID {
+			return result[i].CandidateID < result[j].CandidateID
+		}
+		return result[i].Code < result[j].Code
+	})
+	return result
 }
 
 func validateDecisions(batch []Candidate, result DecisionResult) ([]Decision, error) {
@@ -158,7 +288,7 @@ func validateDecisionTimes(decision Decision) error {
 
 func decisionEvidence(candidate Candidate, decision Decision, candidates map[string]Candidate) ([]source.Evidence, error) {
 	if len(decision.EvidenceRefs) == 0 {
-		return candidate.Evidence, nil
+		return candidate.SourceEvidence, nil
 	}
 	result := make([]source.Evidence, 0, len(decision.EvidenceRefs))
 	seen := make(map[string]struct{}, len(decision.EvidenceRefs))
@@ -167,10 +297,11 @@ func decisionEvidence(candidate Candidate, decision Decision, candidates map[str
 		if !ok {
 			return nil, fmt.Errorf("%w: 证据引用越界", ErrProtocol)
 		}
-		if ref.EvidenceIndex < 0 || ref.EvidenceIndex >= len(referenced.Evidence) {
+		if ref.EvidenceIndex < 0 || ref.EvidenceIndex >= len(referenced.Evidence) ||
+			ref.EvidenceIndex >= len(referenced.SourceEvidence) {
 			return nil, fmt.Errorf("%w: 证据索引越界", ErrProtocol)
 		}
-		item := referenced.Evidence[ref.EvidenceIndex]
+		item := referenced.SourceEvidence[ref.EvidenceIndex]
 		if _, duplicate := seen[item.ID]; duplicate {
 			continue
 		}
@@ -178,7 +309,7 @@ func decisionEvidence(candidate Candidate, decision Decision, candidates map[str
 		result = append(result, item)
 	}
 	if len(result) == 0 {
-		return candidate.Evidence, nil
+		return candidate.SourceEvidence, nil
 	}
 	return result, nil
 }
@@ -242,8 +373,18 @@ func applyPlan(ctx context.Context, tx Tx, writer memory.Writer, plan *mergePlan
 		conflictIDs: make(map[string]struct{}),
 		pendingIDs:  make(map[string]struct{}),
 		warnings:    append([]string(nil), plan.warnings...),
+		convergence: make(map[string]ConvergenceDiagnostic),
 	}
-	for _, action := range plan.actions {
+	actions := append([]plannedAction(nil), plan.actions...)
+	sort.SliceStable(actions, func(i, j int) bool {
+		left := candidateSourceOrder(plan.source, actions[i].candidate)
+		right := candidateSourceOrder(plan.source, actions[j].candidate)
+		if left != right {
+			return left < right
+		}
+		return actions[i].candidate.CandidateID < actions[j].candidate.CandidateID
+	})
+	for _, action := range actions {
 		if err := applyOne(ctx, tx, writer, state, action); err != nil {
 			return mergeResult{}, err
 		}
@@ -254,6 +395,7 @@ func applyPlan(ctx context.Context, tx Tx, writer memory.Writer, plan *mergePlan
 		PendingMemoryIDs: orderedKeys(state.pendingIDs),
 		Warnings:         dedupeStrings(state.warnings),
 		Decisions:        state.decisions,
+		Convergence:      orderedConvergence(state.convergence, plan.convergenceDiagnostics()),
 	}
 	return result, nil
 }
@@ -263,16 +405,24 @@ func applyOne(ctx context.Context, tx Tx, writer memory.Writer, state *applyStat
 	// Model action labels are not replacement evidence. The same deterministic
 	// gate applies even when the model calls an update a conflict or correction.
 	if decision.Action != ActionSkip && decision.Action != ActionSeparate && decision.Action != ActionMergeEvidence {
-		if converged, err := tryConvergence(ctx, tx, writer, state, action); err != nil {
+		if converged, reason, err := tryConvergence(ctx, tx, writer, state, action); err != nil {
 			return err
 		} else if converged {
 			return nil
+		} else if action.autoConverge {
+			if planReason, ok := state.plan.convergenceReasons[action.candidate.CandidateID]; ok {
+				reason = planReason.Code
+			}
+			if reason == "" {
+				reason = ConvergenceIdentityAmbiguous
+			}
+			state.convergence[action.candidate.CandidateID] = ConvergenceDiagnostic{
+				CandidateID: action.candidate.CandidateID, Code: reason,
+			}
+			// A second action in this transaction can invalidate a preplanned
+			// replacement. Never silently downgrade that plan to an accepted add.
+			return applyUnresolved(ctx, tx, writer, state, action)
 		}
-	}
-	if action.autoConverge {
-		// A second action in this transaction can invalidate a preplanned
-		// replacement. Never silently downgrade that plan to an accepted add.
-		return applyUnresolved(ctx, tx, writer, state, action)
 	}
 	switch decision.Action {
 	case ActionSkip:
@@ -316,22 +466,29 @@ func applyAdd(ctx context.Context, tx Tx, writer memory.Writer, state *applyStat
 			return nil
 		}
 		revised, err := writer.Revise(ctx, tx, memory.ReviseInput{
-			MemoryID:        duplicate.ID,
-			Kind:            duplicate.Kind,
-			Title:           duplicate.Title,
-			Content:         duplicate.Content,
-			ObservedAt:      duplicate.ObservedAt,
-			ValidFrom:       duplicate.ValidFrom,
-			ValidTo:         duplicate.ValidTo,
-			ValidFromBasis:  duplicate.ValidFromBasis,
-			ValidToBasis:    duplicate.ValidToBasis,
-			AssertionStatus: duplicate.AssertionStatus,
-			FactGroupID:     duplicate.FactGroupID,
-			ScopeKey:        duplicate.ScopeKey,
-			Topics:          duplicate.Topics,
-			Evidence:        incoming,
-			Operation:       memory.OperationAddEvidence,
-			Reason:          reasonMerge,
+			MemoryID:           duplicate.ID,
+			Kind:               duplicate.Kind,
+			Title:              duplicate.Title,
+			Content:            duplicate.Content,
+			ObservedAt:         duplicate.ObservedAt,
+			ObservedAtBasis:    duplicate.ObservedAtBasis,
+			EventTime:          duplicate.EventTime,
+			EventTimeBasis:     duplicate.EventTimeBasis,
+			EventTimePrecision: duplicate.EventTimePrecision,
+			ValidFrom:          duplicate.ValidFrom,
+			ValidTo:            duplicate.ValidTo,
+			ValidFromBasis:     duplicate.ValidFromBasis,
+			ValidToBasis:       duplicate.ValidToBasis,
+			Temporal:           duplicate.Temporal,
+			AssertionStatus:    duplicate.AssertionStatus,
+			FactGroupID:        duplicate.FactGroupID,
+			ScopeKey:           duplicate.ScopeKey,
+			Procedure:          duplicate.Procedure,
+			Qualifiers:         duplicate.Qualifiers,
+			Topics:             duplicate.Topics,
+			Evidence:           incoming,
+			Operation:          memory.OperationAddEvidence,
+			Reason:             reasonMerge,
 		})
 		if err != nil {
 			return err
@@ -371,10 +528,10 @@ func applyMergeEvidence(ctx context.Context, tx Tx, writer memory.Writer, state 
 		state.decisions = append(state.decisions, mergeDecision{Action: "skip-inactive-target"})
 		return nil
 	}
-	if expandsBounds(target, action) {
-		return applyUnresolved(ctx, tx, writer, state, action)
-	}
-	if action.decision.Content != "" && normalizeComparable(action.decision.Content) != normalizeComparable(target.Content) {
+	// Evidence-only merging must not change the target's valid time. A missing
+	// candidate boundary is not an expansion when the assertion is identical.
+	if action.decision.ValidFrom != nil || action.decision.ValidTo != nil ||
+		normalizeComparable(decisionContent(action)) != normalizeComparable(target.Content) {
 		return applyUnresolved(ctx, tx, writer, state, action)
 	}
 	currentEvidence, err := tx.ListRevisionEvidence(ctx, target.ID, target.Version)
@@ -387,22 +544,29 @@ func applyMergeEvidence(ctx context.Context, tx Tx, writer memory.Writer, state 
 		return nil
 	}
 	revised, err := writer.Revise(ctx, tx, memory.ReviseInput{
-		MemoryID:        target.ID,
-		Kind:            target.Kind,
-		Title:           target.Title,
-		Content:         target.Content,
-		ObservedAt:      target.ObservedAt,
-		ValidFrom:       target.ValidFrom,
-		ValidTo:         target.ValidTo,
-		ValidFromBasis:  target.ValidFromBasis,
-		ValidToBasis:    target.ValidToBasis,
-		AssertionStatus: target.AssertionStatus,
-		FactGroupID:     target.FactGroupID,
-		ScopeKey:        target.ScopeKey,
-		Topics:          target.Topics,
-		Evidence:        incoming,
-		Operation:       memory.OperationAddEvidence,
-		Reason:          reasonMerge,
+		MemoryID:           target.ID,
+		Kind:               target.Kind,
+		Title:              target.Title,
+		Content:            target.Content,
+		ObservedAt:         target.ObservedAt,
+		ObservedAtBasis:    target.ObservedAtBasis,
+		EventTime:          target.EventTime,
+		EventTimeBasis:     target.EventTimeBasis,
+		EventTimePrecision: target.EventTimePrecision,
+		ValidFrom:          target.ValidFrom,
+		ValidTo:            target.ValidTo,
+		ValidFromBasis:     target.ValidFromBasis,
+		ValidToBasis:       target.ValidToBasis,
+		Temporal:           target.Temporal,
+		AssertionStatus:    target.AssertionStatus,
+		FactGroupID:        target.FactGroupID,
+		ScopeKey:           target.ScopeKey,
+		Procedure:          target.Procedure,
+		Qualifiers:         target.Qualifiers,
+		Topics:             target.Topics,
+		Evidence:           incoming,
+		Operation:          memory.OperationAddEvidence,
+		Reason:             reasonMerge,
 	})
 	if err != nil {
 		return err
@@ -453,29 +617,53 @@ func applyEnrich(ctx context.Context, tx Tx, writer memory.Writer, state *applyS
 		toBasis = normalizedBasis(action.decision.ValidToBasis)
 	}
 	status := target.AssertionStatus
-	conflicts, reason := findGroupConflictsForRange(ctx, tx, target.FactGroupID, target.ID, from, to, content)
+	conflicts, reason := findGroupConflictsForRange(ctx, tx, target.FactGroupID, target.ID, from, to, content, nil)
 	if len(conflicts) > 0 {
 		status = memory.AssertionPending
 	}
+	eventTime, eventBasis, eventPrecision := target.EventTime, target.EventTimeBasis, target.EventTimePrecision
+	if action.candidate.EventTime != nil {
+		eventTime, eventBasis, eventPrecision = action.candidate.EventTime, action.candidate.EventTimeBasis, action.candidate.EventTimePrecision
+	}
+	temporalDetails := target.Temporal
+	if normalizeComparable(content) == normalizeComparable(action.candidate.Content) {
+		temporalDetails = action.candidate.Temporal
+	}
+	procedure := target.Procedure
+	if action.candidate.Procedure != nil {
+		procedure = action.candidate.Procedure
+	}
+	qualifiers := target.Qualifiers
+	if action.candidate.Qualifiers != nil {
+		qualifiers = action.candidate.Qualifiers
+	}
 	revised, err := writer.Revise(ctx, tx, memory.ReviseInput{
-		MemoryID:        target.ID,
-		Kind:            target.Kind,
-		Title:           target.Title,
-		Content:         content,
-		ObservedAt:      target.ObservedAt,
-		ValidFrom:       from,
-		ValidTo:         to,
-		ValidFromBasis:  fromBasis,
-		ValidToBasis:    toBasis,
-		AssertionStatus: status,
-		FactGroupID:     target.FactGroupID,
-		ScopeKey:        target.ScopeKey,
-		Topics:          reviseTopics(action),
-		Evidence:        unionEvidence(currentEvidence, action.evidence),
-		Phase:           phase,
-		Durability:      durability,
-		Operation:       memory.OperationUpdate,
-		Reason:          reasonEnrich,
+		MemoryID:           target.ID,
+		Kind:               target.Kind,
+		Title:              target.Title,
+		Content:            content,
+		ObservedAt:         target.ObservedAt,
+		ObservedAtBasis:    target.ObservedAtBasis,
+		EventTime:          eventTime,
+		EventTimeBasis:     eventBasis,
+		EventTimePrecision: eventPrecision,
+		ValidFrom:          from,
+		ValidTo:            to,
+		ValidFromBasis:     fromBasis,
+		ValidToBasis:       toBasis,
+		Temporal:           temporalDetails,
+		AssertionStatus:    status,
+		FactGroupID:        target.FactGroupID,
+		ScopeKey:           target.ScopeKey,
+		Procedure:          procedure,
+		Qualifiers:         qualifiers,
+		ReplaceStructured:  true,
+		Topics:             reviseTopics(action),
+		Evidence:           unionEvidence(currentEvidence, action.evidence),
+		Phase:              phase,
+		Durability:         durability,
+		Operation:          memory.OperationUpdate,
+		Reason:             reasonEnrich,
 	})
 	if err != nil {
 		return err
@@ -678,28 +866,43 @@ func actionRange(action plannedAction) (from, to *time.Time, fromBasis, toBasis 
 func createMemory(ctx context.Context, tx Tx, writer memory.Writer, state *applyState, action plannedAction,
 	status memory.AssertionStatus, groupID, content string,
 	evidence []source.Evidence, reason string) (memory.Memory, error) {
-	candidate := action.candidate
 	from, to, fromBasis, toBasis := actionRange(action)
+	return createMemoryWithRange(ctx, tx, writer, state, action, status, groupID, content, evidence, reason,
+		from, to, fromBasis, toBasis)
+}
+
+func createMemoryWithRange(ctx context.Context, tx Tx, writer memory.Writer, state *applyState, action plannedAction,
+	status memory.AssertionStatus, groupID, content string,
+	evidence []source.Evidence, reason string,
+	from, to *time.Time, fromBasis, toBasis memory.TemporalBasis) (memory.Memory, error) {
+	candidate := action.candidate
 	title := candidate.Title
 	created, err := writer.Create(ctx, tx, memory.CreateInput{
-		Kind:            candidate.Kind,
-		Phase:           memory.Phase(candidate.Phase),
-		Durability:      memory.Durability(candidate.Durability),
-		Title:           title,
-		Content:         content,
-		ObservedAt:      observedValue(candidate.ObservedAt),
-		ValidFrom:       from,
-		ValidTo:         to,
-		ValidFromBasis:  fromBasis,
-		ValidToBasis:    toBasis,
-		AssertionStatus: status,
-		FactGroupID:     groupID,
-		CreatedByApp:    state.plan.source.AppID,
-		OriginSourceID:  state.plan.source.ID,
-		ScopeKey:        state.plan.source.ScopeKey,
-		Topics:          candidate.Topics,
-		Evidence:        evidence,
-		Reason:          reason,
+		Kind:               candidate.Kind,
+		Phase:              memory.Phase(candidate.Phase),
+		Durability:         memory.Durability(candidate.Durability),
+		Title:              title,
+		Content:            content,
+		ObservedAt:         observedValue(candidate.ObservedAt),
+		ObservedAtBasis:    candidate.ObservedAtBasis,
+		EventTime:          candidate.EventTime,
+		EventTimeBasis:     candidate.EventTimeBasis,
+		EventTimePrecision: candidate.EventTimePrecision,
+		ValidFrom:          from,
+		ValidTo:            to,
+		ValidFromBasis:     fromBasis,
+		ValidToBasis:       toBasis,
+		Temporal:           candidate.Temporal,
+		AssertionStatus:    status,
+		FactGroupID:        groupID,
+		CreatedByApp:       state.plan.source.AppID,
+		OriginSourceID:     state.plan.source.ID,
+		ScopeKey:           state.plan.source.ScopeKey,
+		Procedure:          candidate.Procedure,
+		Qualifiers:         candidate.Qualifiers,
+		Topics:             candidate.Topics,
+		Evidence:           evidence,
+		Reason:             reason,
 	})
 	if err != nil {
 		return memory.Memory{}, err
@@ -765,50 +968,76 @@ func resolveGroup(ctx context.Context, tx Tx, state *applyState, action plannedA
 	if proposal == nil || (strings.TrimSpace(proposal.Subject) == "" && strings.TrimSpace(proposal.Predicate) == "") {
 		return "", nil
 	}
-	key := strings.Join([]string{
-		strings.TrimSpace(proposal.Subject),
-		strings.TrimSpace(proposal.Predicate),
-		strings.TrimSpace(proposal.Scope),
-	}, "\x00")
+	identity := factGroupIdentity(state.plan.source.ScopeKey, *proposal, action.candidate.Qualifiers)
+	key := memory.FactGroupKey(identity)
+	keyString := strings.Join(key[:], "\x00")
 	if !forceNew {
-		if id, ok := state.groupsByKey[key]; ok {
+		if id, ok := state.groupsByKey[keyString]; ok {
 			return id, nil
 		}
 		for _, group := range state.plan.groups {
-			if group.Subject == strings.TrimSpace(proposal.Subject) &&
-				group.Predicate == strings.TrimSpace(proposal.Predicate) &&
-				group.Scope == strings.TrimSpace(proposal.Scope) {
-				state.groupsByKey[key] = group.ID
+			if sameFactGroupIdentity(memory.FactGroupIdentity{
+				ScopeKey: group.ScopeKey, Subject: group.Subject, Predicate: group.Predicate,
+				Scope: group.Scope, Conditions: group.Conditions,
+			}, identity) {
+				state.groupsByKey[keyString] = group.ID
 				return group.ID, nil
 			}
 		}
 	}
 	subject := strings.TrimSpace(proposal.Subject)
 	predicate := strings.TrimSpace(proposal.Predicate)
-	scope := strings.TrimSpace(proposal.Scope)
 	if !forceNew {
-		if existing, err := tx.FindFactGroup(ctx, subject, predicate, scope); err == nil {
-			if proposal.Cardinality != "" && proposal.Cardinality != memory.CardinalityUnknown &&
-				existing.Cardinality != proposal.Cardinality {
-				existing.Cardinality = proposal.Cardinality
-				existing.Generation++
-				existing.UpdatedAt = time.Now().UTC()
-				if err := tx.UpdateFactGroup(ctx, existing); err != nil {
-					return "", err
-				}
-			}
+		if existing, err := tx.FindFactGroup(ctx, identity); err == nil {
 			state.plan.groups[existing.ID] = existing
-			state.groupsByKey[key] = existing.ID
+			state.groupsByKey[keyString] = existing.ID
 			return existing.ID, nil
 		} else if !errors.Is(err, memory.ErrNotFound) {
 			return "", err
 		}
+		// Optional identity text may be omitted on a later mention. Only reuse a
+		// single compatible group; several scene/condition variants stay
+		// ambiguous and receive a new explicit identity instead of a guess.
+		if groups, err := tx.FindFactGroups(ctx, identity.ScopeKey, subject, predicate); err != nil {
+			return "", err
+		} else if len(groups) == 1 {
+			existing := groups[0]
+			if compatible := compatibleGroup(groups, identity); compatible != nil {
+				existing = *compatible
+				changed := false
+				if existing.Scope == "" && identity.Scope != "" {
+					existing.Scope, existing.SceneKey, changed = identity.Scope, memory.NormalizeIdentityText(identity.Scope), true
+				}
+				if len(existing.Conditions) == 0 && len(identity.Conditions) > 0 {
+					existing.Conditions = memory.NormalizeConditions(identity.Conditions)
+					existing.ConditionsKey = memory.ConditionsKey(existing.Conditions)
+					changed = true
+				}
+				if identity.Cardinality != "" && identity.Cardinality != memory.CardinalityUnknown &&
+					existing.Cardinality != identity.Cardinality {
+					existing.Cardinality = identity.Cardinality
+					changed = true
+				}
+				if changed {
+					existing.Generation++
+					existing.UpdatedAt = time.Now().UTC()
+					if err := tx.UpdateFactGroup(ctx, existing); err != nil {
+						return "", err
+					}
+				}
+				state.plan.groups[existing.ID] = existing
+				state.groupsByKey[keyString] = existing.ID
+				return existing.ID, nil
+			}
+		}
 	}
 	group, err := memory.NewFactGroup(memory.FactGroupInput{
+		ScopeKey:    identity.ScopeKey,
 		Subject:     subject,
 		Predicate:   predicate,
-		Scope:       scope,
-		Cardinality: proposal.Cardinality,
+		Scope:       identity.Scope,
+		Conditions:  identity.Conditions,
+		Cardinality: identity.Cardinality,
 	}, time.Now().UTC())
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrProtocol, err)
@@ -817,7 +1046,7 @@ func resolveGroup(ctx context.Context, tx Tx, state *applyState, action plannedA
 		return "", err
 	}
 	state.plan.groups[group.ID] = group
-	state.groupsByKey[key] = group.ID
+	state.groupsByKey[keyString] = group.ID
 	return group.ID, nil
 }
 
@@ -861,10 +1090,10 @@ func findGroupConflicts(ctx context.Context, tx Tx, groupID string, action plann
 		return nil, ""
 	}
 	from, to, _, _ := actionRange(action)
-	return findGroupConflictsForRange(ctx, tx, groupID, "", from, to, content)
+	return findGroupConflictsForRange(ctx, tx, groupID, "", from, to, content, &action.candidate)
 }
 
-func findGroupConflictsForRange(ctx context.Context, tx Tx, groupID, excludeID string, from, to *time.Time, content string) ([]memory.Memory, memory.ConflictReason) {
+func findGroupConflictsForRange(ctx context.Context, tx Tx, groupID, excludeID string, from, to *time.Time, content string, observation *Candidate) ([]memory.Memory, memory.ConflictReason) {
 	if groupID == "" {
 		return nil, ""
 	}
@@ -891,6 +1120,9 @@ func findGroupConflictsForRange(ctx context.Context, tx Tx, groupID, excludeID s
 		if normalizeComparable(member.Content) == normalizeComparable(content) {
 			continue
 		}
+		if independentObservation(observation, member, from, to) {
+			continue
+		}
 		if !memory.Overlaps(from, to, member.ValidFrom, member.ValidTo) {
 			continue
 		}
@@ -900,6 +1132,20 @@ func findGroupConflictsForRange(ctx context.Context, tx Tx, groupID, excludeID s
 		result = append(result, member)
 	}
 	return result, reason
+}
+
+// independentObservation distinguishes separate measurements or checks from a
+// contradiction. Different values observed at different explicit times are not
+// mutually exclusive unless a known validity interval also overlaps.
+func independentObservation(candidate *Candidate, member memory.Memory, from, to *time.Time) bool {
+	if candidate == nil || candidate.ObservedAt == nil || candidate.ObservedAtBasis == memory.BasisRecorded ||
+		member.ObservedAt.IsZero() || member.ObservedAtBasis == memory.BasisRecorded {
+		return false
+	}
+	if from != nil || to != nil || member.ValidFrom != nil || member.ValidTo != nil {
+		return false
+	}
+	return !candidate.ObservedAt.Equal(member.ObservedAt)
 }
 
 func recordConflict(ctx context.Context, tx Tx, state *applyState, groupID string,
@@ -1092,20 +1338,6 @@ func normalizeConflictReason(value string) memory.ConflictReason {
 	}
 }
 
-// hasVerifiedEvidence requires a non-empty quote that actually occurs in the
-// current source. A quote that cannot be located is only a source association
-// and may not justify an automatic correct/change.
-func hasVerifiedEvidence(src source.Source, evidence []source.Evidence) bool {
-	text := sourceText(src.Content)
-	for _, item := range evidence {
-		quote := strings.TrimSpace(item.Quote)
-		if quote != "" && strings.Contains(text, quote) {
-			return true
-		}
-	}
-	return false
-}
-
 func expandsBounds(target memory.Memory, action plannedAction) bool {
 	from, to, _, _ := actionRange(action)
 	if from != nil && target.ValidFrom != nil && from.Before(*target.ValidFrom) {
@@ -1211,5 +1443,34 @@ func dedupeStrings(values []string) []string {
 		seen[value] = struct{}{}
 		result = append(result, value)
 	}
+	return result
+}
+
+func orderedConvergence(items map[string]ConvergenceDiagnostic, planned []ConvergenceDiagnostic) []ConvergenceDiagnostic {
+	result := make([]ConvergenceDiagnostic, 0, len(items)+len(planned))
+	seen := make(map[string]struct{}, len(items)+len(planned))
+	appendItem := func(item ConvergenceDiagnostic) {
+		if item.Code == "" {
+			return
+		}
+		key := item.CandidateID + "\x00" + item.Code
+		if _, duplicate := seen[key]; duplicate {
+			return
+		}
+		seen[key] = struct{}{}
+		result = append(result, item)
+	}
+	for _, item := range planned {
+		appendItem(item)
+	}
+	for _, item := range items {
+		appendItem(item)
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].CandidateID != result[j].CandidateID {
+			return result[i].CandidateID < result[j].CandidateID
+		}
+		return result[i].Code < result[j].Code
+	})
 	return result
 }

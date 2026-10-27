@@ -59,10 +59,16 @@ func (h *handler) recallMemories(w http.ResponseWriter, request *http.Request) {
 			h.writeBadRequest(w)
 			return
 		}
+		eventAt, eventValid := rawTimeStrict(filters, "event_at")
+		if !eventValid {
+			h.writeBadRequest(w)
+			return
+		}
 		recallRequest.Filters = retrieval.Filters{
 			Kinds:         searchKinds(rawStringSlice(filters, "kinds")),
 			States:        searchStates(rawStringSlice(filters, "states")),
 			AsOf:          asOf,
+			EventAt:       eventAt,
 			CreatedByApp:  rawString(filters, "created_by_app"),
 			UpdatedAfter:  rawTime(filters, "updated_after"),
 			UpdatedBefore: rawTime(filters, "updated_before"),

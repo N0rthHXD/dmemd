@@ -50,11 +50,22 @@ func (s *Store) SearchVectors(ctx context.Context, query retrieval.VectorQuery) 
 	for _, status := range assertions {
 		args = append(args, string(status))
 	}
+	if query.Filters.ScopeKey != "" {
+		// The semantic branch must honor exactly the same scope boundary as the
+		// keyword branch; a cross-scope vector must never consume its budget.
+		conditions = append(conditions, "(m.scope_key = ? OR m.scope_key = 'user')")
+		args = append(args, query.Filters.ScopeKey)
+	}
 	if query.Filters.AsOf != nil {
 		conditions = append(conditions, "(m.valid_from IS NULL OR m.valid_from <= ?)")
 		args = append(args, formatTime(*query.Filters.AsOf))
 		conditions = append(conditions, "(m.valid_to IS NULL OR ? < m.valid_to)")
 		args = append(args, formatTime(*query.Filters.AsOf))
+	}
+	if query.Filters.EventAt != nil {
+		lower := query.Filters.EventAt.AddDate(-1, 0, -1)
+		conditions = append(conditions, "m.event_time IS NOT NULL AND m.event_time <= ? AND m.event_time >= ?")
+		args = append(args, formatTime(*query.Filters.EventAt), formatTime(lower))
 	}
 	if query.Filters.CreatedByApp != "" {
 		conditions = append(conditions, "m.created_by_app = ?")

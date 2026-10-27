@@ -62,16 +62,21 @@ func TestAggregateTargetsSkipUnknownScopeAndDeduplicateTopics(t *testing.T) {
 		t.Fatalf("empty scope targets = %+v", targets)
 	}
 	targets := AggregateTargets("project:dmemd", []string{"go", "GO", " sqlite ", ""})
-	if len(targets) != 3 {
+	if len(targets) != 4 {
 		t.Fatalf("targets = %+v", targets)
 	}
 	if targets[0].Kind != KindTopicSummary || targets[0].Topic != "go" ||
 		targets[1].Kind != KindTopicSummary || targets[1].Topic != "sqlite" ||
-		targets[2].Kind != KindProfile {
+		targets[2].Kind != KindScopeSummary || targets[2].Topic != "" ||
+		targets[3].Kind != KindProfile {
 		t.Fatalf("targets = %+v", targets)
 	}
 	if parsed, err := ParseTarget(KindTopicSummary, targets[0].TargetKey()); err != nil ||
 		parsed.ScopeKey != "project:dmemd" || parsed.Topic != "go" {
 		t.Fatalf("parsed target = %+v err=%v", parsed, err)
+	}
+	parsed, err := ParseTarget(KindScopeSummary, targets[2].TargetKey())
+	if err != nil || parsed.ScopeKey != "project:dmemd" || parsed.Topic != "" {
+		t.Fatalf("parsed scope summary = %+v err=%v", parsed, err)
 	}
 }

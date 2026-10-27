@@ -1,28 +1,24 @@
 package source
 
 import (
-	"bytes"
 	"encoding/json"
 	"sort"
-	"strconv"
-	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/N0rthHXD/dmemd/internal/idgen"
 )
 
-// NewEvidence builds one evidence entry for a source. It generates the evidence
-// ID, locates the quote when possible and keeps the source association even
-// when the quote cannot be located. A redacted source never yields a new quote
-// or location copy.
-func NewEvidence(src Source, messageID, quote, modelName string, at time.Time) Evidence {
+// NewEvidence builds one evidence entry for a source. It resolves the
+// model-facing segment reference against the deterministic source view. An
+// unresolvable reference keeps only the source association: the quote is
+// cleared because it may be fabricated. A redacted source never yields a new
+// quote or location copy.
+func NewEvidence(src Source, reference EvidenceReference, modelName string, at time.Time) Evidence {
 	at = at.UTC()
 	item := Evidence{
 		ID:        idgen.NewUUID(),
 		SourceID:  src.ID,
-		MessageID: messageID,
-		Quote:     quote,
+		Quote:     reference.Quote,
 		ModelName: modelName,
 		CreatedAt: at,
 	}
@@ -36,105 +32,28 @@ func NewEvidence(src Source, messageID, quote, modelName string, at time.Time) E
 		item.RedactedAt = &redactedAt
 		return item
 	}
-	item.Location = LocateQuote(src.Content, messageID, quote)
+	resolved, err := BuildView(src.Content).Resolve(reference)
+	if err != nil {
+		// Validation owns the hard boundary. This branch only avoids persisting a
+		// quote that cannot be located in the current source.
+		item.Quote = ""
+		return item
+	}
+	item.MessageID = resolved.Segment.MessageID
+	item.Location = &resolved.Location
 	return item
 }
 
-// LocateQuote finds the first occurrence of quote inside the decoded source
-// content and returns rune offsets into the containing string. When messageID
-// is provided only that message object is searched; an unknown message or a
-// quote that cannot be found simply returns nil, leaving the source association
-// intact. JSON that cannot be decoded also returns nil.
-func LocateQuote(content json.RawMessage, messageID, quote string) *Location {
-	if len(bytes.TrimSpace(content)) == 0 || quote == "" {
-		return nil
-	}
-	decoder := json.NewDecoder(bytes.NewReader(content))
-	decoder.UseNumber()
-	var root any
-	if err := decoder.Decode(&root); err != nil {
-		return nil
-	}
-	if messageID == "" {
-		return findQuote(root, nil, quote)
-	}
-	location, matched := findMessage(root, nil, messageID, quote)
-	if !matched {
-		return nil
-	}
-	return location
+// NewSourceEvidence keeps a source association without a quote. It can support
+// provenance and deduplication, but never automatic correction or convergence.
+func NewSourceEvidence(src Source, modelName string, at time.Time) Evidence {
+	return NewEvidence(src, EvidenceReference{}, modelName, at)
 }
 
-func findMessage(value any, path []string, messageID, quote string) (*Location, bool) {
-	switch typed := value.(type) {
-	case map[string]any:
-		if messageHasID(typed, messageID) {
-			return findQuote(typed, path, quote), true
-		}
-		for _, key := range orderedKeys(typed, nil) {
-			location, matched := findMessage(typed[key], appendPath(path, key), messageID, quote)
-			if matched {
-				return location, true
-			}
-		}
-	case []any:
-		for index, item := range typed {
-			location, matched := findMessage(item, appendPath(path, strconv.Itoa(index)), messageID, quote)
-			if matched {
-				return location, true
-			}
-		}
-	}
-	return nil, false
-}
-
-func findQuote(value any, path []string, quote string) *Location {
-	switch typed := value.(type) {
-	case string:
-		byteIndex := strings.Index(typed, quote)
-		if byteIndex < 0 {
-			return nil
-		}
-		start := utf8.RuneCountInString(typed[:byteIndex])
-		return &Location{
-			Field: strings.Join(path, "."),
-			Start: start,
-			End:   start + utf8.RuneCountInString(quote),
-		}
-	case map[string]any:
-		for _, key := range orderedKeys(typed, []string{"content", "text", "message", "body"}) {
-			if location := findQuote(typed[key], appendPath(path, key), quote); location != nil {
-				return location
-			}
-		}
-	case []any:
-		for index, item := range typed {
-			if location := findQuote(item, appendPath(path, strconv.Itoa(index)), quote); location != nil {
-				return location
-			}
-		}
-	}
-	return nil
-}
-
-func messageHasID(value map[string]any, messageID string) bool {
-	for _, key := range []string{"id", "message_id", "messageId"} {
-		candidate, ok := value[key]
-		if !ok {
-			continue
-		}
-		switch typed := candidate.(type) {
-		case string:
-			if typed == messageID {
-				return true
-			}
-		case json.Number:
-			if typed.String() == messageID {
-				return true
-			}
-		}
-	}
-	return false
+// ContainsQuote reports whether the source contains the quote verbatim inside a
+// single visible segment.
+func ContainsQuote(content json.RawMessage, quote string) bool {
+	return BuildView(content).ContainsQuote(quote)
 }
 
 func orderedKeys(value map[string]any, preferred []string) []string {

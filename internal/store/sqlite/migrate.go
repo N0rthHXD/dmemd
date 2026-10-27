@@ -19,7 +19,7 @@ var embeddedMigrations embed.FS
 // SchemaContract identifies the current initialization layout. It is stored in
 // schema_meta by the first migration so a database created with an incompatible
 // pre-release layout can be rejected before any new migration runs.
-const SchemaContract = "dmemd-p2-2026-10-26"
+const SchemaContract = "dmemd-p5-2026-10-27"
 
 type migration struct {
 	version int

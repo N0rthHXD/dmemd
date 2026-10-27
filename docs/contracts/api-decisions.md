@@ -82,6 +82,9 @@
 
 无分页信息；`limit` 没有业务上限。`created_by_app` 是创建时来源的 `app_id` 快照，
 `scope_key` 为可选平面作用域，`topics` 为规范化平面标签数组（无匹配时 `[]`）。
+`retention_reason` 是服务派生的保留理由（`explicit_intent`、`future_applicability`、
+`durable_knowledge`、`episodic_event`、`temporary_context` 或 `unclassified`），只用于展示和
+维护审阅，不删除记忆、不改变断言状态，也不自动生成 TTL。
 后续更新和恢复保持不变；`origin_source_id` 是首次生成该记忆的来源。两者都不承担身份或
 唯一性。
 
@@ -162,7 +165,7 @@
 50；没有分页。响应：
 
 ```json
-{"items":[{"memory_id":"memory-uuid","version":3,"operation":"update","reason":"用户更正回答语言","snapshot":{"id":"memory-uuid","kind":"preference","title":"回答语言","content":"用户希望默认使用中文回答。","state":"active","version":3,"observed_at":"2026-10-20T02:00:00Z","created_at":"2026-10-20T02:00:01Z","updated_at":"2026-10-20T03:00:00Z","created_by_app":"desktop-assistant","origin_source_id":"source-uuid"},"evidence":[{"id":"evidence-uuid","source_id":"source-uuid","message_id":"msg-1","quote":"以后请默认使用中文回答。","location":{"field":"messages.0.content","start":0,"end":13},"model_name":"example-model","redacted":false,"created_at":"2026-10-20T02:00:01Z"}],"created_at":"2026-10-20T03:00:00Z"}]}
+{"items":[{"memory_id":"memory-uuid","version":3,"operation":"update","reason":"用户更正回答语言","snapshot":{"id":"memory-uuid","kind":"preference","title":"回答语言","content":"用户希望默认使用中文回答。","state":"active","version":3,"observed_at":"2026-10-20T02:00:00Z","created_at":"2026-10-20T02:00:01Z","updated_at":"2026-10-20T03:00:00Z","created_by_app":"desktop-assistant","origin_source_id":"source-uuid"},"evidence":[{"id":"evidence-uuid","source_id":"source-uuid","message_id":"msg-1","quote":"以后请默认使用中文回答。","location":{"field":"messages.0.content","start":0,"end":12},"model_name":"example-model","redacted":false,"created_at":"2026-10-20T02:00:01Z"}],"created_at":"2026-10-20T03:00:00Z"}]}
 ```
 
 记忆不存在返回 `404`。历史只读；恢复旧版本不会覆盖或删除旧版本。
@@ -220,17 +223,35 @@
 | `layers` | 缺失选择全部层；显式列表只检索对应分区；值只能是 `atomic/summary/experience/skill`，其他值返回 `400` |
 | `mode` | 缺失或空为 `keyword`；支持 `keyword`、`hybrid`，其他值返回 `400`；只影响原子层，派生层固定使用派生 FTS |
 | `filters.kinds/states` | 只过滤 `atomic` 分区；不会隐式排除摘要、经验或 Skill；`states` 缺失默认 `active`，`deleted` 永不返回 |
-| `filters.as_of` | 显式历史时点只支持原子层。所选 layers 含派生层时这些分区返回空数组并附 `derived_as_of_unsupported`；只选 `atomic` 不产生该提示 |
+| `filters.as_of` | 事实有效时点，只支持原子层。所选 layers 含派生层时这些分区返回空数组并附 `derived_as_of_unsupported`；只选 `atomic` 不产生该提示。未知有效边界仍可返回但标记 `temporal_status=unknown` 并附 `temporal_uncertain` |
+| `filters.event_at` | 事件发生时点；只匹配 `event_time` 精度窗口覆盖该时刻的事件，事件时间未知的事件默认不返回。单独提供时不把事实有效区间固定到当前时刻，历史事件和未来计划都可按发生时间查询 |
 | `filters.created_by_app/updated_after/before` | 只过滤原子层；时间边界无法解析时忽略 |
 | `top_k` | 缺失、非正整数时使用 20；大于 100 返回 `400`；上限按所选层分别执行 |
 | `max_context_tokens` | 可选保守预算，按 rune 数估算而非模型精确 tokenizer；超过预算时截断后续条目并返回 `context_budget_truncated` |
-| `explain` | 默认 `false`；只影响原子条目的 `explanation` |
+| `explain` | 默认 `false`；控制原子条目的 `explanation` 和响应级 `diagnostics` 阶段计数。计数为有界诊断，不改变结果 |
 
 原子层、派生层、相关事实选择、冲突发现及 hybrid 的关键词分支统一使用过滤后的词项和 any
 语义，不提供匹配方式字段。原子层沿用加权 BM25（标题 4、正文 1）、覆盖率重排和 RRF 混合语义；`score` 只在当前查询
 内比较。派生层按 `(kind,target_key)` 的当前版本检索，只有 `state=active` 的当前版本进入
 默认召回；`stale/disabled` 历史可通过 `GET /v1/artifacts/{id}` 或历史接口读取，但不会出现
 在默认召回。摘要、经验与 Skill 使用同一分词规则建立独立 FTS 索引，不与原子分数相加。
+
+主命中之后可追加有界关联项：同一事实组的成员和同事实未决冲突成员。关联项遵守与主查询
+完全相同的 scope、kind、state、assertion 和有效/事件时间过滤，只使用剩余 `top_k` 名额，
+不替换主命中，并以 `related.reason_codes`、`related.anchor_memory_ids` 明确标记。事实组
+成员用于补齐偏好另一半、事件限定或流程条件，不扩展整个来源或会话。语义路不可用时，
+`warnings` 区分 `semantic_unavailable`、`semantic_timeout`、`semantic_config_error`、
+`semantic_rate_limited`、`semantic_invalid_response` 和 `semantic_index_not_ready`；
+后两者分别表示响应不合法和存在文档但当前配置没有可用向量，空向量结果不会被解释为
+“语义上不相关”。
+
+同一事实的完全重复表述折叠为展示簇：要求相同事实组、scope、kind、phase、state、断言状态、
+有效/事件时间和规范化标题/正文。折叠项通过 `cluster.member_ids` 暴露全部记忆 ID，并把
+各成员证据合并到代表性的 `evidence_refs`；否定、条件或时间不同的独立事实不会被折叠。
+`explain=true` 时返回可选 `diagnostics` 阶段计数：关键词/语义候选、词项候选、kind/state/
+时间排除、参与重排数、关联展开/排除、返回数和预算裁剪数。过滤排除计数只做同 scope、保留
+其他边界的单过滤放宽计数，不返回跨作用域正文，也不改变实际结果；`kind_filter_excluded`
+只说明候选被过滤，不能据此断言模型分类错误。
 
 响应按知识层分区，未请求、未命中或暂不可用的分区返回空数组：
 
@@ -270,13 +291,16 @@
 }
 ```
 
-`experiences` 返回当前 active 的经验案例，`skills` 返回当前 active 的指导型 Skill；未生成、
-失效或停用时为空数组。每个条目保留对象 ID、版本、状态、结构化 `payload`、直接原子依据
-`memory_refs` 和应用结果依据 `run_refs`。经验结果一律是应用报告，Skill 只是可修正的指导
+`summaries` 同时返回当前 active 的 `topic_summary`、`scope_summary` 和 `profile`；三者
+共用摘要分区和派生 FTS，但目标是不同派生类型。`experiences` 返回当前 active 的经验案例，
+`skills` 返回当前 active 的指导型 Skill；未生成、失效或停用时为空数组。每个条目保留对象
+ID、版本、状态、结构化 `payload`、直接原子依据 `memory_refs` 和应用结果依据 `run_refs`。经验结果一律是应用报告，Skill 只是可修正的指导
 文本，响应不包含真实性或执行认证。派生索引故障只降级派生分区并返回
 `derived_unavailable`，不阻止原子结果；召回不等待后台聚合、经验案例或 Skill 生成。
 原子分区沿用既有 `snippet`、`matched_terms`、`evidence_refs` 和冲突说明语义。语义路关闭
-或失败时回退关键词并返回 `semantic_unavailable`/`semantic_timeout`。
+或失败时回退关键词并返回稳定代码：`semantic_unavailable`、`semantic_timeout`、
+`semantic_config_error`、`semantic_rate_limited`、`semantic_invalid_response` 或
+`semantic_index_not_ready`。
 
 ### `POST /v1/experiences`
 
@@ -315,6 +339,21 @@
 `memory_refs` 和应用结果依据 `run_refs`。`stale/disabled` 对象仍可显式读取历史；永久清除后
 对象和版本均为 `404`。
 
+`GET /v1/artifacts` 按 `scope_key/kind/state/reason_code` 过滤当前对象，使用有界
+`cursor/limit` 游标，不依赖正文关键词。`GET /v1/artifact-targets` 额外列出尚未形成对象的
+生成目标，按 `scope_key/kind/status/reason_code` 过滤，并区分 `queued/running/waiting`、
+`no_eligible_input`、`model_unavailable`、`generation_failed`、`invalid_output`、
+`active/stale/disabled`；`artifact`、`job`、`evaluated_at` 和 `has_usable_version` 分别展示
+对象、任务、最近一次无结果评估及是否已有不可变版本。`job` 额外返回尝试次数、连续失败、
+`retry_reason`、目标年龄和 queued/running/waiting 的 stale 秒数，用于发现连续摄取造成的等待；
+没有合格 procedure 的 Skill 目标只记录
+目标评估，不创建空 artifact；已有 Skill 失去来源时仍立即 `stale`，随后 `disabled` 并保留历史。
+摘要版本的 `payload` 分开记录 `input_selection`（合格/选入/实际包含/省略数量与原因）、
+`citation_integrity`（引用是否存在且版本匹配）、`semantic_coverage`（无法确定时为
+`unknown`，服务已知省略时为 `subset`）、`citations` 与 `omitted_inputs`；引用合法不等于语义完整。
+`scope_summary` 是按作用域和派生类型确定目标的通用概览，不要求模型输出项目 topic；
+`topic_summary` 保留为细分视图，父主题直接读取叶子原子。
+
 ## 6. 来源与任务
 
 ### `GET /v1/sources/{id}`
@@ -339,10 +378,11 @@
 
 ### `GET /v1/ingest-jobs/{id}`
 
-返回任务状态、尝试次数、脱敏错误摘要、生成记忆 ID 与时间：
+返回任务状态、尝试次数、脱敏错误摘要、业务质量结果、分阶段统计、候选级诊断、收敛诊断、
+生成记忆 ID 与时间：
 
 ```json
-{"id":"job-uuid","source_id":"source-uuid","status":"succeeded","attempts":1,"protocol_failures":0,"memory_ids":["memory-uuid"],"conflict_ids":["conflict-uuid"],"pending_memory_ids":["memory-uuid"],"warnings":["fact_conflict"],"created_at":"2026-10-20T02:00:01Z","updated_at":"2026-10-20T02:00:03Z","started_at":"2026-10-20T02:00:02Z","finished_at":"2026-10-20T02:00:03Z"}
+{"id":"job-uuid","source_id":"source-uuid","status":"succeeded","attempts":1,"protocol_failures":0,"memory_ids":["memory-uuid"],"conflict_ids":["conflict-uuid"],"pending_memory_ids":["memory-uuid"],"warnings":["fact_conflict"],"quality_outcome":"complete","extraction_stats":{"raw_candidates":1,"parsed_candidates":1,"normalized_candidates":0,"normalizations":0,"repair_attempts":0,"repaired_candidates":0,"repair_succeeded":0,"repair_failed":0,"repair_timed_out":0,"repair_invalid_output":0,"excluded_candidates":0,"isolated_candidates":0,"accepted_candidates":1,"skipped_candidates":0,"memory_writes":1,"extraction_chunks":1,"extraction_chunk_failures":0,"dropped_candidates":0,"cross_chunk_duplicates":0,"context_only_candidates":0},"retention":{"retained":1,"not_retained":0,"by_reason":{"explicit_intent":1},"not_retained_by_reason":{}},"timings":{"queue_age_ms":1000,"extraction_ms":900,"normalization_ms":3,"repair_ms":0,"context_ms":20,"decision_ms":0,"commit_ms":15,"total_ms":938},"model_usage":{"calls":1,"input_tokens":120,"output_tokens":40,"total_tokens":160},"efficiency":{"memories":1,"model_calls":1,"total_tokens":160,"calls_per_memory":1,"tokens_per_memory":160},"queue_age_seconds":1,"stale_seconds":0,"diagnostics":[],"convergence":[],"created_at":"2026-10-20T02:00:01Z","updated_at":"2026-10-20T02:00:03Z","started_at":"2026-10-20T02:00:02Z","finished_at":"2026-10-20T02:00:03Z"}
 ```
 
 `status` 为 `queued`、`running`、`waiting`、`succeeded`、`failed`、`cancelled`。`waiting`
@@ -351,9 +391,24 @@
 `worker.max_attempts`（默认 3）后进入 `failed`。`stage` 返回 source/extraction/context/decision/
 decision_repair/commit 等阶段，`reason_code` 返回稳定原因（如 `model_timeout`、
 `process_budget_exceeded`、`decision_repair_failed`），不依赖展示用 `error` 文本。
-`succeeded` 表示处理完成，不保证全部断言被采纳。`memory_ids` 是本次创建或修订的全部记忆；
-`conflict_ids` 与 `pending_memory_ids` 分别列出未决冲突和待裁决断言；`warnings` 为固定代码
-数组。失败原因不包含完整模型响应或原始输入。任务不存在返回 `404`。无结果时数组字段为 `[]`。
+
+`quality_outcome` 与调度状态分开：`empty` 表示合法空提取；`complete` 表示候选全部安全
+处理（包括补证、重复和明确 skip）；`partial` 表示保留部分候选并隔离其余候选；`unusable`
+表示非空候选全部因协议/证据错误不可用，任务会按协议重试或失败，不能被解释成正常空结果。
+全量隐私排除属于正常完成并记录 `excluded_candidates`，不会通过重试重新提取。
+
+`extraction_stats` 区分原始候选、解析/规范化、repair、拆分、隔离、排除、接受、写入、分块和
+超限丢弃数量；`retention` 按固定原因记录保留与未保留候选，只用于观察噪声写入和有用信息
+漏记，不会自动删除记忆；`timings` 记录一次尝试的排队年龄和各阶段耗时，`model_usage` 与
+`efficiency` 记录调用数、token 和每个有效原子的成本；`queue_age_seconds`、`stale_seconds` 和
+`retry_reason` 用于发现长期等待与重试原因。`diagnostics` 仅包含 candidate ID、field、固定
+code、stage 和最终处置；`convergence` 仅包含
+candidate ID、事实组 ID 和 `identity_ambiguous`、`missing_update_evidence`、`time_unknown`、
+`cardinality_unknown`、`context_truncated` 固定原因，不含原文或完整模型响应。`succeeded`
+表示处理完成，不保证全部断言被采纳。`memory_ids` 是本次创建或修订的
+全部记忆；`conflict_ids` 与 `pending_memory_ids` 分别列出未决冲突和待裁决断言；`warnings`
+为固定代码数组。失败原因不包含完整模型响应或原始输入。任务不存在返回 `404`。无结果时
+数组字段为 `[]`。
 
 ## 7. 健康检查
 
@@ -364,12 +419,37 @@ decision_repair/commit 等阶段，`reason_code` 返回稳定原因（如 `model
 
 模型未配置或不可达不影响 `/readyz`；服务仍可提交、查询和管理已有记忆。
 
+### `GET /v1/embedding/status`
+
+只读返回当前 Embedding 配置指纹、无凭据端点和向量库存。`current_vectors` 只统计
+profile、维数和当前文档内容 hash 全部匹配的向量；`stale_vectors` 与 `missing_vectors`
+不参与召回，并驱动 `rebuild_required`。`config_fingerprint_match` 比较当前 profile/
+文档契约与持久化登记值；`indexed_profiles` 暴露历史 profile 的残留向量数。
+`reason_code` 为 `ready`、`disabled`、`no_documents`、`config_mismatch`、
+`index_not_ready`、`backlog` 或 `failed_jobs`；存在文档但当前向量为零时必须是
+`index_not_ready`，不能把空语义结果解释为不相关。响应不包含 API key、来源正文、查询、
+向量值或原始模型响应。
+
+### `POST /v1/embedding/probe`
+
+显式发起一次有界 Embedding 调用，使用固定探针文本和与召回相同的编码器，返回
+`attempted/success/code/dimensions/duration_ms/checked_at`。`code` 区分 `ok`、
+`disabled`、`unauthorized`、`config_error`、`rate_limited`、`timeout`、
+`invalid_response` 和 `unavailable`。探测结果不持久化，不影响 `/readyz`，也不参与普通召回。
+
+模型、维数或文档构造方式变化时，启动阶段把当前 profile 与新重建原因写入索引元数据；
+旧向量退出当前配置召回，后台任务按 profile + content hash 重新生成。失败任务保留
+固定错误码和计数，供 status 读取。
+
 ## 8. 路由与端点边界
 
 - `/v1/memories/recall` 是集合级动作，不是记忆 ID；路由实现必须先匹配该静态路径。
+- `/v1/embedding/status` 与 `/v1/embedding/probe` 只提供语义配置/覆盖/降级诊断；没有修改
+  配置、强制重建或绕过 Worker 的端点。
 - 历史、证据是记忆的只读子资源；恢复是新增版本的动作，不是内容写入端点。
-- `/v1/artifacts/*` 与 `/v1/skills/*/content` 只提供派生对象当前/历史只读视图；聚合、经验
-  案例、Skill 生成、失效和重算由治理 Worker 自动执行，调用方不需要也不存在逐项触发端点。
+- `/v1/artifacts`、`/v1/artifacts/*`、`/v1/artifact-targets` 与 `/v1/skills/*/content` 只提供
+  派生对象和生成目标的只读视图；聚合、经验案例、Skill 生成、失效和重算由治理 Worker 自动执行，
+  调用方不需要也不存在逐项触发端点。
 - `/v1/experiences` 保存应用报告并触发经验案例；`/v1/experiences/{id}/retract` 是显式撤销，
   不是原子事实写入端点。
 - `PATCH .../state` 仅状态；`DELETE /v1/memories/{id}` 是逻辑删除，`POST .../purge` 是单个记忆
@@ -388,14 +468,22 @@ decision_repair/commit 等阶段，`reason_code` 返回稳定原因（如 `model
 | 字段 | 含义 |
 | --- | --- |
 | `assertion_status` | `accepted` / `pending` / `rejected`；普通召回先 accepted 再 pending，永不返回 rejected |
+| `observed_at` / `observed_at_basis` | 来源作出陈述或观测的时间及其依据；缺失时回退到接收时间并标记 `recorded`，不作为新事实更晚的证据 |
+| `event_time` / `event_time_basis` / `event_time_precision` | 事件发生或计划时间；计划事件不被未来发生时间隐藏。精度可为 day/hour/minute/second 等 |
 | `valid_from` / `valid_to` | 左闭右开事实有效区间；`null` 表示未知，不表示无限 |
 | `valid_from_basis` / `valid_to_basis` | `explicit` / `inferred` / `unknown`；空边界必须为 unknown |
+| `temporal` | 每个时间锚点的原文、精度和是否有明确时区；无时区的日期不会被宣称为明确 UTC 零点 |
+| `procedure` | 可选结构化流程：目标、有序步骤、前置条件、完成检查和失败分支；随修订版本、hash、失效和清除闭包保存 |
+| `qualifiers` | 通用限定：实体、值/单位、条件、极性、确定性和归属；正文仍是权威表达 |
 | `fact_group_id` | 同主体、属性、场景的事实组；可为空 |
 
-`observed_at` 仍表示发生或观测时间。缺失时可用来源接收时间作为排序辅助，但不会自动填入
-有效区间。`temporal_status` 在召回 item 上为 `within_bounds` 或 `unknown`，只描述记录约束。
-`GET /v1/memories/{id}` 还返回 `relations`；当前只记录 `supersedes` 关系，含决策时两端版本和
-`from_version_changed` / `to_version_changed`。未决矛盾通过冲突成员表达，不重复写入关系。
+`temporal_status` 在召回 item 上为 `within_bounds` 或 `unknown`，只描述记录约束，不宣称现实真值。
+`filters.as_of` 只表示事实有效时点，不是“系统当时知道什么”的知识截面；时间未知且仍返回的
+结果保留 `unknown` 并附 `temporal_uncertain`。
+`GET /v1/memories/{id}` 还返回 `relations` 和 `evolution`；`relations` 只记录 `supersedes`
+关系并含 `from_version_changed` / `to_version_changed`，`evolution` 返回
+`change/correction/reschedule/cancel/supersede` 确定性演化审计及双方决策版本。未决矛盾通过
+冲突成员表达，不重复写入关系。
 
 ### 9.2 召回与冲突提示
 
@@ -453,11 +541,15 @@ decision_repair/commit 等阶段，`reason_code` 返回稳定原因（如 `model
 
 ### 9.4 有限自动复查
 
-入库前先执行确定性自动收敛：主体、谓词、fact group、scope 和单值属性必须一致；当前来源
-的可定位 quote 必须明确表达更正、改期或替换，不使用模型 reason_code 或单纯接收顺序作为证据。
-新事实时间必须可确认晚于旧事实；完整已知且重叠的不同区间、条件性更新、未知单值属性不自动裁决。
-满足条件时创建 active+accepted 后继，旧事实 rejected 或设置 valid_to，记录 supersedes、完整
-冲突成员和 resolved 事件；检测版本不被后续版本覆盖，current_version 始终反映当前快照。
+入库前先执行确定性自动收敛：显式 `scope_key`、主体、谓词、场景、必要条件和单值属性必须
+一致；先按规范化身份读取同组时间线，再补充关键词/语义上下文。当前来源的可定位 quote 必须
+明确表达更正、改期、取消或替换，不使用模型 reason_code、单纯接收顺序或候选 ID 顺序作为
+证据。状态变化保留旧值历史段并在推断的转移时点关闭；明确更正拒绝旧断言但不伪造其有效
+区间；改期/取消拒绝旧计划并把新阶段作为当前事件；独立观测保留各自观测时间，数值不同不自动
+构成冲突。完整已知且重叠的互斥值、条件性更新、未知单值属性不自动裁决。满足条件时创建
+active+accepted 后继，记录 supersedes、`memory_evolution_events`、完整冲突成员和必要的
+resolved 事件；检测版本不被后续版本覆盖，current_version 始终反映当前快照。未自动收敛时
+任务 `convergence` 返回固定原因。
 
 冲突创建、成员扩展或任一相关成员产生新版本（包括仅补证和生命周期变化）时，同一事务会
 更新 `(review_conflict, conflict:<id>)` 治理目标。Worker 只使用当前冲突成员及有限原子快照，
@@ -474,10 +566,11 @@ decision_repair/commit 等阶段，`reason_code` 返回稳定原因（如 `model
 
 ## 10. 治理配置
 
-`governance` 只有五个首版配置项：`enabled`（缺省 true）、`debounce`、
-`reconcile_interval`、`min_call_interval`、`max_inputs`。`max_inputs` 同时限制聚合、经验案例
-和 Skill 单次选择的原子/运行依据数量；模型调用仍有单次超时，进程内软限速（每小时约 30 次）
-是不写入配置的固定运行边界。`enabled=false` 只停止后台整理，HTTP、原子写入和查询保持可用，
+`governance` 配置项为 `enabled`（缺省 true）、`debounce`、`reconcile_interval`、
+`min_call_interval`、`max_inputs` 和 `max_wait`。`max_inputs` 同时限制聚合、经验案例和 Skill
+单次选择的原子/运行依据数量；`max_wait` 默认 30 分钟，限制连续摄取推迟一个已到期治理目标的
+最长时间，超过后执行一次公平领取。模型调用仍有单次超时，进程内软限速（每小时约 30 次）是
+不写入配置的固定运行边界。`enabled=false` 只停止后台整理，HTTP、原子写入和查询保持可用，
 已登记任务保留到重新启用。
 
 ## 11. 首版验证与明确限制

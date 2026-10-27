@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/N0rthHXD/dmemd/internal/artifact"
+	"github.com/N0rthHXD/dmemd/internal/governance/task"
+	"github.com/N0rthHXD/dmemd/internal/topic"
 )
 
 const artifactColumns = `id, kind, target_key, scope_key, topic, current_version, state, reason_code, updated_at`
@@ -642,6 +644,380 @@ func (s *Store) SearchArtifacts(ctx context.Context, query artifact.SearchQuery)
 	return result, nil
 }
 
+// ListArtifacts returns one bounded keyset page of current artifacts. Cursor is
+// the stable target key, never an opaque body-derived value.
+func (s *Store) ListArtifacts(ctx context.Context, query artifact.ListQuery) (artifact.ListPage, error) {
+	if query.Limit <= 0 {
+		query.Limit = 50
+	}
+	if query.Limit > 200 {
+		query.Limit = 200
+	}
+	conditions := []string{"target_key > ?"}
+	args := []any{query.Cursor}
+	if query.ScopeKey != "" {
+		conditions = append(conditions, "scope_key = ?")
+		args = append(args, query.ScopeKey)
+	}
+	if query.Kind != "" {
+		conditions = append(conditions, "kind = ?")
+		args = append(args, string(query.Kind))
+	}
+	if query.State != "" {
+		conditions = append(conditions, "state = ?")
+		args = append(args, string(query.State))
+	}
+	if query.ReasonCode != "" {
+		conditions = append(conditions, "reason_code = ?")
+		args = append(args, query.ReasonCode)
+	}
+	args = append(args, query.Limit+1)
+	rows, err := s.reader.QueryContext(ctx, `SELECT `+artifactColumns+` FROM artifacts
+		WHERE `+strings.Join(conditions, " AND ")+`
+		ORDER BY target_key ASC LIMIT ?`, args...)
+	if err != nil {
+		return artifact.ListPage{}, fmt.Errorf("列出派生对象: %w", err)
+	}
+	defer rows.Close()
+	items := []artifact.Artifact{}
+	for rows.Next() {
+		item, err := scanArtifact(rows)
+		if err != nil {
+			return artifact.ListPage{}, fmt.Errorf("列出派生对象: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return artifact.ListPage{}, fmt.Errorf("列出派生对象: %w", err)
+	}
+	page := artifact.ListPage{Items: items}
+	if len(items) > query.Limit {
+		page.Items = items[:query.Limit]
+		last := page.Items[len(page.Items)-1]
+		page.NextCursor = artifact.TargetCursor(last.TargetKey)
+	}
+	return page, nil
+}
+
+// ListTargets returns artifacts and evaluation-only targets in one stable
+// keyset order. It distinguishes targets that never had eligible input from
+// content objects that failed or were disabled.
+func (s *Store) ListTargets(ctx context.Context, query artifact.TargetQuery) (artifact.TargetPage, error) {
+	if query.Limit <= 0 {
+		query.Limit = 50
+	}
+	if query.Limit > 200 {
+		query.Limit = 200
+	}
+	page := artifact.TargetPage{Items: []artifact.TargetRecord{}}
+	cursor := query.Cursor
+	// Status is derived from artifact, evaluation and job state, so filter in
+	// Go while keeping each storage scan bounded and keyset-stable.
+	for rounds := 0; rounds < 8 && len(page.Items) < query.Limit; rounds++ {
+		remaining := query.Limit - len(page.Items)
+		records, next, exhausted, err := s.scanTargets(ctx, cursor, remaining*3+1)
+		if err != nil {
+			return artifact.TargetPage{}, err
+		}
+		for _, record := range records {
+			if !matchesTargetQuery(record, query) {
+				continue
+			}
+			page.Items = append(page.Items, record)
+			if len(page.Items) >= query.Limit {
+				break
+			}
+		}
+		cursor = next
+		if exhausted || len(page.Items) >= query.Limit {
+			break
+		}
+	}
+	if len(page.Items) > query.Limit {
+		page.Items = page.Items[:query.Limit]
+	}
+	if len(page.Items) == query.Limit {
+		last := page.Items[len(page.Items)-1]
+		probe := artifact.TargetCursor(last.TargetKey)
+		for rounds := 0; rounds < 8; rounds++ {
+			records, next, exhausted, err := s.scanTargets(ctx, probe, 50)
+			if err != nil {
+				return artifact.TargetPage{}, err
+			}
+			found := false
+			for _, record := range records {
+				if matchesTargetQuery(record, query) {
+					found = true
+					break
+				}
+			}
+			if found {
+				page.NextCursor = probe
+				break
+			}
+			if exhausted {
+				break
+			}
+			probe = next
+		}
+	}
+	return page, nil
+}
+
+func matchesTargetQuery(record artifact.TargetRecord, query artifact.TargetQuery) bool {
+	if query.ScopeKey != "" && record.ScopeKey != query.ScopeKey {
+		return false
+	}
+	if query.Kind != "" && record.Kind != query.Kind {
+		return false
+	}
+	if query.ReasonCode != "" && record.ReasonCode != query.ReasonCode {
+		return false
+	}
+	if query.Status != "" && record.Status != query.Status {
+		return false
+	}
+	return true
+}
+
+func (s *Store) scanTargets(ctx context.Context, cursor string, limit int) ([]artifact.TargetRecord, string, bool, error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	conditions := []string{"cursor > ?"}
+	args := []any{cursor}
+	args = append(args, limit)
+	statement := `SELECT kind, target_key, scope_key, topic, artifact_id, current_version,
+		artifact_state, artifact_reason, artifact_updated, evaluation_status,
+		evaluation_reason, evaluated_at, job_status, job_wait_reason, job_error_code,
+		job_updated_at, cursor FROM (
+		SELECT a.kind AS kind, a.target_key AS target_key, a.scope_key AS scope_key,
+			a.topic AS topic, a.id AS artifact_id, a.current_version AS current_version,
+			a.state AS artifact_state, a.reason_code AS artifact_reason,
+			a.updated_at AS artifact_updated,
+			'' AS evaluation_status, '' AS evaluation_reason, '' AS evaluated_at,
+			COALESCE(j.status, '') AS job_status, COALESCE(j.wait_reason, '') AS job_wait_reason,
+			COALESCE(j.last_error_code, '') AS job_error_code, COALESCE(j.updated_at, '') AS job_updated_at,
+			a.target_key AS cursor
+		FROM artifacts a
+		LEFT JOIN governance_jobs j ON j.target_key = a.target_key
+			AND j.kind = CASE WHEN a.kind = 'skill' THEN 'build_skill' ELSE 'aggregate' END
+		UNION ALL
+		SELECT e.kind, e.target_key, e.scope_key, e.topic, '', 0, '', '',
+			'', e.status, e.reason_code, e.evaluated_at,
+			COALESCE(j.status, ''), COALESCE(j.wait_reason, ''),
+			COALESCE(j.last_error_code, ''), COALESCE(j.updated_at, ''),
+			e.target_key
+		FROM derived_target_evaluations e
+		LEFT JOIN governance_jobs j ON j.target_key = e.target_key
+			AND j.kind = CASE WHEN e.kind = 'skill' THEN 'build_skill' ELSE 'aggregate' END
+		WHERE NOT EXISTS (
+			SELECT 1 FROM artifacts a WHERE a.kind = e.kind AND a.target_key = e.target_key
+		)
+		UNION ALL
+		SELECT '', j.target_key, '', '', '', 0, '', '', '', '', '', '',
+			j.status, j.wait_reason, j.last_error_code, j.updated_at,
+			j.target_key
+		FROM governance_jobs j
+		WHERE j.kind IN ('aggregate', 'build_skill')
+			AND NOT EXISTS (SELECT 1 FROM artifacts a WHERE a.target_key = j.target_key)
+			AND NOT EXISTS (SELECT 1 FROM derived_target_evaluations e WHERE e.target_key = j.target_key)
+	) WHERE ` + strings.Join(conditions, " AND ") + ` ORDER BY cursor ASC LIMIT ?`
+	rows, err := s.reader.QueryContext(ctx, statement, args...)
+	if err != nil {
+		return nil, cursor, true, fmt.Errorf("列出派生目标: %w", err)
+	}
+	defer rows.Close()
+	records := []artifact.TargetRecord{}
+	next := cursor
+	for rows.Next() {
+		var kind, targetKey, scopeKey, topic, artifactID, artifactState, artifactReason, artifactUpdated string
+		var currentVersion int
+		var evaluationStatus, evaluationReason, evaluatedAt string
+		var jobStatus, jobWaitReason, jobErrorCode, jobUpdatedAt, rowCursor string
+		if err := rows.Scan(&kind, &targetKey, &scopeKey, &topic, &artifactID, &currentVersion,
+			&artifactState, &artifactReason, &artifactUpdated, &evaluationStatus,
+			&evaluationReason, &evaluatedAt, &jobStatus, &jobWaitReason, &jobErrorCode,
+			&jobUpdatedAt, &rowCursor); err != nil {
+			return nil, cursor, true, fmt.Errorf("列出派生目标: %w", err)
+		}
+		record := artifact.TargetRecord{
+			Kind: artifact.Kind(kind), TargetKey: targetKey, ScopeKey: scopeKey, Topic: topic,
+		}
+		if record.Kind == "" {
+			parsed, ok := parseTargetRecordKey(targetKey)
+			if !ok {
+				continue
+			}
+			record.Kind, record.ScopeKey, record.Topic = parsed.Kind, parsed.ScopeKey, parsed.Topic
+		}
+		if artifactID != "" {
+			item := artifact.Artifact{
+				ID: artifactID, Kind: artifact.Kind(kind), TargetKey: targetKey,
+				ScopeKey: scopeKey, Topic: topic, CurrentVersion: currentVersion,
+				State: artifact.State(artifactState), ReasonCode: artifactReason,
+			}
+			if artifactUpdated != "" {
+				if parsed, err := parseTime(artifactUpdated); err == nil {
+					item.UpdatedAt = parsed
+					record.UpdatedAt = parsed
+				}
+			}
+			record.Artifact = &item
+		}
+		if evaluatedAt != "" {
+			if parsed, err := parseTime(evaluatedAt); err == nil {
+				record.EvaluatedAt = &parsed
+				if parsed.After(record.UpdatedAt) {
+					record.UpdatedAt = parsed
+				}
+			}
+		}
+		if jobStatus != "" {
+			job := &task.Job{Kind: skillJobKind(artifact.Kind(kind)), TargetKey: targetKey,
+				Status: task.Status(jobStatus), WaitReason: jobWaitReason, LastErrorCode: jobErrorCode}
+			if jobUpdatedAt != "" {
+				if parsed, err := parseTime(jobUpdatedAt); err == nil {
+					job.UpdatedAt = parsed
+					if parsed.After(record.UpdatedAt) {
+						record.UpdatedAt = parsed
+					}
+				}
+			}
+			record.Job = job
+		}
+		record.Status, record.ReasonCode = targetStatusFromRecord(record, evaluationStatus, evaluationReason)
+		records = append(records, record)
+		next = rowCursor
+	}
+	if err := rows.Err(); err != nil {
+		return nil, cursor, true, fmt.Errorf("列出派生目标: %w", err)
+	}
+	return records, next, len(records) < limit, nil
+}
+
+func skillJobKind(kind artifact.Kind) task.Kind {
+	if kind == artifact.KindSkill {
+		return task.KindBuildSkill
+	}
+	return task.KindAggregate
+}
+
+func parseTargetRecordKey(targetKey string) (artifact.Target, bool) {
+	for _, kind := range []artifact.Kind{
+		artifact.KindSkill, artifact.KindScopeSummary, artifact.KindProfile,
+		artifact.KindExperienceCase, artifact.KindTopicSummary,
+	} {
+		if target, err := artifact.ParseTarget(kind, targetKey); err == nil {
+			return target, true
+		}
+	}
+	return artifact.Target{}, false
+}
+
+func targetStatusFromRecord(record artifact.TargetRecord, evaluationStatus, evaluationReason string) (artifact.TargetStatus, string) {
+	reason := record.ReasonCode
+	if record.Artifact != nil && record.Artifact.ReasonCode != "" {
+		reason = record.Artifact.ReasonCode
+	}
+	jobStatus := ""
+	if record.Job != nil {
+		jobStatus = string(record.Job.Status)
+	}
+	switch jobStatus {
+	case string(task.StatusQueued):
+		return artifact.TargetStatusQueued, reason
+	case string(task.StatusRunning):
+		return artifact.TargetStatusRunning, reason
+	case string(task.StatusWaiting):
+		return artifact.TargetStatusWaiting, reason
+	}
+	if record.Artifact != nil {
+		switch record.Artifact.State {
+		case artifact.StateActive:
+			return artifact.TargetStatusActive, reason
+		case artifact.StateStale:
+			return artifact.TargetStatusStale, reason
+		default:
+			if reason != "" {
+				return reasonStatus(reason), reason
+			}
+			return artifact.TargetStatusDisabled, reason
+		}
+	}
+	if reason != "" {
+		return reasonStatus(reason), reason
+	}
+	if evaluationStatus != "" {
+		status := artifact.TargetStatus(evaluationStatus)
+		if !status.Known() {
+			status = artifact.TargetStatusNoEligibleInput
+		}
+		if evaluationReason == "" {
+			evaluationReason = string(status)
+		}
+		return status, evaluationReason
+	}
+	if record.Job != nil {
+		switch record.Job.Status {
+		case task.StatusFailed:
+			return artifact.TargetStatusGenerationFailed, record.Job.LastErrorCode
+		case task.StatusCancelled:
+			return artifact.TargetStatusDisabled, record.Job.LastErrorCode
+		}
+	}
+	if record.Artifact != nil {
+		return artifact.TargetStatusDisabled, reason
+	}
+	return artifact.TargetStatusDisabled, ""
+}
+
+func reasonStatus(reason string) artifact.TargetStatus {
+	switch reason {
+	case "no_procedure_input", "no_eligible_input", "topic_mismatch":
+		return artifact.TargetStatusNoEligibleInput
+	case "model_unavailable":
+		return artifact.TargetStatusModelUnavailable
+	case "invalid_model_output", "invalid_profile_content":
+		return artifact.TargetStatusInvalidOutput
+	default:
+		return artifact.TargetStatusGenerationFailed
+	}
+}
+
+// UpsertTargetEvaluation records a target evaluation that produced no content
+// object. Successful commits remove the row.
+func (t *Tx) UpsertTargetEvaluation(ctx context.Context, evaluation artifact.TargetEvaluation) error {
+	if !evaluation.Kind.Known() || evaluation.TargetKey == "" || !evaluation.Status.Known() {
+		return fmt.Errorf("%w: invalid target evaluation", artifact.ErrInvalidInput)
+	}
+	if _, err := t.tx.ExecContext(ctx, `INSERT INTO derived_target_evaluations
+		(kind, target_key, scope_key, topic, status, reason_code, evaluated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(kind, target_key) DO UPDATE SET
+			scope_key = excluded.scope_key,
+			topic = excluded.topic,
+			status = excluded.status,
+			reason_code = excluded.reason_code,
+			evaluated_at = excluded.evaluated_at`,
+		string(evaluation.Kind), evaluation.TargetKey, evaluation.ScopeKey, evaluation.Topic,
+		string(evaluation.Status), evaluation.ReasonCode, formatTime(evaluation.EvaluatedAt)); err != nil {
+		return fmt.Errorf("写入派生目标评估 %s/%s: %w", evaluation.Kind, evaluation.TargetKey, err)
+	}
+	return nil
+}
+
+// DeleteTargetEvaluation clears a stale evaluation after a usable revision is
+// committed.
+func (t *Tx) DeleteTargetEvaluation(ctx context.Context, kind artifact.Kind, targetKey string) error {
+	if _, err := t.tx.ExecContext(ctx,
+		`DELETE FROM derived_target_evaluations WHERE kind = ? AND target_key = ?`,
+		string(kind), targetKey); err != nil {
+		return fmt.Errorf("删除派生目标评估 %s/%s: %w", kind, targetKey, err)
+	}
+	return nil
+}
+
 // ListStaleTargets returns stale artifacts in stable target order.
 func (s *Store) ListStaleTargets(ctx context.Context, after string, limit int) ([]artifact.Target, error) {
 	if limit <= 0 {
@@ -698,8 +1074,12 @@ func (s *Store) ListExpiredTargets(ctx context.Context, asOf time.Time, after st
 				JOIN experience_runs r ON r.id = rd.experience_id
 				WHERE rd.artifact_id = a.id AND rd.artifact_version = a.current_version
 					AND r.state <> 'recorded'
+			) OR EXISTS (
+				SELECT 1 FROM artifact_revisions r
+				WHERE r.artifact_id = a.id AND r.version = a.current_version
+					AND r.taxonomy_version <> ?
 			))
-		ORDER BY a.target_key ASC LIMIT ?`, after, formatTime(asOf), formatTime(asOf), limit)
+		ORDER BY a.target_key ASC LIMIT ?`, after, formatTime(asOf), formatTime(asOf), topic.Version, limit)
 	if err != nil {
 		return nil, fmt.Errorf("扫描过期派生对象: %w", err)
 	}
@@ -723,7 +1103,9 @@ func (s *Store) ListExpiredTargets(ctx context.Context, asOf time.Time, after st
 }
 
 // ListAggregationGroups returns distinct non-empty scopes and topics from
-// active accepted atomic memories, using a stable unified keyset cursor.
+// active accepted atomic memories, using a stable unified keyset cursor. Every
+// scope also has one overview and one profile target; profiles are filtered
+// again by their durable-input gate when they run.
 func (s *Store) ListAggregationGroups(ctx context.Context, after string, limit int) ([]artifact.GroupTarget, error) {
 	if limit <= 0 {
 		limit = 100
@@ -735,6 +1117,12 @@ func (s *Store) ListAggregationGroups(ctx context.Context, after string, limit i
 		WHERE m.scope_key <> '' AND m.state = 'active' AND m.assertion_status = 'accepted'
 			AND j.value <> ''
 		GROUP BY m.scope_key, j.value
+		UNION ALL
+		SELECT 'o:' || m.scope_key AS cursor, 'scope_summary' AS kind,
+			m.scope_key AS scope_key, '' AS topic
+		FROM memories m
+		WHERE m.scope_key <> '' AND m.state = 'active' AND m.assertion_status = 'accepted'
+		GROUP BY m.scope_key
 		UNION ALL
 		SELECT 'p:' || m.scope_key AS cursor, 'profile' AS kind,
 			m.scope_key AS scope_key, '' AS topic
@@ -807,12 +1195,80 @@ func (s *Store) ListSkillGroups(ctx context.Context, after string, limit int) ([
 }
 
 // ListAggregationInputs selects at most limit accepted, active, time-applicable
-// memories in one scope/topic with no open conflict. The final boolean reports
-// that additional eligible rows exist.
+// memories for one derivation target with no open conflict. The final boolean
+// reports that additional eligible rows exist.
 func (t *Tx) ListAggregationInputs(ctx context.Context, target artifact.Target, asOf time.Time, limit int) ([]artifact.MemoryInput, bool, error) {
 	if limit <= 0 {
 		limit = 64
 	}
+	conditions, args, err := aggregationInputConditions(target, asOf)
+	if err != nil {
+		return nil, false, err
+	}
+	args = append(args, limit+1)
+	rows, err := t.tx.QueryContext(ctx, `SELECT m.id, m.version, m.kind, m.phase, m.durability, m.title, m.content,
+		m.scope_key, m.topics_json, m.procedure_json, m.qualifiers_json, m.observed_at, m.updated_at
+		FROM memories m
+		WHERE `+strings.Join(conditions, " AND ")+`
+		ORDER BY CASE m.kind WHEN 'preference' THEN 0 WHEN 'procedure' THEN 1
+			WHEN 'fact' THEN 2 ELSE 3 END, m.updated_at DESC, m.id ASC
+		LIMIT ?`, args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("选择聚合输入: %w", err)
+	}
+	defer rows.Close()
+	items := []artifact.MemoryInput{}
+	for rows.Next() {
+		var item artifact.MemoryInput
+		var topicsJSON, procedureJSON, qualifiersJSON, observedAt, updatedAt string
+		if err := rows.Scan(&item.ID, &item.Version, &item.Kind, &item.Phase, &item.Durability,
+			&item.Title, &item.Content, &item.ScopeKey, &topicsJSON, &procedureJSON,
+			&qualifiersJSON, &observedAt, &updatedAt); err != nil {
+			return nil, false, fmt.Errorf("选择聚合输入: %w", err)
+		}
+		if item.Topics, err = decodeTopics(topicsJSON); err != nil {
+			return nil, false, fmt.Errorf("解析聚合输入主题: %w", err)
+		}
+		if strings.TrimSpace(procedureJSON) != "" && json.Valid([]byte(procedureJSON)) {
+			item.Procedure = json.RawMessage(procedureJSON)
+		}
+		if strings.TrimSpace(qualifiersJSON) != "" && json.Valid([]byte(qualifiersJSON)) {
+			item.Qualifiers = json.RawMessage(qualifiersJSON)
+		}
+		if item.ObservedAt, err = parseTime(observedAt); err != nil {
+			return nil, false, err
+		}
+		if item.UpdatedAt, err = parseTime(updatedAt); err != nil {
+			return nil, false, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("选择聚合输入: %w", err)
+	}
+	if len(items) > limit {
+		return items[:limit], true, nil
+	}
+	return items, false, nil
+}
+
+// CountAggregationInputs reports how many eligible inputs exist. It is separate
+// from selection so payloads can record input-selection completeness instead of
+// inferring it from the returned page.
+func (t *Tx) CountAggregationInputs(ctx context.Context, target artifact.Target, asOf time.Time) (int, error) {
+	conditions, args, err := aggregationInputConditions(target, asOf)
+	if err != nil {
+		return 0, err
+	}
+	var total int
+	if err := t.tx.QueryRowContext(ctx, `SELECT count(*) FROM memories m WHERE `+
+		strings.Join(conditions, " AND "), args...).Scan(&total); err != nil {
+		return 0, fmt.Errorf("统计聚合输入: %w", err)
+	}
+	return total, nil
+}
+
+func aggregationInputConditions(target artifact.Target, asOf time.Time) ([]string, []any, error) {
 	conditions := []string{
 		"m.state = 'active'",
 		"m.assertion_status = 'accepted'",
@@ -830,6 +1286,9 @@ func (t *Tx) ListAggregationInputs(ctx context.Context, target artifact.Target, 
 	case artifact.KindTopicSummary:
 		conditions = append(conditions, "EXISTS (SELECT 1 FROM json_each(m.topics_json) WHERE json_each.value = ?)")
 		args = append(args, target.Topic)
+	case artifact.KindScopeSummary:
+		// The scope overview deliberately reads every eligible kind in the
+		// scope; it is not a profile and not a topic detail view.
 	case artifact.KindSkill:
 		conditions = append(conditions, "m.kind = 'procedure'")
 		if target.Topic != "" {
@@ -844,46 +1303,9 @@ func (t *Tx) ListAggregationInputs(ctx context.Context, target artifact.Target, 
 	case artifact.KindExperienceCase:
 		conditions = append(conditions, "m.kind IN ('procedure', 'event')")
 	default:
-		return nil, false, fmt.Errorf("%w: kind %q", artifact.ErrInvalidInput, target.Kind)
+		return nil, nil, fmt.Errorf("%w: kind %q", artifact.ErrInvalidInput, target.Kind)
 	}
-	args = append(args, limit+1)
-	rows, err := t.tx.QueryContext(ctx, `SELECT m.id, m.version, m.kind, m.phase, m.durability, m.title, m.content,
-		m.scope_key, m.topics_json, m.observed_at, m.updated_at
-		FROM memories m
-		WHERE `+strings.Join(conditions, " AND ")+`
-		ORDER BY CASE m.kind WHEN 'preference' THEN 0 WHEN 'procedure' THEN 1
-			WHEN 'fact' THEN 2 ELSE 3 END, m.updated_at DESC, m.id ASC
-		LIMIT ?`, args...)
-	if err != nil {
-		return nil, false, fmt.Errorf("选择聚合输入: %w", err)
-	}
-	defer rows.Close()
-	items := []artifact.MemoryInput{}
-	for rows.Next() {
-		var item artifact.MemoryInput
-		var topicsJSON, observedAt, updatedAt string
-		if err := rows.Scan(&item.ID, &item.Version, &item.Kind, &item.Phase, &item.Durability, &item.Title, &item.Content,
-			&item.ScopeKey, &topicsJSON, &observedAt, &updatedAt); err != nil {
-			return nil, false, fmt.Errorf("选择聚合输入: %w", err)
-		}
-		if item.Topics, err = decodeTopics(topicsJSON); err != nil {
-			return nil, false, fmt.Errorf("解析聚合输入主题: %w", err)
-		}
-		if item.ObservedAt, err = parseTime(observedAt); err != nil {
-			return nil, false, err
-		}
-		if item.UpdatedAt, err = parseTime(updatedAt); err != nil {
-			return nil, false, err
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, false, fmt.Errorf("选择聚合输入: %w", err)
-	}
-	if len(items) > limit {
-		return items[:limit], true, nil
-	}
-	return items, false, nil
+	return conditions, args, nil
 }
 
 // HasProcedureInputs distinguishes an upstream extraction gap from a topic

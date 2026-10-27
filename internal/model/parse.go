@@ -13,7 +13,7 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/ingest"
 	"github.com/N0rthHXD/dmemd/internal/memory"
 	"github.com/N0rthHXD/dmemd/internal/skill"
-	"github.com/N0rthHXD/dmemd/internal/source"
+	"github.com/N0rthHXD/dmemd/internal/temporal"
 	"github.com/N0rthHXD/dmemd/internal/topic"
 )
 
@@ -22,19 +22,20 @@ import (
 var ErrUnparseable = errors.New("model: response is not a parseable structured object")
 
 // ParseCandidates parses the extraction protocol. It never parses target ids or
-// actions: those belong to the decision protocol.
-func ParseCandidates(content string) ([]ingest.Candidate, error) {
+// actions: those belong to the decision protocol. RawCandidates keeps the
+// pre-normalization count for job quality statistics.
+func ParseCandidates(content string) (ingest.ExtractionResult, error) {
 	root, err := decodeRoot(content)
 	if err != nil {
-		return nil, err
+		return ingest.ExtractionResult{}, err
 	}
 	rawCandidates, ok := root["candidates"]
-	if !ok || bytes.Equal(bytes.TrimSpace(rawCandidates), []byte("null")) {
-		return nil, ErrUnparseable
+	if !ok || isNullRaw(rawCandidates) {
+		return ingest.ExtractionResult{}, ErrUnparseable
 	}
 	var items []json.RawMessage
 	if err := json.Unmarshal(rawCandidates, &items); err != nil {
-		return nil, ErrUnparseable
+		return ingest.ExtractionResult{}, ErrUnparseable
 	}
 	result := make([]ingest.Candidate, 0, len(items))
 	for _, raw := range items {
@@ -43,7 +44,7 @@ func ParseCandidates(content string) ([]ingest.Candidate, error) {
 			result = append(result, candidate)
 		}
 	}
-	return result, nil
+	return ingest.ExtractionResult{Candidates: result, RawCandidates: len(items)}, nil
 }
 
 // ParseDecisions parses the strict decision protocol. Structural problems are
@@ -92,8 +93,10 @@ func ParseTopics(content string) ([]string, error) {
 }
 
 // ParseAggregate parses the tolerant summary/profile protocol. An empty content
-// string is unparseable, while a missing title is a usable auxiliary default.
-// Auxiliary shape mistakes never discard otherwise usable body text.
+// string is unparseable, while a missing title and malformed auxiliary
+// citations are auxiliary defaults that never discard otherwise usable body
+// text. Citation validity is enforced by the service against the exact input
+// revisions.
 func ParseAggregate(content string) (artifact.AggregateResult, error) {
 	root, err := decodeRoot(content)
 	if err != nil {
@@ -109,7 +112,64 @@ func ParseAggregate(content string) (artifact.AggregateResult, error) {
 	if result.Content == "" {
 		return artifact.AggregateResult{}, ErrUnparseable
 	}
+	result.Citations = citationField(root, "citations")
+	result.OmittedInputs = omittedInputField(root, "omitted_inputs")
 	return result, nil
+}
+
+func citationField(root map[string]json.RawMessage, field string) []artifact.Citation {
+	raw, ok := root[field]
+	if !ok || isNullRaw(raw) {
+		return nil
+	}
+	var items []struct {
+		Section  string `json:"section"`
+		Point    string `json:"point"`
+		MemoryID string `json:"memory_id"`
+		Version  int    `json:"version"`
+	}
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil
+	}
+	result := make([]artifact.Citation, 0, len(items))
+	for _, item := range items {
+		point := strings.TrimSpace(item.Point)
+		memoryID := strings.TrimSpace(item.MemoryID)
+		if point == "" || memoryID == "" || item.Version <= 0 {
+			continue
+		}
+		result = append(result, artifact.Citation{
+			Section: strings.TrimSpace(item.Section), Point: point,
+			MemoryID: memoryID, Version: item.Version,
+		})
+	}
+	return result
+}
+
+func omittedInputField(root map[string]json.RawMessage, field string) []artifact.OmittedInput {
+	raw, ok := root[field]
+	if !ok || isNullRaw(raw) {
+		return nil
+	}
+	var items []struct {
+		MemoryID string `json:"memory_id"`
+		Version  int    `json:"version"`
+		Reason   string `json:"reason"`
+	}
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil
+	}
+	result := make([]artifact.OmittedInput, 0, len(items))
+	for _, item := range items {
+		memoryID := strings.TrimSpace(item.MemoryID)
+		if memoryID == "" || item.Version <= 0 {
+			continue
+		}
+		result = append(result, artifact.OmittedInput{
+			MemoryID: memoryID, Version: item.Version, Reason: strings.TrimSpace(item.Reason),
+		})
+	}
+	return result
 }
 
 // ParseExperience parses the tolerant experience-case protocol. A missing
@@ -212,73 +272,119 @@ func unwrapFence(content string) (string, error) {
 func parseCandidate(raw json.RawMessage) (ingest.Candidate, bool) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
-		return ingest.Candidate{ProtocolErrors: []string{"candidate"}}, true
+		return ingest.Candidate{ProtocolIssues: []ingest.FieldIssue{{Field: "candidate", Code: protocolInvalidShape}}}, true
 	}
-	content, ok := stringField(fields, "content")
-	contentValid := ok
-	title, _ := stringField(fields, "title")
-	title = strings.TrimSpace(title)
-	if title == "" {
-		title = firstRunes(content, 40)
+	candidate := ingest.Candidate{}
+	content, contentPresent, contentValid := strictString(fields, "content")
+	switch {
+	case !contentValid:
+		candidate.ProtocolIssues = append(candidate.ProtocolIssues, ingest.FieldIssue{Field: "content", Code: protocolInvalidFieldType})
+	case !contentPresent:
+		candidate.ProtocolIssues = append(candidate.ProtocolIssues, ingest.FieldIssue{Field: "content", Code: protocolInvalidShape})
+	default:
+		candidate.Content = content
 	}
-	kind := memory.KindFact
-	if value, ok := stringField(fields, "kind"); ok {
-		kind = memory.Kind(value)
+	title, _, titleValid := strictString(fields, "title")
+	if !titleValid {
+		candidate.ProtocolIssues = append(candidate.ProtocolIssues, ingest.FieldIssue{Field: "title", Code: protocolInvalidFieldType})
 	}
-	observedAt, observedValid := parseCandidateTime(fields, "observed_at")
-	validFrom, fromValid := parseCandidateTime(fields, "valid_from")
-	validTo, toValid := parseCandidateTime(fields, "valid_to")
-	candidate := ingest.Candidate{
-		CandidateID:    strings.TrimSpace(optionalStringValue(fields, "candidate_id")),
-		Kind:           kind,
-		Title:          title,
-		Content:        content,
-		ObservedAt:     observedAt,
-		ValidFrom:      validFrom,
-		ValidTo:        validTo,
-		ValidFromBasis: memory.TemporalBasis(optionalStringValue(fields, "valid_from_basis")),
-		ValidToBasis:   memory.TemporalBasis(optionalStringValue(fields, "valid_to_basis")),
-		Phase:          ingest.Phase(optionalStringValue(fields, "phase")),
-		Durability:     ingest.Durability(optionalStringValue(fields, "durability")),
-		Topics:         topic.Raw(stringSliceField(fields, "topics")),
-		Evidence:       parseEvidence(fields["evidence"]),
+	candidate.Title = strings.TrimSpace(title)
+	if candidate.Title == "" {
+		candidate.Title = firstRunes(content, 40)
 	}
-	candidate.FactGroup = parseFactGroup(fields["fact_group"])
-	candidate.Procedure = parseProcedure(fields["procedure"])
-	if !contentValid {
-		candidate.ProtocolErrors = append(candidate.ProtocolErrors, "content")
+	kind, _, kindValid := strictString(fields, "kind")
+	if !kindValid {
+		candidate.ProtocolIssues = append(candidate.ProtocolIssues, ingest.FieldIssue{Field: "kind", Code: protocolInvalidFieldType})
 	}
-	for _, field := range []string{"kind", "phase", "durability", "valid_from_basis", "valid_to_basis"} {
-		if raw, exists := fields[field]; exists {
-			var value string
-			if json.Unmarshal(raw, &value) != nil {
-				candidate.ProtocolErrors = append(candidate.ProtocolErrors, field)
-			}
-		}
+	phase, _, phaseValid := strictString(fields, "phase")
+	if !phaseValid {
+		candidate.ProtocolIssues = append(candidate.ProtocolIssues, ingest.FieldIssue{Field: "phase", Code: protocolInvalidFieldType})
 	}
-	if raw, exists := fields["evidence"]; exists && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		var entries []json.RawMessage
-		if json.Unmarshal(raw, &entries) != nil || len(entries) != len(candidate.Evidence) {
-			candidate.ProtocolErrors = append(candidate.ProtocolErrors, "evidence")
-		}
+	durability, _, durabilityValid := strictString(fields, "durability")
+	if !durabilityValid {
+		candidate.ProtocolIssues = append(candidate.ProtocolIssues, ingest.FieldIssue{Field: "durability", Code: protocolInvalidFieldType})
 	}
-	if raw, exists := fields["procedure"]; exists && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		var procedure map[string]json.RawMessage
-		if json.Unmarshal(raw, &procedure) != nil || procedure == nil {
-			candidate.ProtocolErrors = append(candidate.ProtocolErrors, "procedure")
-		} else {
-			for _, field := range []string{"steps", "preconditions", "completion_conditions", "failure_branches"} {
-				if value, exists := procedure[field]; exists {
-					var values []string
-					if json.Unmarshal(value, &values) != nil {
-						candidate.ProtocolErrors = append(candidate.ProtocolErrors, "procedure."+field)
-					}
-				}
-			}
-		}
+	fromBasis, _, fromBasisValid := strictString(fields, "valid_from_basis")
+	if !fromBasisValid {
+		candidate.ProtocolIssues = append(candidate.ProtocolIssues, ingest.FieldIssue{Field: "valid_from_basis", Code: protocolInvalidFieldType})
 	}
+	toBasis, _, toBasisValid := strictString(fields, "valid_to_basis")
+	if !toBasisValid {
+		candidate.ProtocolIssues = append(candidate.ProtocolIssues, ingest.FieldIssue{Field: "valid_to_basis", Code: protocolInvalidFieldType})
+	}
+	observedBasis, _, observedBasisValid := strictString(fields, "observed_at_basis")
+	if !observedBasisValid {
+		candidate.ProtocolIssues = append(candidate.ProtocolIssues, ingest.FieldIssue{Field: "observed_at_basis", Code: protocolInvalidFieldType})
+	}
+	eventBasis, _, eventBasisValid := strictString(fields, "event_time_basis")
+	if !eventBasisValid {
+		candidate.ProtocolIssues = append(candidate.ProtocolIssues, ingest.FieldIssue{Field: "event_time_basis", Code: protocolInvalidFieldType})
+	}
+	candidate.Kind = memory.Kind(kind)
+	candidate.Phase = ingest.Phase(phase)
+	candidate.Durability = ingest.Durability(durability)
+	candidate.ValidFromBasis = memory.TemporalBasis(fromBasis)
+	candidate.ValidToBasis = memory.TemporalBasis(toBasis)
+	candidate.ObservedAtBasis = memory.TemporalBasis(observedBasis)
+	candidate.EventTimeBasis = memory.TemporalBasis(eventBasis)
+	candidateID, _, candidateIDValid := strictString(fields, "candidate_id")
+	if !candidateIDValid {
+		candidate.ProtocolIssues = append(candidate.ProtocolIssues, ingest.FieldIssue{Field: "candidate_id", Code: protocolInvalidFieldType})
+	}
+	candidate.CandidateID = strings.TrimSpace(candidateID)
+	observedAt, observedPrecision, observedValid := parseCandidateTime(fields, "observed_at")
+	eventTime, eventPrecision, eventValid := parseCandidateTime(fields, "event_time")
+	validFrom, fromPrecision, fromValid := parseCandidateTime(fields, "valid_from")
+	validTo, toPrecision, toValid := parseCandidateTime(fields, "valid_to")
+	candidate.ObservedAt = observedAt
+	candidate.ObservedAtPrecision = observedPrecision
+	candidate.EventTime = eventTime
+	candidate.EventTimePrecision = eventPrecision
+	candidate.ValidFrom = validFrom
+	candidate.ValidFromPrecision = fromPrecision
+	candidate.ValidTo = validTo
+	candidate.ValidToPrecision = toPrecision
+
+	topics, topicIssues, topicNormalizations := normalizeStringList(fields, "topics")
+	candidate.ProtocolIssues = append(candidate.ProtocolIssues, topicIssues...)
+	candidate.Normalizations = append(candidate.Normalizations, topicNormalizations...)
+	candidate.Topics = topic.Raw(topics)
+
+	evidence, evidenceIssues, evidenceNormalizations := parseCandidateEvidence(fields["evidence"])
+	candidate.ProtocolIssues = append(candidate.ProtocolIssues, evidenceIssues...)
+	candidate.Normalizations = append(candidate.Normalizations, evidenceNormalizations...)
+	candidate.Evidence = evidence
+
+	factGroupFields, factGroupIssues, factGroupNormalizations := normalizeSingleObject(fields, "fact_group")
+	candidate.ProtocolIssues = append(candidate.ProtocolIssues, factGroupIssues...)
+	candidate.Normalizations = append(candidate.Normalizations, factGroupNormalizations...)
+	if factGroupFields != nil {
+		proposal, proposalIssues, proposalNormalizations := parseCandidateFactGroup(factGroupFields)
+		candidate.ProtocolIssues = append(candidate.ProtocolIssues, proposalIssues...)
+		candidate.Normalizations = append(candidate.Normalizations, proposalNormalizations...)
+		candidate.FactGroup = proposal
+	}
+
+	procedureFields, procedureIssues, procedureNormalizations := normalizeSingleObject(fields, "procedure")
+	candidate.ProtocolIssues = append(candidate.ProtocolIssues, procedureIssues...)
+	candidate.Normalizations = append(candidate.Normalizations, procedureNormalizations...)
+	if procedureFields != nil {
+		proposal, proposalIssues, proposalNormalizations := parseCandidateProcedure(procedureFields)
+		candidate.ProtocolIssues = append(candidate.ProtocolIssues, proposalIssues...)
+		candidate.Normalizations = append(candidate.Normalizations, proposalNormalizations...)
+		candidate.Procedure = proposal
+	}
+
+	qualifiers, qualifierIssues, qualifierNormalizations := parseCandidateQualifiers(fields["qualifiers"])
+	candidate.ProtocolIssues = append(candidate.ProtocolIssues, qualifierIssues...)
+	candidate.Normalizations = append(candidate.Normalizations, qualifierNormalizations...)
+	candidate.Qualifiers = qualifiers
+
 	if !observedValid {
 		candidate.TemporalErrors = append(candidate.TemporalErrors, "observed_at")
+	}
+	if !eventValid {
+		candidate.TemporalErrors = append(candidate.TemporalErrors, "event_time")
 	}
 	if !fromValid {
 		candidate.TemporalErrors = append(candidate.TemporalErrors, "valid_from")
@@ -289,41 +395,24 @@ func parseCandidate(raw json.RawMessage) (ingest.Candidate, bool) {
 	return candidate, true
 }
 
-func parseCandidateTime(fields map[string]json.RawMessage, name string) (*time.Time, bool) {
+func parseCandidateTime(fields map[string]json.RawMessage, name string) (*time.Time, memory.TemporalPrecision, bool) {
 	raw, exists := fields[name]
 	if !exists || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return nil, true
+		return nil, memory.PrecisionUnknown, true
 	}
 	value, present := stringField(fields, name)
 	if !present {
-		return nil, false
+		return nil, memory.PrecisionUnknown, false
 	}
 	if strings.TrimSpace(value) == "" {
-		return nil, true
+		return nil, memory.PrecisionUnknown, false
 	}
-	parsed := parseOptionalTime(fields, name)
-	return parsed, parsed != nil
-}
-
-func parseProcedure(raw json.RawMessage) *ingest.ProcedureProposal {
-	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return nil
+	mention, ok := temporal.ParseValue(value)
+	if !ok || mention.Time == nil {
+		return nil, memory.PrecisionUnknown, false
 	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
-		return nil
-	}
-	proposal := &ingest.ProcedureProposal{
-		Steps:                stringSliceField(fields, "steps"),
-		Preconditions:        stringSliceField(fields, "preconditions"),
-		CompletionConditions: stringSliceField(fields, "completion_conditions"),
-		FailureBranches:      stringSliceField(fields, "failure_branches"),
-	}
-	if len(proposal.Steps) == 0 && len(proposal.Preconditions) == 0 &&
-		len(proposal.CompletionConditions) == 0 && len(proposal.FailureBranches) == 0 {
-		return nil
-	}
-	return proposal
+	utc := mention.Time.UTC()
+	return &utc, mention.Precision, true
 }
 
 func parseDecision(raw json.RawMessage) (ingest.Decision, error) {
@@ -371,13 +460,21 @@ func parseFactGroup(raw json.RawMessage) *ingest.FactGroupProposal {
 	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
 		return nil
 	}
+	conditions := stringSliceField(fields, "conditions")
+	if len(conditions) == 0 {
+		if single, ok := stringField(fields, "conditions"); ok && single != "" {
+			conditions = []string{single}
+		}
+	}
 	proposal := &ingest.FactGroupProposal{
 		Subject:     optionalStringValue(fields, "subject"),
 		Predicate:   optionalStringValue(fields, "predicate"),
 		Scope:       optionalStringValue(fields, "scope"),
+		Conditions:  conditions,
 		Cardinality: memory.Cardinality(optionalStringValue(fields, "cardinality")),
 	}
-	if proposal.Subject == "" && proposal.Predicate == "" && proposal.Scope == "" && proposal.Cardinality == "" {
+	if proposal.Subject == "" && proposal.Predicate == "" && proposal.Scope == "" &&
+		len(proposal.Conditions) == 0 && proposal.Cardinality == "" {
 		return nil
 	}
 	return proposal
@@ -410,59 +507,16 @@ func parseEvidenceRefs(raw json.RawMessage) []ingest.EvidenceRef {
 	return result
 }
 
-func parseEvidence(raw json.RawMessage) []source.Evidence {
-	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return nil
-	}
-	var items []json.RawMessage
-	if err := json.Unmarshal(raw, &items); err != nil {
-		return nil
-	}
-	result := make([]source.Evidence, 0, len(items))
-	for _, item := range items {
-		var fields map[string]json.RawMessage
-		if err := json.Unmarshal(item, &fields); err != nil || fields == nil {
-			continue
-		}
-		messageID, ok := optionalString(fields, "message_id")
-		if !ok {
-			continue
-		}
-		quote, ok := optionalString(fields, "quote")
-		if !ok {
-			continue
-		}
-		field, ok := optionalString(fields, "field")
-		if !ok {
-			continue
-		}
-		start, hasStart, ok := optionalInt(fields, "start")
-		if !ok {
-			continue
-		}
-		end, hasEnd, ok := optionalInt(fields, "end")
-		if !ok {
-			continue
-		}
-		evidence := source.Evidence{MessageID: messageID, Quote: quote}
-		if field != "" && hasStart && hasEnd && start >= 0 && end >= start {
-			evidence.Location = &source.Location{Field: field, Start: start, End: end}
-		}
-		result = append(result, evidence)
-	}
-	return result
-}
-
 func parseOptionalTime(fields map[string]json.RawMessage, name string) *time.Time {
 	value, ok := stringField(fields, name)
 	if !ok || strings.TrimSpace(value) == "" {
 		return nil
 	}
-	parsed, err := time.Parse(time.RFC3339Nano, value)
-	if err != nil {
+	mention, ok := temporal.ParseValue(value)
+	if !ok || mention.Time == nil {
 		return nil
 	}
-	utc := parsed.UTC()
+	utc := mention.Time.UTC()
 	return &utc
 }
 
@@ -493,18 +547,6 @@ func stringSliceField(fields map[string]json.RawMessage, name string) []string {
 		return nil
 	}
 	return values
-}
-
-func optionalString(fields map[string]json.RawMessage, name string) (string, bool) {
-	raw, exists := fields[name]
-	if !exists || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return "", true
-	}
-	var value string
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return "", false
-	}
-	return value, true
 }
 
 func optionalInt(fields map[string]json.RawMessage, name string) (int, bool, bool) {

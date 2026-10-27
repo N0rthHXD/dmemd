@@ -195,6 +195,16 @@ func TestHTTPContract(t *testing.T) {
 	if job["status"] != "succeeded" || job["attempts"].(float64) != 1 {
 		t.Fatalf("job = %#v", job)
 	}
+	if job["quality_outcome"] != "complete" {
+		t.Fatalf("quality_outcome = %#v", job["quality_outcome"])
+	}
+	if convergence, ok := job["convergence"].([]any); !ok || len(convergence) != 0 {
+		t.Fatalf("convergence = %#v", job["convergence"])
+	}
+	stats, ok := job["extraction_stats"].(map[string]any)
+	if !ok || stats["raw_candidates"].(float64) != 1 || stats["accepted_candidates"].(float64) != 1 {
+		t.Fatalf("extraction_stats = %#v", job["extraction_stats"])
+	}
 	memoryIDs, ok := job["memory_ids"].([]any)
 	if !ok || len(memoryIDs) != 1 {
 		t.Fatalf("memory_ids = %#v", job["memory_ids"])
@@ -226,6 +236,9 @@ func TestHTTPContract(t *testing.T) {
 	if failedJob["status"] != "waiting" || failedJob["wait_reason"] != "transient" {
 		t.Fatalf("failed job = %#v", failedJob)
 	}
+	if quality, _ := failedJob["quality_outcome"].(string); quality != "" {
+		t.Fatalf("transient failure reported business quality = %#v", failedJob)
+	}
 	if failedJob["stage"] != "extraction" || failedJob["reason_code"] != "transient" {
 		t.Fatalf("waiting diagnostics = %#v", failedJob)
 	}
@@ -245,6 +258,9 @@ func TestHTTPContract(t *testing.T) {
 	}
 	if memoryObject["origin_source_id"] != sourceID {
 		t.Fatalf("origin_source_id = %#v", memoryObject["origin_source_id"])
+	}
+	if evolution, ok := memoryObject["evolution"].([]any); !ok || len(evolution) != 0 {
+		t.Fatalf("evolution = %#v", memoryObject["evolution"])
 	}
 
 	list := client.expect(http.MethodGet, "/v1/memories", "", nil, http.StatusOK)
@@ -346,6 +362,10 @@ func TestHTTPContract(t *testing.T) {
 	firstEvidence := evidenceItems[0].(map[string]any)
 	if firstEvidence["quote"] == "" || firstEvidence["redacted"] != false {
 		t.Fatalf("evidence fields = %#v", firstEvidence)
+	}
+	location, ok := firstEvidence["location"].(map[string]any)
+	if !ok || location["field"] != "messages.0.content" {
+		t.Fatalf("server-side location = %#v", firstEvidence)
 	}
 
 	source := client.expect(http.MethodGet, "/v1/sources/"+sourceID, "", nil, http.StatusOK)

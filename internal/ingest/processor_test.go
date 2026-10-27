@@ -224,7 +224,7 @@ func TestAddUpdateMergeDuplicateAndZeroCandidates(t *testing.T) {
 	secondReceipt := f.submit(t, `{"messages":[{"id":"m2","content":"回答 语言 英文 以后请默认使用英文回答。"}]}`)
 	secondJob := f.claim(t)
 	result = f.process(t, secondJob)
-	if len(result.MemoryIDs) != 2 || len(result.PendingMemoryIDs) != 0 || len(result.ConflictIDs) != 1 {
+	if len(result.MemoryIDs) != 2 || len(result.PendingMemoryIDs) != 0 || len(result.ConflictIDs) != 0 {
 		t.Fatalf("update result = %+v", result)
 	}
 	oldID := firstID
@@ -234,8 +234,10 @@ func TestAddUpdateMergeDuplicateAndZeroCandidates(t *testing.T) {
 		}
 	}
 	updated := f.memory(t, firstID)
-	if updated.Version != 1 || updated.Content != "用户希望默认使用英文回答。" || f.memory(t, oldID).AssertionStatus != memory.AssertionRejected {
-		t.Fatalf("updated = %+v", updated)
+	previous := f.memory(t, oldID)
+	if updated.Version != 1 || updated.Content != "用户希望默认使用英文回答。" ||
+		previous.AssertionStatus != memory.AssertionAccepted || previous.ValidTo == nil {
+		t.Fatalf("updated = %+v previous=%+v", updated, previous)
 	}
 	if current, err := f.memories.GetEvidence(ctx, firstID, 0); err != nil || len(current) != 1 || current[0].SourceID != secondReceipt.SourceID {
 		t.Fatalf("updated evidence = %+v err=%v", current, err)
@@ -537,8 +539,10 @@ func TestContextExcludesIrrelevantSourcesAndMemories(t *testing.T) {
 	}
 	var payload struct {
 		CurrentSource struct {
-			ID      string          `json:"id"`
-			Content json.RawMessage `json:"content"`
+			ID       string `json:"id"`
+			Segments []struct {
+				Text string `json:"text"`
+			} `json:"segments"`
 		} `json:"current_source"`
 		Related []struct {
 			Title string `json:"title"`
@@ -547,7 +551,13 @@ func TestContextExcludesIrrelevantSourcesAndMemories(t *testing.T) {
 	if err := json.Unmarshal([]byte(message.Messages[1].Content), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.CurrentSource.ID != receipt.SourceID || !strings.Contains(string(payload.CurrentSource.Content), "用户希望默认使用中文回答") {
+	containsText := false
+	for _, segment := range payload.CurrentSource.Segments {
+		if strings.Contains(segment.Text, "用户希望默认使用中文回答") {
+			containsText = true
+		}
+	}
+	if payload.CurrentSource.ID != receipt.SourceID || !containsText {
 		t.Fatalf("current source = %+v", payload.CurrentSource)
 	}
 	if len(payload.Related) != 0 {
@@ -617,5 +627,65 @@ func TestUpdateWithUnchangedContentMergesEvidence(t *testing.T) {
 	}
 	if len(evidence) != 2 {
 		t.Fatalf("unchanged-content update dropped prior evidence: %+v", evidence)
+	}
+}
+
+func TestProcessorPersistsTimingsUsageAndRetention(t *testing.T) {
+	f := newProcessorFixture(t)
+	f.fake.EnqueueRaw(200, modelCompletion(
+		`{"candidates":[{"kind":"preference","content":"用户偏好中文","fact_group":{"subject":"用户","predicate":"语言","cardinality":"single"}}]}`,
+		11, 5))
+	receipt, err := f.service.Submit(context.Background(), ingest.Submission{Content: json.RawMessage(`"用户偏好中文"`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := f.process(t, f.claim(t)); len(result.MemoryIDs) != 1 {
+		t.Fatalf("result = %+v", result)
+	}
+	job := f.job(t, receipt.JobID)
+	if job.ModelUsage.Calls != 1 || job.ModelUsage.InputTokens != 11 || job.ModelUsage.OutputTokens != 5 {
+		t.Fatalf("model usage = %+v", job.ModelUsage)
+	}
+	if job.Retention.Retained != 1 || job.Retention.ByReason[string(memory.RetentionExplicitIntent)] != 1 {
+		t.Fatalf("retention = %+v", job.Retention)
+	}
+	if job.Timings.TotalMillis < 0 || job.Timings.ExtractionMillis < 0 || job.Timings.CommitMillis < 0 {
+		t.Fatalf("timings = %+v", job.Timings)
+	}
+}
+
+func modelCompletion(content string, inputTokens, outputTokens int) string {
+	body, _ := json.Marshal(map[string]any{
+		"id": "chatcmpl-test",
+		"choices": []any{map[string]any{
+			"index":   0,
+			"message": map[string]string{"role": "assistant", "content": content},
+		}},
+		"usage": map[string]int{"prompt_tokens": inputTokens, "completion_tokens": outputTokens},
+	})
+	return string(body)
+}
+
+func TestMultipleCompleteIdentitiesSkipAvoidableDecisionCall(t *testing.T) {
+	f := newProcessorFixture(t)
+	f.fake.EnqueueCandidates([]any{
+		map[string]any{
+			"kind": "fact", "content": "用户常住上海",
+			"fact_group": map[string]any{"subject": "用户", "predicate": "常住城市", "cardinality": "single"},
+		},
+		map[string]any{
+			"kind": "fact", "content": "用户使用 Go",
+			"fact_group": map[string]any{"subject": "用户", "predicate": "主要编程语言", "cardinality": "single"},
+		},
+	})
+	if _, err := f.service.Submit(context.Background(), ingest.Submission{Content: json.RawMessage(`"用户常住上海。用户使用 Go。"`)}); err != nil {
+		t.Fatal(err)
+	}
+	result := f.process(t, f.claim(t))
+	if len(result.MemoryIDs) != 2 {
+		t.Fatalf("result = %+v", result)
+	}
+	if f.fake.RequestCount() != 1 {
+		t.Fatalf("decision model was called for a fully deterministic batch: %d", f.fake.RequestCount())
 	}
 }

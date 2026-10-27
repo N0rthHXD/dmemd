@@ -95,9 +95,15 @@ func (h *handler) getMemory(w http.ResponseWriter, request *http.Request) {
 		h.writeServiceError(w, request, err)
 		return
 	}
+	evolution, err := service.Evolution(request.Context(), item.ID, 50)
+	if err != nil {
+		h.writeServiceError(w, request, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, memoryDetailDTO{
 		memoryDTO: memoryFromDomain(item),
 		Relations: relationsFromDomain(relations),
+		Evolution: evolutionFromDomain(evolution),
 	})
 }
 

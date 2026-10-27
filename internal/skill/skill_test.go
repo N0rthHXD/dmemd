@@ -24,6 +24,27 @@ func (f *fakeReader) GetVersion(_ context.Context, _ string, version int) (artif
 	return f.detail, f.err
 }
 
+func TestDraftRequiresActionableGuidance(t *testing.T) {
+	for _, draft := range []Draft{
+		{},
+		{Name: "只有名字"},
+		{Content: "这是一段没有步骤的说明。"},
+	} {
+		if draft.Usable() {
+			t.Fatalf("draft without actionable guidance was usable: %+v", draft)
+		}
+	}
+	for _, draft := range []Draft{
+		{Steps: []string{"运行 go test"}},
+		{Content: "## 步骤\n1. 运行 go test。"},
+		{Content: "- 先检查前置条件"},
+	} {
+		if !draft.Usable() || draft.Issue() != "" {
+			t.Fatalf("structured draft was rejected: %+v issue=%q", draft, draft.Issue())
+		}
+	}
+}
+
 func TestRenderProducesSingleLineFrontmatter(t *testing.T) {
 	content := Render("验证\n工作流", "修改后\n验证", "## 步骤\n1. 运行 go test")
 	if !strings.HasPrefix(content, "---\nname: \"验证 工作流\"\ndescription: \"修改后 验证\"\n---\n\n") {

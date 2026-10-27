@@ -13,7 +13,8 @@ import (
 
 const jobColumns = `id, source_id, status, attempts, protocol_failures, wait_reason, stage, reason_code,
 	next_attempt_at, error, memory_ids, conflict_ids, pending_memory_ids, warnings,
-	created_at, updated_at, started_at, finished_at`
+	quality_outcome, extraction_stats, retention_stats, timings, model_usage,
+	diagnostics, convergence_diagnostics, created_at, updated_at, started_at, finished_at`
 
 // GetJob reads a job directly from the read pool.
 func (s *Store) GetJob(ctx context.Context, id string) (ingest.Job, error) {
@@ -40,13 +41,15 @@ func getJob(ctx context.Context, q interface {
 func scanJob(row rowScanner) (ingest.Job, error) {
 	var item ingest.Job
 	var status, memoryIDs, conflictIDs, pendingIDs, warnings, createdAt, updatedAt string
+	var extractionStats, retentionStats, timings, modelUsage, diagnostics, convergence string
 	var nextAttempt, startedAt, finishedAt sql.NullString
 	if err := row.Scan(
 		&item.ID, &item.SourceID, &status, &item.Attempts, &item.ProtocolFailures, &item.WaitReason,
 		&item.Stage, &item.ReasonCode,
 		&nextAttempt, &item.Error,
 		&memoryIDs, &conflictIDs, &pendingIDs, &warnings,
-		&createdAt, &updatedAt, &startedAt, &finishedAt,
+		&item.QualityOutcome, &extractionStats, &retentionStats, &timings, &modelUsage,
+		&diagnostics, &convergence, &createdAt, &updatedAt, &startedAt, &finishedAt,
 	); err != nil {
 		return ingest.Job{}, err
 	}
@@ -87,6 +90,49 @@ func scanJob(row rowScanner) (ingest.Job, error) {
 	if item.Warnings == nil {
 		item.Warnings = []string{}
 	}
+	if extractionStats == "" {
+		extractionStats = "{}"
+	}
+	if err := json.Unmarshal([]byte(extractionStats), &item.ExtractionStats); err != nil {
+		return ingest.Job{}, fmt.Errorf("解析任务 %s 的提取统计: %w", item.ID, err)
+	}
+	if retentionStats == "" {
+		retentionStats = "{}"
+	}
+	if err := json.Unmarshal([]byte(retentionStats), &item.Retention); err != nil {
+		return ingest.Job{}, fmt.Errorf("解析任务 %s 的保留统计: %w", item.ID, err)
+	}
+	item.Retention.Normalize()
+	if timings == "" {
+		timings = "{}"
+	}
+	if err := json.Unmarshal([]byte(timings), &item.Timings); err != nil {
+		return ingest.Job{}, fmt.Errorf("解析任务 %s 的阶段耗时: %w", item.ID, err)
+	}
+	if modelUsage == "" {
+		modelUsage = "{}"
+	}
+	if err := json.Unmarshal([]byte(modelUsage), &item.ModelUsage); err != nil {
+		return ingest.Job{}, fmt.Errorf("解析任务 %s 的模型用量: %w", item.ID, err)
+	}
+	if diagnostics == "" {
+		diagnostics = "[]"
+	}
+	if err := json.Unmarshal([]byte(diagnostics), &item.Diagnostics); err != nil {
+		return ingest.Job{}, fmt.Errorf("解析任务 %s 的质量诊断: %w", item.ID, err)
+	}
+	if item.Diagnostics == nil {
+		item.Diagnostics = []ingest.ExtractionDiagnostic{}
+	}
+	if convergence == "" {
+		convergence = "[]"
+	}
+	if err := json.Unmarshal([]byte(convergence), &item.Convergence); err != nil {
+		return ingest.Job{}, fmt.Errorf("解析任务 %s 的收敛诊断: %w", item.ID, err)
+	}
+	if item.Convergence == nil {
+		item.Convergence = []ingest.ConvergenceDiagnostic{}
+	}
 	var err error
 	if item.NextAttemptAt, err = nullableTime(nextAttempt); err != nil {
 		return ingest.Job{}, err
@@ -111,11 +157,17 @@ func (t *Tx) InsertJob(ctx context.Context, item ingest.Job) error {
 	if err != nil {
 		return err
 	}
+	extractionStats, retentionStats, timings, modelUsage, diagnostics, convergence, err := encodeJobQuality(item)
+	if err != nil {
+		return err
+	}
 	_, err = t.tx.ExecContext(ctx, `INSERT INTO ingest_jobs(`+jobColumns+`) VALUES
-		(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		item.ID, item.SourceID, string(item.Status), item.Attempts, item.ProtocolFailures,
 		item.WaitReason, item.Stage, item.ReasonCode, timeValue(item.NextAttemptAt),
 		item.Error, memoryIDs, conflictIDs, pendingIDs, warnings,
+		string(item.QualityOutcome), extractionStats, retentionStats, timings, modelUsage,
+		diagnostics, convergence,
 		formatTime(item.CreatedAt), formatTime(item.UpdatedAt),
 		timeValue(item.StartedAt), timeValue(item.FinishedAt),
 	)
@@ -132,15 +184,23 @@ func (t *Tx) UpdateJob(ctx context.Context, item ingest.Job) error {
 	if err != nil {
 		return err
 	}
+	extractionStats, retentionStats, timings, modelUsage, diagnostics, convergence, err := encodeJobQuality(item)
+	if err != nil {
+		return err
+	}
 	result, err := t.tx.ExecContext(ctx, `UPDATE ingest_jobs SET
 		source_id = ?, status = ?, attempts = ?, protocol_failures = ?, wait_reason = ?, stage = ?, reason_code = ?,
 		next_attempt_at = ?, error = ?,
 		memory_ids = ?, conflict_ids = ?, pending_memory_ids = ?, warnings = ?,
+		quality_outcome = ?, extraction_stats = ?, retention_stats = ?, timings = ?, model_usage = ?,
+		diagnostics = ?, convergence_diagnostics = ?,
 		updated_at = ?, started_at = ?, finished_at = ?
 		WHERE id = ?`,
 		item.SourceID, string(item.Status), item.Attempts, item.ProtocolFailures, item.WaitReason,
 		item.Stage, item.ReasonCode,
 		timeValue(item.NextAttemptAt), item.Error, memoryIDs, conflictIDs, pendingIDs, warnings,
+		string(item.QualityOutcome), extractionStats, retentionStats, timings, modelUsage,
+		diagnostics, convergence,
 		formatTime(item.UpdatedAt), timeValue(item.StartedAt),
 		timeValue(item.FinishedAt), item.ID,
 	)
@@ -177,6 +237,7 @@ func (t *Tx) ClaimNextJob(ctx context.Context, now time.Time) (ingest.Job, bool,
 
 	result, err := t.tx.ExecContext(ctx, `UPDATE ingest_jobs SET
 		status = ?, attempts = attempts + 1, next_attempt_at = NULL, wait_reason = '', stage = '', reason_code = '',
+		quality_outcome = '', extraction_stats = '{}', retention_stats = '{}', timings = '{}', model_usage = '{}', diagnostics = '[]', convergence_diagnostics = '[]',
 		updated_at = ?, started_at = COALESCE(started_at, ?), finished_at = NULL
 		WHERE id = ? AND (status = ? OR (status = ? AND wait_reason <> ?))`,
 		string(ingest.JobRunning), formatTime(now), formatTime(now),
@@ -205,7 +266,8 @@ func (t *Tx) ClaimNextJob(ctx context.Context, now time.Time) (ingest.Job, bool,
 // is reset.
 func (t *Tx) RequeueRunningJobs(ctx context.Context, now time.Time) (int64, error) {
 	result, err := t.tx.ExecContext(ctx, `UPDATE ingest_jobs SET
-		status = ?, next_attempt_at = ?, wait_reason = '', updated_at = ?, finished_at = NULL
+		status = ?, next_attempt_at = ?, wait_reason = '', quality_outcome = '',
+		extraction_stats = '{}', retention_stats = '{}', timings = '{}', model_usage = '{}', diagnostics = '[]', convergence_diagnostics = '[]', updated_at = ?, finished_at = NULL
 		WHERE status = ?`,
 		string(ingest.JobQueued), formatTime(now), formatTime(now), string(ingest.JobRunning),
 	)
@@ -224,7 +286,8 @@ func (t *Tx) RequeueRunningJobs(ctx context.Context, now time.Time) (int64, erro
 // different configuration. Transient backoff and terminal states are untouched.
 func (t *Tx) RequeueWaitingConfigurationJobs(ctx context.Context, now time.Time) (int64, error) {
 	result, err := t.tx.ExecContext(ctx, `UPDATE ingest_jobs SET
-		status = ?, next_attempt_at = ?, wait_reason = '', updated_at = ?, finished_at = NULL
+		status = ?, next_attempt_at = ?, wait_reason = '', quality_outcome = '',
+		extraction_stats = '{}', retention_stats = '{}', timings = '{}', model_usage = '{}', diagnostics = '[]', convergence_diagnostics = '[]', updated_at = ?, finished_at = NULL
 		WHERE status = ? AND wait_reason = ?`,
 		string(ingest.JobQueued), formatTime(now), formatTime(now),
 		string(ingest.JobWaiting), ingest.WaitReasonConfiguration,
@@ -245,6 +308,7 @@ func (t *Tx) RequeueWaitingConfigurationJobs(ctx context.Context, now time.Time)
 func (t *Tx) RequeueProtocolFailedJobs(ctx context.Context, now time.Time) (int64, error) {
 	result, err := t.tx.ExecContext(ctx, `UPDATE ingest_jobs SET
 		status = ?, protocol_failures = 0, next_attempt_at = ?, wait_reason = '',
+		quality_outcome = '', extraction_stats = '{}', retention_stats = '{}', timings = '{}', model_usage = '{}', diagnostics = '[]', convergence_diagnostics = '[]',
 		updated_at = ?, finished_at = NULL
 		WHERE status = ?`,
 		string(ingest.JobQueued), formatTime(now), formatTime(now), string(ingest.JobFailed),
@@ -277,6 +341,44 @@ func encodeJobResults(item ingest.Job) (string, string, string, string, error) {
 		return "", "", "", "", err
 	}
 	return memoryIDs, conflictIDs, pendingIDs, warnings, nil
+}
+
+func encodeJobQuality(item ingest.Job) (string, string, string, string, string, string, error) {
+	stats, err := json.Marshal(item.ExtractionStats)
+	if err != nil {
+		return "", "", "", "", "", "", fmt.Errorf("序列化任务提取统计: %w", err)
+	}
+	item.Retention.Normalize()
+	retention, err := json.Marshal(item.Retention)
+	if err != nil {
+		return "", "", "", "", "", "", fmt.Errorf("序列化任务保留统计: %w", err)
+	}
+	timings, err := json.Marshal(item.Timings)
+	if err != nil {
+		return "", "", "", "", "", "", fmt.Errorf("序列化任务阶段耗时: %w", err)
+	}
+	modelUsage, err := json.Marshal(item.ModelUsage)
+	if err != nil {
+		return "", "", "", "", "", "", fmt.Errorf("序列化任务模型用量: %w", err)
+	}
+	diagnostics := item.Diagnostics
+	if diagnostics == nil {
+		diagnostics = []ingest.ExtractionDiagnostic{}
+	}
+	encoded, err := json.Marshal(diagnostics)
+	if err != nil {
+		return "", "", "", "", "", "", fmt.Errorf("序列化任务质量诊断: %w", err)
+	}
+	convergence := item.Convergence
+	if convergence == nil {
+		convergence = []ingest.ConvergenceDiagnostic{}
+	}
+	encodedConvergence, err := json.Marshal(convergence)
+	if err != nil {
+		return "", "", "", "", "", "", fmt.Errorf("序列化任务收敛诊断: %w", err)
+	}
+	return string(stats), string(retention), string(timings), string(modelUsage),
+		string(encoded), string(encodedConvergence), nil
 }
 
 func encodeStringList(values []string) (string, error) {

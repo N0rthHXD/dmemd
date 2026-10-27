@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -23,27 +24,36 @@ func (p *Processor) repairExtraction(ctx context.Context, provider ExtractionRep
 	result, err := modelCall(ctx, p.extractionTimeout, func(callCtx context.Context) (ExtractionResult, error) {
 		return provider.RepairExtraction(callCtx, request)
 	})
-	p.logModelCall("extraction_repair", len(request.Candidates), len(request.Source.Content), started, err)
+	p.logModelCall("extraction_repair", len(request.Candidates), extractionRequestSize(ExtractionRequest{
+		Source: request.Source, Segments: request.Segments, ContextSegments: request.ContextSegments,
+	}), started, result.Usage, err)
 	return result, processingError("extraction_repair", "", err)
 }
 
-func (p *Processor) logModelCall(stage string, batch, size int, started time.Time, err error) {
+func (p *Processor) logModelCall(stage string, batch, size int, started time.Time, usage ModelUsage, err error) {
 	code := ""
 	if err != nil {
 		code = failureKind(err)
 	}
-	p.logger.Info("ingest model call", "stage", stage, "model", p.modelName,
-		"batch_size", batch, "context_size", size, "duration_ms", time.Since(started).Milliseconds(), "error_type", code)
+	modelName := p.modelName
+	if strings.HasPrefix(stage, "decision") && p.decisionModelName != "" {
+		modelName = p.decisionModelName
+	}
+	p.logger.Info("ingest model call", "stage", stage, "model", modelName,
+		"batch_size", batch, "context_size", size, "duration_ms", time.Since(started).Milliseconds(),
+		"calls", usage.Calls, "input_tokens", usage.InputTokens, "output_tokens", usage.OutputTokens,
+		"error_type", code)
 }
 
-func (p *Processor) decideValidated(ctx context.Context, request DecisionRequest) ([]Decision, error) {
+func (p *Processor) decideValidated(ctx context.Context, request DecisionRequest) ([]Decision, ModelUsage, error) {
 	started := time.Now()
 	result, err := modelCall(ctx, p.decisionTimeout, func(callCtx context.Context) (DecisionResult, error) {
 		return p.decider.Decide(callCtx, request)
 	})
-	p.logModelCall("decision", len(request.Candidates), decisionContextSize(request), started, err)
+	p.logModelCall("decision", len(request.Candidates), decisionContextSize(request), started, result.Usage, err)
+	usage := result.Usage
 	if err != nil && failureKind(err) != "protocol" {
-		return nil, err
+		return nil, usage, err
 	}
 	for _, decision := range result.Decisions {
 		if decision.Action == ActionSeparate && len(decision.TargetMemoryIDs) > 0 {
@@ -58,7 +68,7 @@ func (p *Processor) decideValidated(ctx context.Context, request DecisionRequest
 		issues = []DecisionIssue{{Code: "invalid_structure"}}
 	}
 	if len(issues) == 0 {
-		return valid, nil
+		return valid, usage, nil
 	}
 	for _, issue := range issues {
 		p.logger.Warn("decision protocol issue", "stage", "decision", "batch_size", len(request.Candidates),
@@ -66,7 +76,7 @@ func (p *Processor) decideValidated(ctx context.Context, request DecisionRequest
 	}
 	repairer, ok := p.decider.(DecisionRepairProvider)
 	if !ok {
-		return nil, processingError("decision", "decision_protocol_invalid", ErrProtocol)
+		return nil, usage, processingError("decision", "decision_protocol_invalid", ErrProtocol)
 	}
 	repairRequest := request
 	repairRequest.Candidates = invalid
@@ -84,9 +94,10 @@ func (p *Processor) decideValidated(ctx context.Context, request DecisionRequest
 	repaired, repairErr := modelCall(ctx, p.decisionTimeout, func(callCtx context.Context) (DecisionResult, error) {
 		return repairer.RepairDecision(callCtx, DecisionRepairRequest{DecisionRequest: repairRequest, Decisions: badDecisions, Issues: issues})
 	})
-	p.logModelCall("decision_repair", len(invalid), decisionContextSize(repairRequest), started, repairErr)
+	p.logModelCall("decision_repair", len(invalid), decisionContextSize(repairRequest), started, repaired.Usage, repairErr)
+	usage.Add(repaired.Usage)
 	if repairErr != nil {
-		return nil, processingError("decision_repair", "", repairErr)
+		return nil, usage, processingError("decision_repair", "", repairErr)
 	}
 	fixed, _, remaining := inspectDecisions(repairRequest, repaired)
 	if len(remaining) != 0 {
@@ -94,9 +105,10 @@ func (p *Processor) decideValidated(ctx context.Context, request DecisionRequest
 			p.logger.Warn("decision repair invalid", "stage", "decision_repair", "batch_size", len(invalid),
 				"context_size", decisionContextSize(repairRequest), "protocol_error_type", issue.Code)
 		}
-		return nil, processingError("decision_repair", "decision_repair_failed", ErrProtocol)
+		return nil, usage, processingError("decision_repair", "decision_repair_failed", ErrProtocol)
 	}
-	return validateDecisions(request.Candidates, DecisionResult{Decisions: append(valid, fixed...)})
+	decisions, validationErr := validateDecisions(request.Candidates, DecisionResult{Decisions: append(valid, fixed...)})
+	return decisions, usage, validationErr
 }
 
 func inspectDecisions(request DecisionRequest, result DecisionResult) (valid []Decision, invalid []Candidate, issues []DecisionIssue) {
@@ -175,5 +187,9 @@ func inspectDecisions(request DecisionRequest, result DecisionResult) (valid []D
 
 func decisionContextSize(request DecisionRequest) int {
 	data, _ := json.Marshal(request)
-	return len(data)
+	size := len(data)
+	for _, segment := range request.SourceSegments {
+		size += len(segment.Text)
+	}
+	return size
 }

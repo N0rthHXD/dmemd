@@ -201,6 +201,10 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 	}
 
 	started := time.Now()
+	queueAge := int64(0)
+	if !claimed.CreatedAt.IsZero() && started.After(claimed.CreatedAt) {
+		queueAge = started.Sub(claimed.CreatedAt).Milliseconds()
+	}
 	result, err := w.processor.Process(ctx, claimed)
 	duration := time.Since(started).Milliseconds()
 	if err != nil {
@@ -214,6 +218,7 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		w.logger.Warn("ingest job failed",
 			"job_id", claimed.ID,
 			"attempts", claimed.Attempts,
+			"queue_age_ms", queueAge,
 			"duration_ms", duration,
 			"error", safeErrorSummary(err),
 		)
@@ -222,8 +227,16 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 	w.logger.Info("ingest job completed",
 		"job_id", claimed.ID,
 		"status", result.Status,
+		"quality_outcome", result.Quality,
 		"memories", len(result.MemoryIDs),
+		"isolated_candidates", result.Stats.IsolatedCandidates,
+		"retained_candidates", result.Retention.Retained,
+		"not_retained_candidates", result.Retention.NotRetained,
+		"extraction_chunks", result.Stats.ExtractionChunks,
+		"queue_age_ms", queueAge,
 		"duration_ms", duration,
+		"model_calls", result.ModelUsage.Calls,
+		"total_tokens", result.ModelUsage.TotalTokens(),
 	)
 	return true, nil
 }
@@ -253,6 +266,21 @@ func (w *Worker) handleFailure(ctx context.Context, claimed Job, cause error) er
 			current.ReasonCode = diagnostic.Code
 		}
 		current.FinishedAt = nil
+		var qualityErr *ExtractionQualityError
+		if errors.As(cause, &qualityErr) {
+			current.ExtractionStats = qualityErr.Stats
+			current.Retention = qualityErr.Retention
+			current.Retention.Normalize()
+			current.Timings = qualityErr.Timings
+			current.ModelUsage = qualityErr.ModelUsage
+			current.Diagnostics = qualityErr.Diagnostics
+			if current.Diagnostics == nil {
+				current.Diagnostics = []ExtractionDiagnostic{}
+			}
+			if qualityErr.Quality != "" {
+				current.QualityOutcome = qualityErr.Quality
+			}
+		}
 		switch kind {
 		case "configuration":
 			// Credentials and request configuration are not probed at high
@@ -261,6 +289,14 @@ func (w *Worker) handleFailure(ctx context.Context, claimed Job, cause error) er
 			current.WaitReason = WaitReasonConfiguration
 		case "protocol":
 			current.ProtocolFailures++
+			if current.Diagnostics == nil {
+				current.Diagnostics = []ExtractionDiagnostic{}
+			}
+			if len(current.Diagnostics) == 0 {
+				current.Diagnostics = append(current.Diagnostics, ExtractionDiagnostic{
+					Code: current.ReasonCode, Stage: current.Stage, Disposition: "isolated",
+				})
+			}
 			if current.ProtocolFailures >= w.maxAttempts {
 				current.Status = JobFailed
 				current.FinishedAt = &now
@@ -293,6 +329,7 @@ func (w *Worker) failProtocol(claimed Job) error {
 		}
 		current.Status = JobFailed
 		current.Error = safeErrorSummary(&ProviderError{Operation: "protocol"})
+		current.QualityOutcome = QualityUnusable
 		current.NextAttemptAt = nil
 		current.WaitReason = ""
 		current.UpdatedAt = now

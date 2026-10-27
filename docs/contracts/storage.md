@@ -31,13 +31,13 @@
   已提交的早期版本保留，修复后可继续应用后续版本。
 - 重复启动跳过已应用版本。数据库包含程序未知的版本或同名版本对应不同文件名时，迁移失败，
   服务保持不就绪。
-- `schema_meta` 保存初始化契约编号（当前 `dmemd-p2-2026-10-26`）。已有迁移记录但契约缺失或
+- `schema_meta` 保存初始化契约编号（当前 `dmemd-p5-2026-10-27`）。已有迁移记录但契约缺失或
   不匹配时，`Migrate` 在应用任何新迁移前失败，程序不自动删除、清空或重建开发库。空库完整
   初始化后写入并核对同一契约。
 - 迁移只创建结构，不填充业务数据。项目尚未发布：当前 `0001_core.sql` 已直接包含时间/
   断言、`scope_key`/`topics_json` 字段和初始化契约；`0004_temporal_conflicts.sql` 增加事实组、
-  关系、冲突和目录 generation；`0005_governance.sql` 增加持久治理任务；
-  `0006_artifacts.sql` 增加派生对象、版本、直接原子依赖和派生 FTS；
+  关系、演化审计、冲突和目录 generation；`0005_governance.sql` 增加持久治理任务；
+  `0006_artifacts.sql` 增加派生对象、版本、直接原子依赖、无对象目标评估和派生 FTS；
   `0007_experiences.sql` 增加应用结果反馈、结果依赖和 Skill 来源。不提供存量数据库升级
   或旧字段回填。发布后新增结构变化必须追加新版本文件，不修改已应用文件。
 
@@ -46,21 +46,23 @@
 | 表 | 关键内容与约束 |
 | --- | --- |
 | `sources` | 原始 JSON 以 BLOB 原样保存；`app_id`、`external_id` 可选且没有唯一约束；`scope_key` 为可选平面作用域；`redacted` 与 `redacted_at` 表示显式清除 |
-| `memories` | 当前快照；`id` 主键；`version >= 1`；含 `assertion_status`、`valid_from/valid_to` 及依据、`fact_group_id`、`scope_key`、规范化 `topics_json`；CHECK 保证空边界对应 unknown、非空边界有依据且左闭右开；`created_by_app` 为创建时来源应用快照；`origin_source_id` 关联首次来源 |
+| `memories` | 当前快照；`id` 主键；`version >= 1`；含 `assertion_status`、`observed_at` 及其依据、`event_time`/依据/精度、`valid_from/valid_to` 及依据、`temporal_json`、`procedure_json`、`qualifiers_json`、`fact_group_id`、`scope_key`、规范化 `topics_json`；CHECK 保证空边界对应 unknown、非空边界有依据且左闭右开，事件时间为空时依据必须 unknown；`created_by_app` 为创建时来源应用快照；`origin_source_id` 关联首次来源 |
 | `memory_revisions` | 完整历史快照，含与 `memories` 相同的时间/断言/组/作用域/主题字段；主键 `(memory_id, version)`；操作类型和原因；版本时间取快照 `updated_at`；随记忆永久清除级联删除 |
-| `memory_fact_groups` | 服务生成 ID、主体/属性/场景、`cardinality`、`generation`；成员或语义变化递增 |
+| `memory_fact_groups` | 服务生成 ID、显式 `scope_key`、主体/属性/场景、必要条件、规范化身份键、`cardinality`、`generation`；身份唯一约束为 `(scope_key, subject_key, predicate_key, scene_key, conditions_key)`，成员或语义变化递增 |
 | `memory_relations` | 只记录 `supersedes`；保存两端决策时版本；未决矛盾只存于冲突成员 |
+| `memory_evolution_events` | 确定性演化审计：事实组、后继/前驱及决策版本、`change/correction/reschedule/cancel/supersede`、固定原因码和时间；不复制原文或模型理由 |
 | `memory_conflicts` | open/resolved、固定原因码、结构化裁决 JSON、revision、创建/更新时间；`resolution` 是裁决 payload 的唯一来源 |
 | `memory_conflict_members` | 冲突 ID、记忆 ID、检测时版本；当前版本读取时计算；记忆永久清除时级联，剩余不足两方时删除冲突 |
 | `memory_conflict_events` | 检测、成员变化、解决的不可变审计；只含固定动作和成员引用，不复制原文、原因码或模型理由 |
 | `memory_catalog` | 单行语义目录 generation；记忆、事实组和冲突写入时递增，向量完成不递增 |
 | `evidence` | 来源引用、可选消息 ID、原文片段、可选定位、模型名和 redacted 状态；来源行保留 |
 | `revision_evidence` | 版本完整证据集合；主键 `(memory_id, version, evidence_id)`，关联版本和证据 |
-| `ingest_jobs` | 状态（`queued/running/waiting/succeeded/failed/cancelled`）、尝试次数、连续协议失败次数、固定等待原因、下次执行时间、脱敏错误、`memory_ids`、`conflict_ids`、`pending_memory_ids` 与固定 `warnings`；不保存原始模型响应或推理过程 |
-| `governance_jobs` | 固定治理目标；`(kind,target_key)` 唯一；`revision` 保护在途结果，输入变化或取消时递增；状态、尝试次数、连续失败、固定等待/错误码、`input_hash` 和时间字段 |
-| `artifacts` | 派生对象；`(kind,target_key)` 唯一；`current_version=0` 表示尚无可用版本；`state` 仅为 `active/stale/disabled`；`scope_key/topic` 用于作用域召回 |
-| `artifact_revisions` | 不可变派生版本；标题、正文或结构化 payload、内容哈希、生成器/协议版本、固定原因码、截断标记和创建时间；随对象级联删除 |
-| `artifact_memory_dependencies` | 每个派生版本使用的精确原子修订；主键 `(artifact_id, artifact_version, memory_id)`；外键指向 `memory_revisions`，反向索引支持同步失效和清除前枚举 |
+| `ingest_jobs` | 状态（`queued/running/waiting/succeeded/failed/cancelled`）、尝试次数、连续协议失败次数、固定等待原因、下次执行时间、脱敏错误、`memory_ids`、`conflict_ids`、`pending_memory_ids`、固定 `warnings`、业务质量 `quality_outcome`（`empty/complete/partial/unusable`）、分阶段 `extraction_stats`、固定的 `retention_stats`（保留/未保留原因，不含原文）、`timings`（排队、提取、规范化、repair、上下文、决策、提交）、`model_usage`（调用数/input/output token）与不含原文的候选级 `diagnostics`；不保存原始模型响应或推理过程 |
+| `governance_jobs` | 固定治理目标；`(kind,target_key)` 唯一；`revision` 保护在途结果，输入变化或取消时递增；状态、尝试次数、连续失败、固定等待/错误码、`input_hash` 和时间字段；`created_at` 同时用于连续摄取下的年龄/饥饿监测 |
+| `artifacts` | 派生对象；`(kind,target_key)` 唯一；`kind` 包含 `topic_summary/scope_summary/profile/experience_case/skill`；`current_version=0` 表示尚无可用版本；`state` 仅为 `active/stale/disabled`；`scope_key/topic` 用于作用域召回。`scope_summary` 目标只由 scope 和派生类型确定 |
+| `derived_target_evaluations` | 无对象结果的生成目标评估；`(kind,target_key)` 唯一，记录 scope/topic、固定状态（`no_eligible_input/model_unavailable/generation_failed/invalid_output`）、原因码和评估时间。成功提交 revision 时删除；它与没有可用版本的失败对象不同，不保存正文或模型响应 |
+| `artifact_revisions` | 不可变派生版本；标题、正文或结构化 payload、内容哈希、生成器/协议版本、固定原因码、截断标记和创建时间；随对象级联删除。摘要 payload 分开记录输入选择计数、引用完整性、语义覆盖、合法引用和省略输入 |
+| `artifact_memory_dependencies` | 每个派生版本使用的精确原子修订（保守覆盖全部生成输入）；主键 `(artifact_id, artifact_version, memory_id)`；外键指向 `memory_revisions`，反向索引支持同步失效和清除前枚举 |
 | `experience_runs` | 应用报告的结果：服务内部 ID、可选唯一 `run_id`、`source_id`、可选 Skill ID/精确版本、作用域、目标/条件/行动、`outcome=success/failure/unknown`、`state=recorded/revoked` 和时间；不保存验证认证 |
 | `artifact_run_dependencies` | 每个派生版本使用的经验运行；主键 `(artifact_id, artifact_version, experience_id)`；外键指向 `experience_runs`，反向索引支持撤销时同步失效 |
 | `artifact_search_docs` / `artifact_fts` | 只索引 `active` 对象的当前版本；规范化标题/正文词项与外部内容 FTS5；可重建且不保存来源原文 |
@@ -69,7 +71,7 @@
 | `memory_fts` | 外部内容 FTS5 表，内容表为 `memory_search_docs`，`unicode61` tokenizer |
 | `memory_embeddings` | 每条当前记忆一个向量：`memory_id` 主键、`profile_id`、`content_hash`、`dimensions > 0`、little-endian float32 BLOB、`embedded_at`；外键随搜索文档级联删除，BLOB 长度必须为 `dimensions*4` |
 | `memory_embedding_jobs` | 持久化向量任务：`memory_id` 主键、Profile/内容哈希、`queued/running/failed`、尝试次数、下次重试时间与脱敏错误码；外键随搜索文档级联删除 |
-| `memory_index_meta` | 记录生成当前内容哈希的文档输入契约版本；版本变化时启动阶段执行一次全量本地重建 |
+| `memory_index_meta` | 记录生成当前内容哈希的文档输入契约版本、已登记的 Embedding profile/版本指纹，以及持久化的重建原因与登记时间；profile、维数或文档构造方式变化时旧向量退出召回并登记重建，启动阶段按需执行一次本地文档重建 |
 | `schema_migrations` | 顺序迁移版本记录 |
 
 外键默认启用。来源清除不删除来源标识；永久清除记忆时只删除该记忆的版本、版本证据关联和
@@ -88,8 +90,8 @@
 - `memory.Service` 的原子写入在同一事务 upsert `classify` 治理任务；输入哈希不变且任务已
   完成时为空操作。逻辑删除和永久清除取消对应任务并递增 revision，迟到结果不能恢复记录。
 - 原子写入启用派生同步时，同一事务把直接依赖对象置为 `stale`、删除当前 FTS 文档，并 upsert
-  受影响 `(scope,topic)` 摘要、作用域画像以及 procedure 对应 Skill 的治理任务。证据补充不
-  触发重算；删除/永久清除立即生效，不等待去抖。
+  受影响 `(scope,topic)` 摘要、作用域概览、作用域画像以及 procedure 对应 Skill 的治理任务。
+  证据补充不触发重算；删除/永久清除立即生效，不等待去抖。
 - 永久清除先在事务内枚举依赖该记忆的派生对象，删除对象全部版本、依赖和索引，再删除原子
   数据；同一事务递增相关治理任务 revision，因此迟到模型结果不能恢复已清除内容。
 - 结果反馈在同一事务保存来源、`experience_runs` 和案例 `aggregate` 任务。可选 `run_id`
@@ -107,6 +109,12 @@
 - 遗忘删除依赖记忆的整个冲突（含 resolved 和审计引用），并取消对应 review 任务；与单记忆
   purge 的成员裁剪行为区分。派生历史依赖单独枚举并递增所有受影响目标任务 revision，即使
   当前版本已不再依赖目标，也不能让在途结果复活已清除的历史对象。
+- 入库自动收敛区分状态变化、明确更正、事件改期/取消和独立观测。状态变化关闭旧有效区间并
+  保留旧快照；更正拒绝旧断言但不伪造其有效历史；改期/取消把旧计划标为历史；独立观测保留
+  各自 `observed_at`，不因数值不同创建冲突。成功收敛在同一事务写入后继、前驱修订、
+  `supersedes`、成员检测版本、`memory_evolution_events` 和必要时的 resolved 冲突。未自动
+  收敛的候选在任务 `convergence` 中记录 `identity_ambiguous`、`missing_update_evidence`、
+  `time_unknown`、`cardinality_unknown` 或 `context_truncated`。
 - 冲突创建、成员扩展或相关记忆版本变化时，同一事务 upsert `review_conflict` 目标。复查只做
   确定性判断：唯一存续 accepted 成员、正文收敛或已完全已知且互不重叠的区间；复杂情况保持
   open，不调用模型，也不因重复扫描刷新相同输入。
@@ -167,9 +175,18 @@
 - 来源查询与清除由 `source.Service` 提供。清除同一事务清空来源 `content`、全部证据 `quote`
   和定位副本，保留来源/证据 ID 与 `redacted`，取消 `queued`/`running` 任务，并替换可能残留
   原文的终态任务错误摘要。重复清除稳定，首次 `redacted_at` 不变。
-- `source.LocateQuote` 在已解码 JSON 中按可选消息 ID 查找首个匹配字符串，返回点分字段路径和
-  字符（rune）偏移；无法定位、消息不存在或 JSON 不可解析时返回空定位，但来源关联仍然保留。
-  `source.NewEvidence` 生成证据 ID/时间并应用该定位规则。
+- 事实组查找使用规范化身份键并强制 `scope_key` 隔离：主体、谓词、场景或必要条件任一不同
+  即为不同事实。场景或条件缺失时才允许复用同 scope 下唯一兼容组；多个候选保持
+  `identity_ambiguous`，不做模糊别名合并。身份时间线与关键词/语义上下文分开加载，任一路
+  截断只标记对应候选或事实组。
+- `source.BuildView` 对来源做确定性遍历：消息、纯文本和结构化字符串字段获得 source 内
+  唯一且可重建的 `segment_id`，并保留字段路径、rune 范围、客户端消息 ID 和 `role` 作为
+  辅助上下文。相同来源重试得到相同片段映射；原始 JSON 不被修改，也不额外持久化原文副本。
+- `source.View.Resolve` 只接受可见 `segment_id` 和逐字 quote。未知片段 ID 不做模糊修正；
+  缺失片段 ID 仅在 quote 全来源精确唯一时恢复并记录 `unique_quote`；同一片段内重复出现
+  且无偏移时返回歧义。`source.NewEvidence` 生成证据 ID/时间并保存解析后的字段路径和 rune
+  偏移；无法解析的引用只保留来源关联，不能用于自动更正或收敛。
+
 
 ## 8. 搜索文档、关键词查询与索引重建
 
@@ -196,14 +213,15 @@
   回滚，返回错误且不报告部分成功。`retrieval.Service.RebuildIndex` 包装该能力并只记录数量、
   耗时和错误，不记录记忆原文。
 - `RelatedContext` 供 ingest 在后台选择相关上下文：使用关键词路，启用 Embedding 时补充语义候选；
-  可读取 active/archived 的 accepted/pending 记忆，最多取去重后的前 32 个分词词项和指定条数；
-  截断时 `Complete=false`，不改变公共搜索协议。
+  传入当前来源的 `scope_key`，只读取同作用域或 `user` 全局的 active/archived accepted/pending
+  记忆，最多取去重后的前 32 个分词词项和指定条数；截断时 `Complete=false`，不改变公共搜索协议。
 - `RebuildSearchIndex` 仍可用于仅从已有派生文档重建 FTS；生产完整重建使用上述快照重建。
 
 ## 9. 混合检索持久化与向量 Worker
 
 - `memory.DocumentBuilder` 生成 FTS 词项和 `content_hash`。内容哈希是固定文档模板版本与实际
-  文档字节的 SHA-256；标题、正文、kind 变化时改变，状态、证据、版本和时间变化不改变。
+  文档字节的 SHA-256；标题、正文、kind、结构化 procedure 或限定变化时改变，状态、证据、
+  版本和普通时间字段变化不改变。流程结构因此拥有自己的派生失效边界，而不是只依赖正文。
 - `Tx.UpsertSearchDocument` 在同一事务内比较旧哈希。输入变化时更新 FTS/哈希、删除旧向量与
   任务并创建新任务（尝试次数归零）；输入未变且有有效向量时复用；输入未变但
   缺失或 Profile 不匹配时只补缺失任务，不重置已有任务的尝试次数或重试时间。功能关闭时不创建
@@ -253,6 +271,12 @@
 ## 11. 有效时间、断言与冲突
 
 - 有效区间为左闭右开 `[valid_from, valid_to)`，两端非空时要求起点早于终点。空边界表示未知；
+  记录时间、陈述/观测/事件时间和事实有效时间分开存储；`observed_at_basis=recorded` 明确标记
+  接收时间回退，不能作为新事实更晚的收敛依据。事件时间使用独立过滤，未来计划不占用未来
+  `valid_from`。日期原文、精度和时区状态保存在 `temporal_json`，无时区日期不被宣称为
+  明确 UTC 实例。
+- `procedure_json` 和 `qualifiers_json` 随当前快照与每个历史修订保存，参与内容 hash、派生
+  失效和清除闭包；永久遗忘删除当前行时修订和证据按既有外键闭包一并删除。
   冲突检查把未知边界按可能重叠保守处理。
 - 普通召回只读取 `assertion_status=accepted`，按生命周期和 `as_of` 区间过滤；`pending` 只
   通过冲突/管理接口读取，`rejected` 保留审计但不召回。

@@ -64,12 +64,24 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	logger := appruntime.NewLogger(stderr, level)
+	logFile, err := appruntime.OpenLogFile(loaded.Config.Log.File)
+	if err != nil {
+		return fmt.Errorf("打开日志文件 %s: %w", loaded.Config.Log.File, err)
+	}
+	if logFile != nil {
+		defer logFile.Close()
+	}
+	logOutput := stderr
+	if logFile != nil {
+		logOutput = io.MultiWriter(stderr, logFile)
+	}
+	logger := appruntime.NewLogger(logOutput, level)
 	logger.Info("starting dmemd",
 		"version", version,
 		"config", loaded.Path,
 		"data_dir", loaded.Config.DataDir,
 		"listen", loaded.Config.Listen,
+		"log_file", loaded.Config.Log.File,
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

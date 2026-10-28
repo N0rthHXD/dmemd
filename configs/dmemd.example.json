@@ -58,6 +58,7 @@
     "max_wait": "30m"
   },
   "log": {
-    "level": "info"
+    "level": "info",
+    "file": ""
   }
 }

@@ -159,9 +159,10 @@ func (g GovernanceConfig) IsEnabled() bool {
 	return g.Enabled == nil || *g.Enabled
 }
 
-// LogConfig controls structured logging.
+// LogConfig controls logging. An empty File uses DefaultLogPath.
 type LogConfig struct {
 	Level string `json:"level"`
+	File  string `json:"file"`
 }
 
 // Config is the complete local configuration file shape.
@@ -205,6 +206,17 @@ func DefaultConfigPath() string {
 	return ""
 }
 
+// DefaultLogPath returns ${XDG_CACHE_HOME:-$HOME/.cache}/dmemd.log.
+func DefaultLogPath() string {
+	if dir := os.Getenv("XDG_CACHE_HOME"); dir != "" {
+		return filepath.Join(dir, "dmemd.log")
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".cache", "dmemd.log")
+	}
+	return ""
+}
+
 // DefaultConfig returns the built-in baseline before any file is loaded.
 func DefaultConfig() Config {
 	dataDir := DefaultDataDir()
@@ -239,7 +251,7 @@ func DefaultConfig() Config {
 			MaxInputs:         DefaultGovernanceMaxInputs,
 			MaxWait:           Duration(DefaultGovernanceMaxWait),
 		},
-		Log: LogConfig{Level: "info"},
+		Log: LogConfig{Level: "info", File: DefaultLogPath()},
 	}
 }
 
@@ -375,6 +387,9 @@ func (cfg *Config) applyDefaults() {
 	}
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = defaults.Log.Level
+	}
+	if cfg.Log.File == "" {
+		cfg.Log.File = defaults.Log.File
 	}
 }
 

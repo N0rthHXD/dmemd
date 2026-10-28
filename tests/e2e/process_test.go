@@ -161,7 +161,7 @@ func writeConfig(t *testing.T, path, dataDir, databasePath, listen, modelURL str
 			"max_attempts": 3,
 			"retry_delays": []string{"10ms", "20ms", "30ms"},
 		},
-		"log": map[string]any{"level": "info"},
+		"log": map[string]any{"level": "info", "file": filepath.Join(filepath.Dir(path), "dmemd.log")},
 	}
 	data, err := json.Marshal(config)
 	if err != nil {

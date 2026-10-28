@@ -48,6 +48,7 @@ func TestRunRejectsMissingExplicitConfig(t *testing.T) {
 
 func TestArtifactIntegrityCheckExitsWithoutStartingServer(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(dir, "cache"))
 	path := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(path, []byte(`{"data_dir":"`+filepath.Join(dir, "data")+`"}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -58,5 +59,13 @@ func TestArtifactIntegrityCheckExitsWithoutStartingServer(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), `"checked":0,"issues":[]`) {
 		t.Fatalf("report = %s", stdout.String())
+	}
+	logPath := filepath.Join(dir, "cache", "dmemd.log")
+	logged, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read default log file: %v", err)
+	}
+	if !strings.Contains(string(logged), "starting dmemd") || strings.Contains(string(logged), `"level":`) {
+		t.Fatalf("default log file is not plain text: %s", logged)
 	}
 }

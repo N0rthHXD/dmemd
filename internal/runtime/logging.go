@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -30,14 +32,30 @@ var omittedLogKeys = map[string]struct{}{
 	"raw_response":   {},
 }
 
-// NewLogger returns a structured JSON logger whose default policy drops raw
+// NewLogger returns a human-readable text logger whose default policy drops raw
 // content/request/response bodies and redacts credentials or bearer headers.
+// Timestamps use the process's local time zone.
 func NewLogger(w io.Writer, level slog.Level) *slog.Logger {
-	handler := slog.NewJSONHandler(w, &slog.HandlerOptions{
+	handler := slog.NewTextHandler(w, &slog.HandlerOptions{
 		Level:       level,
 		ReplaceAttr: RedactLogAttr,
 	})
 	return slog.New(handler)
+}
+
+// OpenLogFile opens path in append mode with 0600 permissions, creating parent
+// directories as needed. An empty path returns nil so callers can log to stderr
+// only.
+func OpenLogFile(path string) (*os.File, error) {
+	if path == "" {
+		return nil, nil
+	}
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("创建日志目录 %s: %w", dir, err)
+		}
+	}
+	return OpenPrivateFile(path, os.O_WRONLY|os.O_APPEND)
 }
 
 // ParseLogLevel maps configuration text to slog levels.
@@ -58,11 +76,8 @@ func ParseLogLevel(value string) (slog.Level, error) {
 
 // RedactLogAttr is the shared slog ReplaceAttr policy. Sensitive values are
 // replaced with a fixed marker; raw payload fields are omitted entirely.
-// Log timestamps are normalized to UTC.
+// Timestamps pass through unchanged so they stay in the local time zone.
 func RedactLogAttr(_ []string, attr slog.Attr) slog.Attr {
-	if attr.Key == slog.TimeKey && attr.Value.Kind() == slog.KindTime {
-		return slog.Time(slog.TimeKey, attr.Value.Time().UTC())
-	}
 	key := strings.ToLower(attr.Key)
 	if _, omit := omittedLogKeys[key]; omit {
 		return slog.Attr{}

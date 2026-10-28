@@ -42,6 +42,7 @@ type Options struct {
 	Services Services
 	Ready    func(context.Context) error
 	Logger   *slog.Logger
+	UI       http.Handler
 }
 
 type handler struct {
@@ -62,6 +63,10 @@ func New(options Options) http.Handler {
 	root := http.NewServeMux()
 	root.HandleFunc("GET /healthz", h.healthz)
 	root.HandleFunc("GET /readyz", h.readyz)
+	if options.UI != nil {
+		root.Handle("GET /ui", http.RedirectHandler("/ui/", http.StatusMovedPermanently))
+		root.Handle("GET /ui/", options.UI)
+	}
 	if options.Services.configured() {
 		root.Handle("/v1/", h.withReadiness(h.businessRoutes()))
 	}

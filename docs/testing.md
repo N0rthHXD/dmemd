@@ -21,7 +21,7 @@ make check            # fmt-check + vet + test + test-quality + build
 ```
 
 失败时命令返回非零。`make build` 可通过 `VERSION=...` 注入构建版本。
-README 中的开发入口与这些命令保持一致。
+[技术与使用指南](technical-guide.md#构建与验证)中的开发入口与这些命令保持一致。
 
 真实模型语义评估是单独入口，默认跳过，不进入 CI：
 
@@ -33,11 +33,10 @@ go test -count=1 -run TestLiveModelQuality -v ./tests/quality
 ```
 
 `make test-capacity` 默认使用 10,000 条；可用 `DMEMD_CAPACITY_MEMORIES` 调整本次规模。
-实测记录见 `docs/quality.md`。
 
 ## 3. 隔离与依赖
 
-P2 稳定性回归覆盖：配置预算默认值/覆盖/非法值、模型阶段 timeout 与总预算、waiting 阶段和
+稳定性回归覆盖：配置预算默认值/覆盖/非法值、模型阶段 timeout 与总预算、waiting 阶段和
 原因码的 SQLite/HTTP 往返、`separate` 无调用修复、`change` 定向修复且不猜目标、只修复同批
 无效候选、摄取优先级及退避不阻塞治理、聚合目标合并与旧 revision 失效，以及分操作调用统计。
 相关测试位于 `internal/ingest/{stability,budget}_test.go`、
@@ -115,8 +114,8 @@ P2 稳定性回归覆盖：配置预算默认值/覆盖/非法值、模型阶段
 
 测试覆盖统一提交、模型处理、记忆生命周期、关键词与混合检索、HTTP 契约、完整进程启动、
 单实例锁、重启恢复、固定标注质量和一万条容量场景。容量场景默认跳过，需显式运行
-`make test-capacity`。`docs/quality.md` 记录本次实际执行的环境、数据规模和结果；真实模型
-语义评估、十万条容量、备份恢复和发布准备仍未执行，不创建占位通过结果。
+`make test-capacity`。真实模型语义评估、十万条容量、备份恢复和发布准备仍未执行，不创建
+占位通过结果。
 
 ## 5. CI
 

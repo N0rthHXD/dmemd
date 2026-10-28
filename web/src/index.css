@@ -1,0 +1,93 @@
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 320px;
+}
+
+.workspace-theme { --workspace-border: #e9ebf2; --workspace-text: #252b40; }
+.workspace-theme-dark { --workspace-border: #2c303d; --workspace-text: #e5e7ef; }
+.workspace-theme .ant-card { box-shadow: 0 2px 10px rgba(24, 35, 70, .025); }
+.workspace-theme .ant-card-head { min-height: 56px; }
+.workspace-theme .ant-table-cell { overflow-wrap: anywhere; }
+.workspace-theme .ant-menu-item { margin-block: 6px; }
+.workspace-theme .ant-menu-item-group-title { font-size: 12px; padding-top: 20px; }
+.workspace-theme .ant-typography { overflow-wrap: anywhere; }
+.technical-details { margin-block: 16px; }
+.identifier-button { border: 0; padding: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
+.identifier-button:hover { text-decoration: underline; }
+.page-intro { margin-bottom: 24px; }
+.page-intro h3 { margin: 0 0 6px; }
+.overview-hero { padding: 32px; border-radius: 16px; background: linear-gradient(115deg, rgba(82,100,217,.10), rgba(75,164,176,.06)); margin-bottom: 24px; border: 1px solid rgba(82,100,217,.10); }
+.overview-hero .ant-input-search { max-width: 760px; margin-top: 12px; }
+.quick-action { display: flex; align-items: center; gap: 16px; min-height: 110px; }
+.quick-action-icon { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 14px; background: rgba(82,100,217,.09); color: #5264d9; font-size: 23px; flex: none; }
+.quick-action h5 { margin: 0 0 4px; }
+.memory-preview { padding: 18px 0; border-bottom: 1px solid var(--workspace-border); }
+.memory-preview:last-child { border-bottom: 0; padding-bottom: 0; }
+.memory-preview:first-child { padding-top: 0; }
+.memory-preview-title { display: inline-block; font-size: 16px; font-weight: 600; margin-bottom: 6px; }
+.section-note { font-size: 12px; opacity: .65; margin-top: 12px; }
+@media (max-width: 768px) {
+  .overview-hero { padding: 22px 18px; }
+  .workspace-theme .ant-card-body { padding: 18px; }
+  .workspace-theme .ant-card-head { padding-inline: 18px; }
+}
+
+a {
+  color: inherit;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  margin-top: 1.2em;
+  margin-bottom: 0.6em;
+}
+
+.markdown-body p {
+  margin: 0.6em 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 1.5em;
+}
+
+.markdown-body code {
+  background: rgba(127, 127, 127, 0.14);
+  border-radius: 4px;
+  padding: 0.1em 0.3em;
+  font-size: 0.9em;
+}
+
+.markdown-body pre {
+  overflow: auto;
+  background: rgba(127, 127, 127, 0.1);
+  padding: 12px;
+  border-radius: 6px;
+}
+
+.markdown-body pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.markdown-body table {
+  border-collapse: collapse;
+}
+
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid rgba(127, 127, 127, 0.3);
+  padding: 6px 10px;
+}

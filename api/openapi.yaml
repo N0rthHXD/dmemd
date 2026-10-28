@@ -15,12 +15,12 @@ info:
     internal/runtime. The HTTP contract and process lifecycle are exercised by
     the integration and end-to-end tests.
 
-    First-release validation is documented in docs/quality.md: fixed labeled
-    samples cover classification, summary constraints, deterministic conflict
-    review and Skill boundaries; an opt-in 10k atomic-memory scenario covers
-    governance backlog, concurrent recall and one-transaction permanent forget.
-    Those results do not claim real-model semantic quality, 100k capacity, OS
-    application isolation, execution certification or backup/restore.
+    First-release validation uses fixed labeled samples covering classification,
+    summary constraints, deterministic conflict review and Skill boundaries; an
+    opt-in 10k atomic-memory scenario covers governance backlog, concurrent recall
+    and one-transaction permanent forget. Those checks do not claim real-model
+    semantic quality, 100k capacity, OS application isolation, execution
+    certification or backup/restore.
 servers:
   - url: http://127.0.0.1:18432
 security: []

@@ -15,6 +15,7 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/governance"
 	"github.com/N0rthHXD/dmemd/internal/ingest"
 	httptransport "github.com/N0rthHXD/dmemd/internal/transport/http"
+	"github.com/N0rthHXD/dmemd/internal/webui"
 )
 
 const shutdownTimeout = 10 * time.Second
@@ -112,10 +113,16 @@ func New(cfg Config, logger *slog.Logger, ready Readiness, options ...Option) (*
 		}
 	}
 
+	uiHandler, err := webui.NewHandler()
+	if err != nil {
+		return nil, fmt.Errorf("初始化管理台静态资源: %w", err)
+	}
+
 	handler := httptransport.New(httptransport.Options{
 		Services: app.services,
 		Ready:    ready.Ready,
 		Logger:   logger,
+		UI:       uiHandler,
 	})
 	app.server = &http.Server{
 		Handler:           app.withRequestLogging(handler),

@@ -1,0 +1,332 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="2400" height="1380" viewBox="0 0 2400 1380" role="img" aria-labelledby="title description">
+  <title id="title">dmemd：AI 操作系统的长期记忆服务</title>
+  <desc id="description">论文式概念框架图，展示记忆形成、关联组织、巩固与演化、情境召回四个阶段，以及行动反馈闭环和本地可信底座。浏览器、文件活动的系统感知接入和扩展语义关联为规划能力，以虚线标记。各派生层直接保留原子依据，不表示摘要到 Skill 的持久依赖。</desc>
+  <defs>
+    <style>
+      text { font-family: "Noto Sans CJK SC", "WenQuanYi Micro Hei", sans-serif; fill: #26364d; }
+      .headline { font-size: 36px; font-weight: 700; }
+      .stage { font-size: 33px; font-weight: 700; }
+      .english { font-family: "DejaVu Sans", sans-serif; font-size: 19px; fill: #7d899c; }
+      .label { font-size: 25px; font-weight: 700; }
+      .body { font-size: 22px; }
+      .small { font-size: 20px; fill: #6e7b8e; }
+      .tiny { font-size: 18px; fill: #7d899c; }
+      .line { fill: none; stroke: #a0adbf; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+      .planned { stroke-dasharray: 7 7; }
+      .white { fill: #fff; }
+    </style>
+    <filter id="shadow" x="-20%" y="-20%" width="150%" height="155%">
+      <feDropShadow dx="0" dy="5" stdDeviation="8" flood-color="#21344b" flood-opacity="0.055"/>
+    </filter>
+    <filter id="cardShadow" x="-20%" y="-20%" width="150%" height="160%">
+      <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#253c55" flood-opacity="0.07"/>
+    </filter>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff"/>
+      <stop offset="1" stop-color="#fbfcfe"/>
+    </linearGradient>
+    <linearGradient id="memoryGlow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#46b59b"/>
+      <stop offset="1" stop-color="#25917d"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 1 1 L 11 6 L 1 11 Z" fill="#99a6ba"/>
+    </marker>
+    <marker id="blueArrow" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 1 1 L 11 6 L 1 11 Z" fill="#6b92d9"/>
+    </marker>
+    <marker id="greenArrow" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 1 1 L 11 6 L 1 11 Z" fill="#65ae9b"/>
+    </marker>
+    <marker id="purpleArrow" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 1 1 L 11 6 L 1 11 Z" fill="#aa90cd"/>
+    </marker>
+    <symbol id="browser" viewBox="0 0 40 40">
+      <rect x="4" y="6" width="32" height="28" rx="5" fill="none" stroke="currentColor" stroke-width="2.3"/>
+      <path d="M4 15h32" fill="none" stroke="currentColor" stroke-width="2.3"/>
+      <circle cx="10" cy="11" r="1.3" fill="currentColor"/>
+      <circle cx="15" cy="11" r="1.3" fill="currentColor"/>
+      <path d="M11 22h18m-18 6h12" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="folder" viewBox="0 0 40 40">
+      <path d="M4 12a4 4 0 014-4h10l4 5h10a4 4 0 014 4v14a3 3 0 01-3 3H7a3 3 0 01-3-3Z" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linejoin="round"/>
+      <path d="M5 19h29" fill="none" stroke="currentColor" stroke-width="2.3"/>
+    </symbol>
+    <symbol id="chat" viewBox="0 0 40 40">
+      <path d="M9 6h23a4 4 0 014 4v18a4 4 0 01-4 4H17l-9 6v-6a4 4 0 01-4-4V10a4 4 0 014-4Z" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linejoin="round"/>
+      <path d="M12 15h16m-16 7h11" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="result" viewBox="0 0 40 40">
+      <rect x="6" y="5" width="28" height="31" rx="5" fill="none" stroke="currentColor" stroke-width="2.3"/>
+      <path d="m12 15 3 3 6-7m-9 16h15" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="note" viewBox="0 0 40 44">
+      <path d="M8 3h18l8 8v29H8Z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>
+      <path d="M26 3v9h8M14 20h14m-14 7h14m-14 7h9" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+      <path d="M4 12h7M4 21h7M4 30h7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="spark" viewBox="0 0 56 56">
+      <path d="m28 5 6.2 16.8L51 28l-16.8 6.2L28 51l-6.2-16.8L5 28l16.8-6.2Z" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linejoin="round"/>
+      <path d="m45 3 1.8 5.2L52 10l-5.2 1.8L45 17l-1.8-5.2L38 10l5.2-1.8Z" fill="currentColor"/>
+    </symbol>
+    <symbol id="search" viewBox="0 0 40 40">
+      <circle cx="17" cy="17" r="11" fill="none" stroke="currentColor" stroke-width="2.5"/>
+      <path d="m25 25 10 10" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="robot" viewBox="0 0 60 60">
+      <path d="M30 5v8" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+      <circle cx="30" cy="4" r="3.5" fill="currentColor"/>
+      <rect x="8" y="15" width="44" height="33" rx="11" fill="currentColor"/>
+      <path d="M14 45v11l13-9" fill="currentColor"/>
+      <path d="M5 26v12m50-12v12" stroke="currentColor" stroke-width="5" stroke-linecap="round"/>
+      <circle cx="22" cy="29" r="3.3" fill="#fff"/>
+      <circle cx="39" cy="29" r="3.3" fill="#fff"/>
+      <path d="M25 39q5 5 11 0" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="database" viewBox="0 0 48 54">
+      <path d="M6 12v29c0 6 36 6 36 0V12" fill="none" stroke="currentColor" stroke-width="2.5"/>
+      <ellipse cx="24" cy="12" rx="18" ry="7" fill="none" stroke="currentColor" stroke-width="2.5"/>
+      <path d="M6 26c0 7 36 7 36 0M6 38c0 7 36 7 36 0" fill="none" stroke="currentColor" stroke-width="2.5"/>
+    </symbol>
+    <symbol id="layers" viewBox="0 0 48 48">
+      <path d="m4 14 20-9 20 9-20 10Zm0 10 20 10 20-10M4 34l20 10 20-10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="cycle" viewBox="0 0 48 48">
+      <path d="M38 17A16 16 0 0010 12l-5 7m0-11v11h11M10 31a16 16 0 0028 5l5-7m0 11V29H32" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+  </defs>
+
+  <!-- Editorial header. -->
+  <rect width="2400" height="1380" fill="url(#paper)"/>
+  <text x="72" y="44" class="english" style="font-size:17px;letter-spacing:2.8px;fill:#8995a6">THE MEMORY BEHIND SYSTEM INTELLIGENCE</text>
+  <text x="68" y="118" style="font-size:70px;font-weight:800;letter-spacing:-2px">dmemd</text>
+  <path d="M348 69v51" stroke="#d8dfe9" stroke-width="2"/>
+  <text x="380" y="110" class="headline">AI 操作系统的长期记忆服务</text>
+  <text x="74" y="166" style="font-size:25px;fill:#748195">记住经历 · 连接知识 · 沉淀方法 · 支撑思考</text>
+  <rect x="1995" y="77" width="338" height="51" rx="25.5" fill="#f0f3f8"/>
+  <circle cx="2024" cy="102" r="5" fill="#8597b4"/>
+  <text x="2045" y="110" class="english" style="font-size:19px;fill:#6d7e98">Conceptual Framework</text>
+
+  <!-- Large, softly colored research-figure regions, not UML containers. -->
+  <rect x="64" y="210" width="510" height="880" rx="30" fill="#f0f5ff"/>
+  <rect x="596" y="210" width="570" height="880" rx="30" fill="#edf8f3"/>
+  <rect x="1188" y="210" width="570" height="880" rx="30" fill="#f5f1fb"/>
+  <rect x="1780" y="210" width="556" height="880" rx="30" fill="#fff4ec"/>
+
+  <!-- 01: Formation. -->
+  <circle cx="112" cy="266" r="22" fill="#dce8ff"/>
+  <text x="112" y="274" text-anchor="middle" style="font-size:21px;font-weight:700;fill:#4877cc">01</text>
+  <text x="150" y="278" class="stage">记忆形成</text>
+  <text x="96" y="317" class="english">Memory Formation</text>
+
+  <g filter="url(#cardShadow)">
+    <rect x="96" y="351" width="216" height="132" rx="17" fill="#fff" stroke="#b8cdef" stroke-width="1.7" stroke-dasharray="6 6"/>
+    <rect x="330" y="367" width="212" height="132" rx="17" fill="#fff" stroke="#b8cdef" stroke-width="1.7" stroke-dasharray="6 6"/>
+  </g>
+  <use xlink:href="#browser" x="113" y="365" width="36" height="36" style="color:#6e93d5"/>
+  <text x="160" y="392" class="body" style="font-weight:700">浏览器记录</text>
+  <text x="115" y="433" class="small">访问历史</text>
+  <text x="115" y="463" class="small">页面上下文</text>
+  <use xlink:href="#folder" x="347" y="381" width="36" height="36" style="color:#6e93d5"/>
+  <text x="394" y="408" class="body" style="font-weight:700">文件活动</text>
+  <text x="349" y="449" class="small">创建 · 编辑</text>
+  <text x="349" y="479" class="small">移动 · 使用线索</text>
+  <rect x="198" y="481" width="229" height="33" rx="16.5" fill="#e6edfa"/>
+  <text x="312.5" y="504" text-anchor="middle" class="tiny" style="fill:#6c84ad">系统感知 · 规划接入</text>
+
+  <g filter="url(#cardShadow)">
+    <rect x="96" y="539" width="216" height="126" rx="17" fill="#fff"/>
+    <rect x="330" y="539" width="212" height="126" rx="17" fill="#fff"/>
+  </g>
+  <use xlink:href="#chat" x="112" y="553" width="36" height="36" style="color:#6e93d5"/>
+  <text x="160" y="581" class="body" style="font-weight:700">用户对话</text>
+  <text x="115" y="622" class="small">“以后默认</text>
+  <text x="126" y="651" class="small">用中文回答”</text>
+  <use xlink:href="#result" x="347" y="553" width="36" height="36" style="color:#6e93d5"/>
+  <text x="394" y="581" class="body" style="font-weight:700">任务与结果</text>
+  <text x="349" y="622" class="small">目标 · 动作</text>
+  <text x="349" y="651" class="small">完成反馈</text>
+
+  <path d="M204 665v23q0 13 13 13h47q15 0 15 17v12" class="line" stroke="#9cb7e2" marker-end="url(#blueArrow)"/>
+  <path d="M436 665v23q0 13-13 13h-99q-15 0-15 17v12" class="line" stroke="#9cb7e2" marker-end="url(#blueArrow)"/>
+  <circle cx="294" cy="786" r="58" fill="#e1eaff"/>
+  <circle cx="294" cy="786" r="45" fill="#fff" filter="url(#cardShadow)"/>
+  <use xlink:href="#spark" x="267" y="759" width="54" height="54" style="color:#6d8dd5"/>
+  <text x="373" y="778" class="body" style="font-weight:700;fill:#5d79b4">模型理解</text>
+  <text x="373" y="813" class="small">规则约束</text>
+  <path d="M294 844v34" class="line" stroke="#9cb7e2" marker-end="url(#blueArrow)"/>
+
+  <rect x="128" y="901" width="394" height="145" rx="17" fill="#dae5f8"/>
+  <rect x="118" y="892" width="394" height="145" rx="17" fill="#e6edfb"/>
+  <rect x="108" y="883" width="394" height="145" rx="17" fill="#fff" filter="url(#shadow)"/>
+  <use xlink:href="#note" x="126" y="900" width="34" height="38" style="color:#5f85ce"/>
+  <text x="174" y="928" class="label">原子记忆</text>
+  <text x="130" y="972" class="body">默认使用中文回答</text>
+  <text x="130" y="1009" class="small">主体 · 条件 · 时间 · 来源</text>
+
+  <!-- Narrow gutters carry only the three main stage transitions. -->
+  <circle cx="585" cy="697" r="18" fill="#fff" stroke="#e4e9f1"/>
+  <path d="M579 697h11m-4-5 5 5-5 5" fill="none" stroke="#9baac0" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- 02: Association, represented as tangible connected notes. -->
+  <circle cx="644" cy="266" r="22" fill="#d2eee3"/>
+  <text x="644" y="274" text-anchor="middle" style="font-size:21px;font-weight:700;fill:#318c74">02</text>
+  <text x="682" y="278" class="stage">关联组织</text>
+  <text x="628" y="317" class="english">Associative Organization</text>
+  <text x="881" y="383" text-anchor="middle" class="body" style="fill:#5e8d7e">从孤立片段，到有联系的记忆</text>
+
+  <circle cx="882" cy="660" r="140" fill="#e2f2eb"/>
+  <circle cx="882" cy="660" r="103" fill="#d3ebe1" opacity="0.65"/>
+  <path d="M809 638C766 619 731 603 712 561" fill="none" stroke="#72b6a1" stroke-width="3"/>
+  <path d="M960 638c45-27 75-44 82-77" fill="none" stroke="#72b6a1" stroke-width="3"/>
+  <path d="M821 700c-45 16-70 50-82 72" fill="none" stroke="#83b9a8" stroke-width="2.7" stroke-dasharray="7 7"/>
+  <path d="M950 700c47 18 67 48 81 72" fill="none" stroke="#83b9a8" stroke-width="2.7" stroke-dasharray="7 7"/>
+  <path d="M779 517c71-57 124-58 200 0M787 833c74 34 116 34 182 0" fill="none" stroke="#b5d9c9" stroke-width="2" stroke-dasharray="5 8"/>
+
+  <g filter="url(#cardShadow)">
+    <rect x="640" y="466" width="157" height="122" rx="14" fill="#fff"/>
+    <rect x="972" y="466" width="157" height="122" rx="14" fill="#fff"/>
+    <rect x="660" y="766" width="157" height="122" rx="14" fill="#fff"/>
+    <rect x="956" y="766" width="157" height="122" rx="14" fill="#fff"/>
+  </g>
+  <rect x="640" y="466" width="157" height="7" rx="3.5" fill="#b2c7ee"/>
+  <rect x="972" y="466" width="157" height="7" rx="3.5" fill="#c5b5e5"/>
+  <rect x="660" y="766" width="157" height="7" rx="3.5" fill="#e9c5a5"/>
+  <rect x="956" y="766" width="157" height="7" rx="3.5" fill="#9bcdbb"/>
+  <use xlink:href="#note" x="654" y="483" width="28" height="31" style="color:#85a3cf"/>
+  <use xlink:href="#note" x="986" y="483" width="28" height="31" style="color:#aa91ce"/>
+  <use xlink:href="#note" x="674" y="783" width="28" height="31" style="color:#ccab87"/>
+  <use xlink:href="#note" x="970" y="783" width="28" height="31" style="color:#6baa94"/>
+  <text x="658" y="546" class="body" style="font-weight:700">用户偏好</text>
+  <text x="990" y="546" class="body" style="font-weight:700">项目约束</text>
+  <text x="678" y="846" class="body" style="font-weight:700">任务经历</text>
+  <text x="974" y="846" class="body" style="font-weight:700">操作流程</text>
+  <path d="M659 565h82m250 0h104M679 865h82m214 0h98" fill="none" stroke="#e3e9ee" stroke-width="5" stroke-linecap="round"/>
+
+  <rect x="796" y="596" width="172" height="135" rx="18" fill="url(#memoryGlow)" filter="url(#shadow)"/>
+  <use xlink:href="#note" x="815" y="615" width="34" height="38" style="color:#e4fbf2"/>
+  <text x="818" y="691" class="label" style="fill:#fff">新记忆</text>
+  <path d="M819 711h106" stroke="#a0dfcc" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="797" cy="641" r="5" fill="#fff" stroke="#65ae99" stroke-width="2"/>
+  <circle cx="969" cy="641" r="5" fill="#fff" stroke="#65ae99" stroke-width="2"/>
+  <circle cx="817" cy="731" r="5" fill="#fff" stroke="#65ae99" stroke-width="2"/>
+  <circle cx="948" cy="731" r="5" fill="#fff" stroke="#65ae99" stroke-width="2"/>
+
+  <rect x="779" y="425" width="207" height="36" rx="18" fill="#def0e7"/>
+  <text x="882.5" y="451" text-anchor="middle" class="small" style="fill:#568c75">主体 · 主题 · 场景</text>
+  <rect x="628" y="931" width="506" height="112" rx="18" fill="#fff" opacity="0.94"/>
+  <text x="653" y="971" class="label" style="fill:#3b7f6c">自组织记忆网络</text>
+  <text x="653" y="1008" class="small">事实身份与主题组织，扩展语义关联</text>
+
+  <circle cx="1177" cy="697" r="18" fill="#fff" stroke="#e4e9f1"/>
+  <path d="M1171 697h11m-4-5 5 5-5 5" fill="none" stroke="#9baac0" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- 03: Different abstraction levels, with direct atomic dependencies. -->
+  <circle cx="1236" cy="266" r="22" fill="#e8def6"/>
+  <text x="1236" y="274" text-anchor="middle" style="font-size:21px;font-weight:700;fill:#8b64b8">03</text>
+  <text x="1274" y="278" class="stage">巩固与演化</text>
+  <text x="1220" y="317" class="english">Consolidation &amp; Evolution</text>
+  <text x="1473" y="383" text-anchor="middle" class="body" style="fill:#927aab">从具体经历，到可复用的方法</text>
+
+  <path d="M1472 745v-24h-234V490h35M1238 645h35" fill="none" stroke="#b59dcf" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#purpleArrow)"/>
+  <path d="M1258 490h15" fill="none" stroke="#b59dcf" stroke-width="2.5" marker-end="url(#purpleArrow)"/>
+
+  <rect x="1292" y="439" width="420" height="119" rx="18" fill="#e6dcf3"/>
+  <rect x="1280" y="427" width="420" height="119" rx="18" fill="#fff" filter="url(#cardShadow)"/>
+  <rect x="1280" y="427" width="7" height="119" rx="3.5" fill="#a18acb"/>
+  <use xlink:href="#spark" x="1301" y="448" width="42" height="42" style="color:#9b7bc4"/>
+  <text x="1356" y="479" class="label" style="fill:#8262a9">Skill · 可复用方法</text>
+  <text x="1306" y="520" class="small">适用边界 · 步骤 · 失败分支</text>
+
+  <rect x="1292" y="594" width="420" height="119" rx="18" fill="#dfe7f7"/>
+  <rect x="1280" y="582" width="420" height="119" rx="18" fill="#fff" filter="url(#cardShadow)"/>
+  <rect x="1280" y="582" width="7" height="119" rx="3.5" fill="#87a5d9"/>
+  <use xlink:href="#layers" x="1301" y="603" width="42" height="42" style="color:#799acc"/>
+  <text x="1356" y="634" class="label" style="fill:#617da9">摘要 · 画像 · 经验</text>
+  <text x="1306" y="675" class="small">主题认识 · 长期特征 · 报告结果</text>
+
+  <rect x="1232" y="757" width="480" height="119" rx="18" fill="#dcece5"/>
+  <rect x="1220" y="745" width="480" height="119" rx="18" fill="#fff" filter="url(#cardShadow)"/>
+  <rect x="1220" y="745" width="7" height="119" rx="3.5" fill="#79b59e"/>
+  <use xlink:href="#note" x="1241" y="766" width="39" height="43" style="color:#6ba68f"/>
+  <text x="1294" y="796" class="label" style="fill:#528e76">事实 · 偏好 · 事件 · 流程</text>
+  <text x="1246" y="838" class="small">独立更新 · 版本证据 · 直接原子依据</text>
+
+  <rect x="1220" y="931" width="506" height="112" rx="18" fill="#fff" opacity="0.94"/>
+  <use xlink:href="#cycle" x="1241" y="957" width="51" height="51" style="color:#a089bd"/>
+  <text x="1310" y="972" class="small">新事实 · 更正 · 结果反馈</text>
+  <text x="1310" y="1010" class="label" style="fill:#82679e">同步失效 → 后台重建</text>
+
+  <circle cx="1769" cy="697" r="18" fill="#fff" stroke="#e4e9f1"/>
+  <path d="M1763 697h11m-4-5 5 5-5 5" fill="none" stroke="#9baac0" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- 04: Query, multi-signal retrieval, context cards, agent. -->
+  <circle cx="1828" cy="266" r="22" fill="#f9e1d0"/>
+  <text x="1828" y="274" text-anchor="middle" style="font-size:21px;font-weight:700;fill:#bf8257">04</text>
+  <text x="1866" y="278" class="stage">情境召回</text>
+  <text x="1812" y="317" class="english">Contextual Recall</text>
+
+  <path d="M1834 351h450a17 17 0 0117 17v66a17 17 0 01-17 17h-200l-24 20-3-20h-223a17 17 0 01-17-17v-66a17 17 0 0117-17Z" fill="#fff" filter="url(#cardShadow)"/>
+  <use xlink:href="#search" x="1838" y="374" width="33" height="33" style="color:#c99570"/>
+  <text x="1886" y="391" class="label" style="font-size:24px">“这个任务该怎么做？”</text>
+  <text x="1886" y="428" class="small">任务目标 + 当前场景</text>
+
+  <path d="M2058 472v12h-134v27M2058 484h130v27" class="line" stroke="#cdb29d" marker-end="url(#arrow)"/>
+  <path d="M1924 503v8" class="line" marker-end="url(#arrow)"/>
+  <rect x="1818" y="519" width="215" height="97" rx="17" fill="#fff"/>
+  <rect x="2061" y="519" width="240" height="97" rx="17" fill="#fff"/>
+  <text x="1840" y="557" class="label" style="fill:#ad805e">关键词</text>
+  <text x="1840" y="594" class="small">BM25 · 精确线索</text>
+  <text x="2083" y="557" class="label" style="fill:#ad805e">语义</text>
+  <text x="2083" y="594" class="small">Embedding · 含义</text>
+  <path d="M1924 616v21q0 13 14 13h72M2187 616v21q0 13-14 13h-69" class="line" stroke="#d4b9a4"/>
+  <rect x="2015" y="628" width="85" height="45" rx="22.5" fill="#eedaca"/>
+  <text x="2057.5" y="658" text-anchor="middle" style="font-family:'DejaVu Sans',sans-serif;font-size:20px;font-weight:700;fill:#a97c58">RRF</text>
+  <text x="2058" y="723" text-anchor="middle" class="label" style="fill:#ae805e">混合召回 · 关联展开</text>
+  <rect x="1817" y="749" width="484" height="44" rx="22" fill="#f4e6da"/>
+  <text x="2059" y="779" text-anchor="middle" class="small" style="fill:#a18b78">作用域 · 时间 · 状态 · 上下文预算</text>
+  <path d="M2058 803v28" class="line" stroke="#cdb29d" marker-end="url(#arrow)"/>
+
+  <rect x="1857" y="858" width="420" height="140" rx="16" fill="#eedfd4"/>
+  <rect x="1847" y="849" width="420" height="140" rx="16" fill="#f7eae0"/>
+  <rect x="1837" y="840" width="420" height="140" rx="16" fill="#fff" filter="url(#cardShadow)"/>
+  <text x="1860" y="879" class="label">工作上下文</text>
+  <rect x="1861" y="900" width="8" height="8" rx="2" fill="#84a8d3"/>
+  <text x="1882" y="913" class="small">相关事实与适用条件</text>
+  <rect x="1861" y="938" width="8" height="8" rx="2" fill="#ae96cf"/>
+  <text x="1882" y="951" class="small">经验与指导 · 保留来源</text>
+
+  <path d="M2058 998v14" class="line" stroke="#cdb29d" marker-end="url(#arrow)"/>
+  <use xlink:href="#robot" x="1854" y="1014" width="57" height="57" style="color:#c99570"/>
+  <text x="1930" y="1043" class="label">智能中枢 / Agent</text>
+  <text x="1930" y="1074" class="small">理解 · 决策 · 行动</text>
+
+  <!-- The feedback loop is the visual spine below the four stages. -->
+  <path d="M2237 1090v23q0 17-18 17H336q-18 0-18-17v-23" fill="none" stroke="#abb7cb" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+  <rect x="880" y="1105" width="670" height="48" rx="24" fill="#fbfcfe"/>
+  <use xlink:href="#cycle" x="904" y="1115" width="28" height="28" style="color:#8496b4"/>
+  <text x="951" y="1138" class="body" style="fill:#798ba7">行动产生新经历，反馈推动记忆更新</text>
+
+  <!-- A quiet common foundation, rather than more process boxes. -->
+  <rect x="64" y="1183" width="2272" height="112" rx="23" fill="#fff" stroke="#e0e6ef" stroke-width="1.5"/>
+  <use xlink:href="#database" x="96" y="1210" width="50" height="56" style="color:#8a9bb5"/>
+  <text x="166" y="1230" class="label" style="fill:#4f637e">本地可信底座</text>
+  <text x="166" y="1265" class="english" style="font-size:19px">Go · SQLite · Async Workers</text>
+  <path d="M523 1205v67" stroke="#e4e9f1" stroke-width="1.5"/>
+  <text x="572" y="1230" class="label" style="fill:#657994">可追溯</text>
+  <text x="572" y="1265" class="small">来源 · 证据 · 生成依据</text>
+  <text x="917" y="1230" class="label" style="fill:#657994">可演化</text>
+  <text x="917" y="1265" class="small">时间 · 版本 · 冲突审计</text>
+  <text x="1262" y="1230" class="label" style="fill:#657994">可更新</text>
+  <text x="1262" y="1265" class="small">事务提交 · 依赖失效</text>
+  <text x="1607" y="1230" class="label" style="fill:#657994">可遗忘</text>
+  <text x="1607" y="1265" class="small">原子 · 派生 · 索引闭包</text>
+  <text x="1952" y="1230" class="label" style="fill:#657994">权限管控与授权</text>
+  <text x="1952" y="1265" class="small">用户授权 · 作用域 · 访问控制</text>
+
+  <path d="M76 1338h32" stroke="#8b9bb2" stroke-width="2.3"/>
+  <text x="119" y="1345" class="tiny">现有核心路径</text>
+  <path d="M290 1338h32" stroke="#8b9bb2" stroke-width="2.3" stroke-dasharray="5 5"/>
+  <text x="333" y="1345" class="tiny">规划接入 / 扩展关联</text>
+  <text x="2331" y="1345" text-anchor="end" class="tiny">概念架构 · 系统感知按用户授权接入，非默认自动采集 · 经验结果为应用报告</text>
+</svg>

@@ -1,0 +1,21 @@
+.layout { min-height: 100vh; }
+.workspace { min-width: 0; }
+.sider { height: 100vh; position: sticky !important; top: 0; border-inline-end: 1px solid var(--workspace-border); }
+.sider :global(.ant-layout-sider-children) { display: flex; flex-direction: column; }
+.brand { height: 80px; display: flex; align-items: center; gap: 12px; padding: 0 20px; overflow: hidden; white-space: nowrap; }
+.logoMark { width: 32px; height: 32px; border-radius: 10px; display: inline-flex; align-items: center; justify-content: center; background: #5264d9; color: #fff; font-size: 22px; font-weight: 700; flex: none; }
+.brandText { font-size: 17px; font-weight: 650; color: var(--workspace-text); }
+.navigation { flex: 1; overflow-y: auto; overflow-x: hidden; }
+.navigation :global(.ant-menu) { border-inline-end: 0 !important; }
+.siderBottom { display: flex; flex-direction: column; gap: 8px; padding: 16px 12px; border-top: 1px solid var(--workspace-border); }
+.siderBottom button { text-align: start; }
+.header { display: flex; align-items: center; gap: 12px; padding: 0 28px; border-bottom: 1px solid var(--workspace-border); position: sticky; top: 0; z-index: 10; height: 64px; line-height: 1.5; }
+.headerHint { margin-inline-start: auto; font-size: 12px; white-space: nowrap; }
+.content { padding: 28px 32px 8px; }
+.page { max-width: 1440px; margin: 0 auto; width: 100%; }
+.footer { margin: 24px auto 0; padding: 12px 0 24px; font-size: 12px; opacity: .45; text-align: center; }
+@media (max-width: 768px) {
+  .content { padding: 16px 12px 8px; }
+  .header { padding: 0 12px; }
+  .headerHint { display: none; }
+}

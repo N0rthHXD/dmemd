@@ -31,3 +31,9 @@ dmemd.lock
 *.backup
 /backups/
 /bench-results/
+
+# Frontend dependencies and generated embed output
+/web/node_modules/
+/web/.vite/
+/web/.schema.check.ts
+/internal/webui/dist/

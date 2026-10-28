@@ -677,5 +677,5 @@ DMEMD_EVAL_API_KEY=<optional-key> \
 go test -count=1 -run TestLiveModelQuality -v ./tests/quality
 ```
 
-真实模型评估和容量实测分开记录在 `docs/quality.md`。未执行时不得把离线回放结果当作真实
-语义质量通过；模型版本、提示词版本和 token/耗时需要随实际报告记录。
+真实模型评估和容量实测分别执行，不能互相替代。未执行时不得把离线回放结果当作真实语义
+质量通过；模型版本、提示词版本和 token/耗时需要随实际执行结果记录。

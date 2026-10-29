@@ -1,11 +1,8 @@
-// Package artifact owns derived memory layers: immutable artifact revisions,
-// their direct atomic-memory dependencies, current active state and the derived
-// full-text index.
-//
-// Artifacts never depend on other artifacts in the first release. Atomic
-// memories and saved experience runs are the only leaves; an artifact revision
-// records the exact memory versions it was generated from so invalidation and
-// permanent deletion can enumerate the affected set before cascades run.
+// Package artifact owns derived memories and their immutable revisions. Derived
+// memories are generated level by level from observations, canonical memories,
+// lower derived layers or experience inputs; typed dependencies record the
+// exact inputs of every revision so invalidation can propagate through the
+// graph rather than only one level.
 package artifact
 
 import (
@@ -13,26 +10,84 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/N0rthHXD/dmemd/internal/governance/task"
 )
 
+// Layer is the aggregation level of one derived memory.
+type Layer string
+
+const (
+	LayerL1 Layer = "l1"
+	LayerL2 Layer = "l2"
+	LayerL3 Layer = "l3"
+	LayerL4 Layer = "l4"
+)
+
+// Known reports whether layer belongs to the fixed aggregation hierarchy.
+func (l Layer) Known() bool {
+	switch l {
+	case LayerL1, LayerL2, LayerL3, LayerL4:
+		return true
+	default:
+		return false
+	}
+}
+
 // Kind is one derived layer object.
 type Kind string
 
 const (
+	KindLocalSummary   Kind = "local_summary"
 	KindTopicSummary   Kind = "topic_summary"
 	KindScopeSummary   Kind = "scope_summary"
 	KindProfile        Kind = "profile"
 	KindExperienceCase Kind = "experience_case"
 	KindSkill          Kind = "skill"
+	KindGuidance       Kind = "guidance"
 )
+
+// LayerForKind maps derived kinds onto the fixed aggregation hierarchy. Layer is
+// the scheduling and input-selection boundary; Kind remains the content shape.
+func LayerForKind(kind Kind) Layer {
+	switch kind {
+	case KindLocalSummary:
+		return LayerL1
+	case KindExperienceCase, KindSkill, KindGuidance:
+		return LayerL4
+	case KindScopeSummary:
+		return LayerL3
+	case KindProfile, KindTopicSummary:
+		return LayerL2
+	default:
+		return ""
+	}
+}
+
+// DefaultKindForLayer returns the canonical content kind of one layer when no
+// more specific kind is supplied by code.
+func DefaultKindForLayer(layer Layer) Kind {
+	switch layer {
+	case LayerL1:
+		return KindLocalSummary
+	case LayerL2:
+		return KindTopicSummary
+	case LayerL3:
+		return KindScopeSummary
+	case LayerL4:
+		return KindGuidance
+	default:
+		return ""
+	}
+}
 
 // Known reports whether kind belongs to the fixed first-release set.
 func (k Kind) Known() bool {
 	switch k {
-	case KindTopicSummary, KindScopeSummary, KindProfile, KindExperienceCase, KindSkill:
+	case KindLocalSummary, KindTopicSummary, KindScopeSummary, KindProfile,
+		KindExperienceCase, KindSkill, KindGuidance:
 		return true
 	default:
 		return false
@@ -66,10 +121,11 @@ var ErrNotFound = errors.New("artifact not found")
 // the caller before this error is produced.
 var ErrInvalidInput = errors.New("invalid artifact input")
 
-// Artifact is one current derived object. CurrentVersion is zero only when no
-// usable version has ever been generated; history is still retained.
-type Artifact struct {
+// DerivedMemory is one current derived object. CurrentVersion is zero only when
+// no usable version has ever been generated; history is still retained.
+type DerivedMemory struct {
 	ID             string    `json:"id"`
+	Layer          Layer     `json:"layer"`
 	Kind           Kind      `json:"kind"`
 	TargetKey      string    `json:"target_key"`
 	ScopeKey       string    `json:"scope_key"`
@@ -78,6 +134,35 @@ type Artifact struct {
 	State          State     `json:"state"`
 	ReasonCode     string    `json:"reason_code,omitempty"`
 	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// DependencyType identifies the layer of one derived-memory input.
+type DependencyType string
+
+const (
+	DependencyObservation DependencyType = "observation"
+	DependencyMemory      DependencyType = "memory"
+	DependencyDerived     DependencyType = "derived"
+	DependencyExperience  DependencyType = "experience"
+)
+
+// Known reports whether type belongs to the fixed dependency vocabulary.
+func (t DependencyType) Known() bool {
+	switch t {
+	case DependencyObservation, DependencyMemory, DependencyDerived, DependencyExperience:
+		return true
+	default:
+		return false
+	}
+}
+
+// DependencyRef identifies one exact input revision. Version zero means the
+// dependency is not versioned (for example an observation or experience run).
+type DependencyRef struct {
+	Type     DependencyType `json:"type"`
+	ID       string         `json:"id"`
+	Version  int            `json:"version"`
+	Required bool           `json:"required"`
 }
 
 // MemoryRef identifies one exact atomic-memory revision.
@@ -92,114 +177,162 @@ type RunRef struct {
 	ExperienceID string `json:"experience_id"`
 }
 
-// Revision is one immutable derived snapshot. Structured kinds (experience
-// cases and skills) keep their fields in Payload; all kinds also expose
-// Title/Content as the readable text used by recall and rendering.
+// Revision is one immutable derived snapshot. Structured kinds keep their
+// fields in Payload; all kinds expose Title/Content as the readable text used by
+// recall and rendering. Dependencies are stored separately as typed refs.
 type Revision struct {
-	ArtifactID       string          `json:"artifact_id"`
-	Version          int             `json:"version"`
-	Title            string          `json:"title"`
-	Content          string          `json:"content"`
-	Payload          json.RawMessage `json:"payload,omitempty"`
-	ContentHash      string          `json:"content_hash"`
-	Generator        string          `json:"generator"`
-	ProtocolVersion  string          `json:"protocol_version"`
-	TaxonomyVersion  string          `json:"taxonomy_version"`
-	GeneratorVersion string          `json:"generator_version"`
-	RunID            string          `json:"run_id"`
-	// Provenance is an immutable serialized copy, independent of dependency
-	// tables so integrity checking can detect missing/cascaded edges.
-	Provenance json.RawMessage `json:"provenance"`
-	ReasonCode string          `json:"reason_code,omitempty"`
-	Truncated  bool            `json:"truncated"`
-	MemoryRefs []MemoryRef     `json:"memory_refs"`
-	RunRefs    []RunRef        `json:"run_refs"`
-	CreatedAt  time.Time       `json:"created_at"`
+	ArtifactID      string          `json:"artifact_id"`
+	Version         int             `json:"version"`
+	Title           string          `json:"title"`
+	Content         string          `json:"content"`
+	Payload         json.RawMessage `json:"payload,omitempty"`
+	ContentHash     string          `json:"content_hash"`
+	Generator       string          `json:"generator"`
+	ProtocolVersion string          `json:"protocol_version"`
+	Truncated       bool            `json:"truncated"`
+	CreatedAt       time.Time       `json:"created_at"`
 }
 
-// Detail is one artifact plus its selected revision. Revision is nil when the
-// artifact has never produced a usable version.
+// Detail is one artifact plus its selected revision and that revision's exact
+// typed dependencies. Revision is nil when the artifact has never produced a
+// usable version.
 type Detail struct {
-	Artifact Artifact  `json:"artifact"`
-	Revision *Revision `json:"revision,omitempty"`
+	DerivedMemory DerivedMemory   `json:"artifact"`
+	Revision      *Revision       `json:"revision,omitempty"`
+	Dependencies  []DependencyRef `json:"dependencies,omitempty"`
 }
 
-// Target is the precise derived-object target. ScopeKey must be non-empty for
-// summaries and profiles; unknown scope values never become global conclusions.
-// ExperienceID identifies one feedback run and is only used for experience
-// cases.
+// Target is one aggregation destination. Bucket, topic and guidance key are
+// generated by code; the model never chooses a layer or target.
 type Target struct {
-	Kind         Kind
-	ScopeKey     string
-	Topic        string
-	ExperienceID string
+	Layer    Layer  `json:"layer"`
+	Kind     Kind   `json:"kind"`
+	ScopeKey string `json:"scope_key"`
+	Bucket   string `json:"bucket,omitempty"`
+	Topic    string `json:"topic,omitempty"`
+	Key      string `json:"key,omitempty"`
+
+	// ExperienceID identifies one feedback run for the L4 case target. It is
+	// never supplied by an aggregation model.
+	ExperienceID string `json:"experience_id,omitempty"`
 }
 
-// TargetKey returns the canonical governance-task and artifact target key.
+// LayerOrDefault returns the explicit layer, or the canonical layer of the
+// target kind when callers construct a target from an artifact row.
+func (t Target) LayerOrDefault() Layer {
+	if t.Layer.Known() {
+		return t.Layer
+	}
+	return LayerForKind(t.Kind)
+}
+
+// TargetKey returns the canonical governance-task and artifact target key. The
+// layer is authoritative when supplied; otherwise it is inferred from Kind.
 func (t Target) TargetKey() string {
-	switch t.Kind {
-	case KindScopeSummary:
-		return task.ScopeSummaryKey(t.ScopeKey)
-	case KindProfile:
-		return task.ProfileKey(t.ScopeKey)
-	case KindSkill:
-		return task.SkillKey(t.ScopeKey, t.Topic)
-	case KindExperienceCase:
-		return task.ExperienceKey(t.ExperienceID)
+	scopeKey := normalizeScope(t.ScopeKey)
+	switch t.LayerOrDefault() {
+	case LayerL1:
+		bucket := strings.TrimSpace(t.Bucket)
+		if bucket == "" {
+			bucket = strings.TrimSpace(t.Key)
+		}
+		return task.L1TargetKey(scopeKey, bucket)
+	case LayerL2:
+		if t.Kind == KindProfile && strings.TrimSpace(t.Topic) == "" && strings.TrimSpace(t.Key) == "" {
+			return task.L2TargetKey(scopeKey, "profile")
+		}
+		domain := strings.TrimSpace(t.Topic)
+		if domain == "" {
+			domain = strings.TrimSpace(t.Key)
+		}
+		return task.L2TargetKey(scopeKey, domain)
+	case LayerL3:
+		return task.L3TargetKey(scopeKey)
+	case LayerL4:
+		switch t.Kind {
+		case KindExperienceCase:
+			return task.ExperienceKey(t.ExperienceID)
+		case KindSkill:
+			key := strings.TrimSpace(t.Key)
+			if key == "" {
+				key = strings.TrimSpace(t.Topic)
+			}
+			return task.SkillKey(scopeKey, key)
+		default:
+			key := strings.TrimSpace(t.Key)
+			if key == "" {
+				key = strings.TrimSpace(t.Topic)
+			}
+			return task.DerivedKey(LayerL4, scopeKey, key)
+		}
 	default:
-		return task.AggregateKey(t.ScopeKey, t.Topic)
+		return task.DerivedKey(t.Layer, scopeKey, strings.TrimSpace(t.Key))
 	}
 }
 
-// ParseTarget decodes one canonical target given its kind. An experience target
-// carries only the run identifier; its scope is stored on the artifact itself.
+// ParseTargetKey decodes one canonical target key without requiring the caller
+// to know the content kind first.
+func ParseTargetKey(targetKey string) (Target, error) {
+	if scopeKey, bucket, ok := task.ParseL1TargetKey(targetKey); ok {
+		return Target{Layer: LayerL1, Kind: KindLocalSummary, ScopeKey: scopeKey, Bucket: bucket}, nil
+	}
+	if scopeKey, domain, ok := task.ParseL2TargetKey(targetKey); ok {
+		return Target{Layer: LayerL2, Kind: KindTopicSummary, ScopeKey: scopeKey, Topic: domain}, nil
+	}
+	if scopeKey, ok := task.ParseL3TargetKey(targetKey); ok {
+		return Target{Layer: LayerL3, Kind: KindScopeSummary, ScopeKey: scopeKey}, nil
+	}
+	if scopeKey, key, ok := task.ParseDerivedKey(LayerL4, targetKey); ok {
+		return Target{Layer: LayerL4, Kind: KindGuidance, ScopeKey: scopeKey, Key: key}, nil
+	}
+	if scopeKey, topic, ok := task.ParseSkillKey(targetKey); ok {
+		return Target{Layer: LayerL4, Kind: KindSkill, ScopeKey: scopeKey, Topic: topic}, nil
+	}
+	if experienceID, ok := task.ParseExperienceKey(targetKey); ok {
+		return Target{Layer: LayerL4, Kind: KindExperienceCase, ExperienceID: experienceID}, nil
+	}
+	return Target{}, fmt.Errorf("%w: target key %q", ErrInvalidInput, targetKey)
+}
+
+// ParseTarget decodes one canonical target given its kind. A key produced by
+// TargetKey is accepted regardless of whether the kind was known before the
+// layer split; the stored kind always wins.
 func ParseTarget(kind Kind, targetKey string) (Target, error) {
-	switch kind {
-	case KindTopicSummary:
-		scopeKey, topic, ok := task.ParseAggregateKey(targetKey)
-		if !ok {
-			return Target{}, fmt.Errorf("%w: aggregate target %q", ErrInvalidInput, targetKey)
-		}
-		return Target{Kind: kind, ScopeKey: scopeKey, Topic: topic}, nil
-	case KindScopeSummary:
-		scopeKey, ok := task.ParseScopeSummaryKey(targetKey)
-		if !ok {
-			return Target{}, fmt.Errorf("%w: scope summary target %q", ErrInvalidInput, targetKey)
-		}
-		return Target{Kind: kind, ScopeKey: scopeKey}, nil
-	case KindProfile:
-		scopeKey, ok := task.ParseProfileKey(targetKey)
-		if !ok {
-			return Target{}, fmt.Errorf("%w: profile target %q", ErrInvalidInput, targetKey)
-		}
-		return Target{Kind: kind, ScopeKey: scopeKey}, nil
-	case KindSkill:
-		scopeKey, topic, ok := task.ParseSkillKey(targetKey)
-		if !ok {
-			return Target{}, fmt.Errorf("%w: skill target %q", ErrInvalidInput, targetKey)
-		}
-		return Target{Kind: kind, ScopeKey: scopeKey, Topic: topic}, nil
-	case KindExperienceCase:
+	parsed, err := ParseTargetKey(targetKey)
+	if err != nil {
+		return Target{}, fmt.Errorf("%w: kind %q target %q", ErrInvalidInput, kind, targetKey)
+	}
+	kindLayer := LayerForKind(kind)
+	if kindLayer != "" && parsed.Layer != "" && kindLayer != parsed.Layer {
+		return Target{}, fmt.Errorf("%w: kind %q does not belong to target %q", ErrInvalidInput, kind, targetKey)
+	}
+	parsed.Kind = kind
+	if kind == KindExperienceCase {
 		experienceID, ok := task.ParseExperienceKey(targetKey)
 		if !ok {
 			return Target{}, fmt.Errorf("%w: experience target %q", ErrInvalidInput, targetKey)
 		}
-		return Target{Kind: kind, ExperienceID: experienceID}, nil
-	default:
-		return Target{}, fmt.Errorf("%w: kind %q", ErrInvalidInput, kind)
+		parsed.ExperienceID = experienceID
 	}
+	return parsed, nil
 }
 
 // TargetForArtifact reconstructs the target of one persisted artifact. It is
 // used by synchronous invalidation, where only the current artifact row is
 // available.
-func TargetForArtifact(item Artifact) (Target, error) {
+func TargetForArtifact(item DerivedMemory) (Target, error) {
 	target, err := ParseTarget(item.Kind, item.TargetKey)
 	if err != nil {
 		return Target{}, err
 	}
 	if target.ScopeKey == "" {
 		target.ScopeKey = item.ScopeKey
+	}
+	if target.Layer == "" {
+		target.Layer = item.Layer
+	}
+	if target.Layer == "" {
+		target.Layer = LayerForKind(item.Kind)
 	}
 	if item.Kind != KindExperienceCase && target.Topic == "" {
 		target.Topic = item.Topic
@@ -209,7 +342,7 @@ func TargetForArtifact(item Artifact) (Target, error) {
 
 // ExperienceTarget returns the case target for one recorded feedback run.
 func ExperienceTarget(experienceID string) Target {
-	return Target{Kind: KindExperienceCase, ExperienceID: experienceID}
+	return Target{Layer: LayerL4, Kind: KindExperienceCase, ExperienceID: experienceID}
 }
 
 // SkillTargets returns the per-topic skill targets for one scope. A procedure
@@ -222,32 +355,12 @@ func SkillTargets(scopeKey string, topics []string) []Target {
 	}
 	normalized := normalizeTopics(topics)
 	if len(normalized) == 0 {
-		return []Target{{Kind: KindSkill, ScopeKey: scopeKey}}
+		return []Target{{Layer: LayerL4, Kind: KindSkill, ScopeKey: scopeKey}}
 	}
 	result := make([]Target, 0, len(normalized))
 	for _, topic := range normalized {
-		result = append(result, Target{Kind: KindSkill, ScopeKey: scopeKey, Topic: topic})
+		result = append(result, Target{Layer: LayerL4, Kind: KindSkill, ScopeKey: scopeKey, Topic: topic})
 	}
-	return result
-}
-
-// AggregateTargets returns the summary targets for one atomic memory's scope
-// and canonical topics (including parents), plus the scope overview and profile.
-// The scope overview and profile are keyed only by scope and derived type.
-func AggregateTargets(scopeKey string, topics []string) []Target {
-	scopeKey = normalizeScope(scopeKey)
-	if scopeKey == "" {
-		return nil
-	}
-	normalized := normalizeTopics(topics)
-	result := make([]Target, 0, len(normalized)+2)
-	for _, topic := range normalized {
-		result = append(result, Target{Kind: KindTopicSummary, ScopeKey: scopeKey, Topic: topic})
-	}
-	result = append(result,
-		Target{Kind: KindScopeSummary, ScopeKey: scopeKey},
-		Target{Kind: KindProfile, ScopeKey: scopeKey},
-	)
 	return result
 }
 
@@ -259,7 +372,6 @@ type MemorySnapshot struct {
 	Version  int
 	Kind     string
 	ScopeKey string
-	Topics   []string
 	State    string
 }
 
@@ -274,60 +386,6 @@ type MemoryChange struct {
 	// Reason distinguishes changes that do not advance the memory version, such
 	// as conflict adjudication, so the target revision still moves.
 	Reason string
-}
-
-// MemoryInput is one bounded atomic input selected for aggregation.
-type MemoryInput struct {
-	ID         string          `json:"id"`
-	Version    int             `json:"version"`
-	Kind       string          `json:"kind"`
-	Phase      string          `json:"phase"`
-	Durability string          `json:"durability"`
-	Title      string          `json:"title"`
-	Content    string          `json:"content"`
-	ScopeKey   string          `json:"scope_key,omitempty"`
-	Topics     []string        `json:"topics"`
-	Procedure  json.RawMessage `json:"procedure,omitempty"`
-	Qualifiers json.RawMessage `json:"qualifiers,omitempty"`
-	ObservedAt time.Time       `json:"observed_at"`
-	UpdatedAt  time.Time       `json:"updated_at"`
-}
-
-// AggregateRequest is the complete bounded input for one summary or profile
-// model call. It contains only memory text, never source payloads.
-type AggregateRequest struct {
-	Kind      Kind          `json:"kind"`
-	ScopeKey  string        `json:"scope_key"`
-	Topic     string        `json:"topic,omitempty"`
-	Truncated bool          `json:"truncated"`
-	Eligible  int           `json:"eligible"`
-	Memories  []MemoryInput `json:"memories"`
-}
-
-// Citation is one service-validated mapping from a generated section or point
-// to an exact input memory revision. It explains support; it is not proof of
-// semantic completeness.
-type Citation struct {
-	Section  string `json:"section,omitempty"`
-	Point    string `json:"point"`
-	MemoryID string `json:"memory_id"`
-	Version  int    `json:"version"`
-}
-
-// OmittedInput records an input the model explicitly reported as not covered.
-type OmittedInput struct {
-	MemoryID string `json:"memory_id"`
-	Version  int    `json:"version"`
-	Reason   string `json:"reason,omitempty"`
-}
-
-// AggregateResult is the tolerant parsed model output. Empty content is not
-// usable; an empty title receives a fixed default in the handler.
-type AggregateResult struct {
-	Title         string         `json:"title"`
-	Content       string         `json:"content"`
-	Citations     []Citation     `json:"citations,omitempty"`
-	OmittedInputs []OmittedInput `json:"omitted_inputs,omitempty"`
 }
 
 // DocumentInput is the current artifact text used to build the derived FTS
@@ -355,27 +413,27 @@ type DocumentBuilder interface {
 }
 
 // SearchQuery is one compiled derived FTS query. Expression is produced only by
-// retrieval.Compile, never from raw user text.
+// retrieval.Compile, never from raw user text. Layers and Kinds narrow the same
+// fixed derived hierarchy; States defaults to active. Terms is a sanitized,
+// tokenized fallback used only for explicitly requested stale history whose FTS
+// document is no longer current.
 type SearchQuery struct {
 	Expression string
+	Terms      []string
 	ScopeKey   string
 	Kinds      []Kind
-	AsOf       time.Time
+	Layers     []Layer
+	States     []State
 	Limit      int
 }
 
-// SearchHit is one active artifact with its current revision.
+// SearchHit is one current derived artifact revision. Dependencies are the
+// exact typed inputs of this revision and provide bounded drill-down references.
 type SearchHit struct {
-	Artifact Artifact `json:"artifact"`
-	Revision Revision `json:"revision"`
-	Score    float64  `json:"score"`
-}
-
-// GroupTarget is one distinct (scope, topic) group discovered by reconciliation
-// plus its stable keyset cursor.
-type GroupTarget struct {
-	Cursor string
-	Target Target
+	DerivedMemory DerivedMemory   `json:"artifact"`
+	Revision      Revision        `json:"revision"`
+	Dependencies  []DependencyRef `json:"dependencies,omitempty"`
+	Score         float64         `json:"score"`
 }
 
 // TargetStatus is the externally visible state of one generation target. It
@@ -421,8 +479,8 @@ type ListQuery struct {
 
 // ListPage is one bounded artifact-management page.
 type ListPage struct {
-	Items      []Artifact `json:"items"`
-	NextCursor string     `json:"next_cursor,omitempty"`
+	Items      []DerivedMemory `json:"items"`
+	NextCursor string          `json:"next_cursor,omitempty"`
 }
 
 // TargetEvaluation records a target that was evaluated but produced no usable
@@ -449,24 +507,24 @@ type TargetQuery struct {
 }
 
 // TargetRecord is one generation target with its artifact, latest job and last
-// no-artifact evaluation. Artifact is nil when no content object exists yet.
+// no-artifact evaluation. DerivedMemory is nil when no content object exists yet.
 type TargetRecord struct {
-	Kind        Kind
-	TargetKey   string
-	ScopeKey    string
-	Topic       string
-	Status      TargetStatus
-	ReasonCode  string
-	Artifact    *Artifact
-	Job         *task.Job
-	EvaluatedAt *time.Time
-	UpdatedAt   time.Time
+	Kind          Kind
+	TargetKey     string
+	ScopeKey      string
+	Topic         string
+	Status        TargetStatus
+	ReasonCode    string
+	DerivedMemory *DerivedMemory
+	Job           *task.Job
+	EvaluatedAt   *time.Time
+	UpdatedAt     time.Time
 }
 
 // HasUsableVersion reports whether the target has produced at least one
 // immutable revision, even if the current state is stale or disabled.
 func (r TargetRecord) HasUsableVersion() bool {
-	return r.Artifact != nil && r.Artifact.CurrentVersion > 0
+	return r.DerivedMemory != nil && r.DerivedMemory.CurrentVersion > 0
 }
 
 // TargetPage is one bounded generation-target page.
@@ -480,25 +538,19 @@ func TargetCursor(targetKey string) string {
 	return targetKey
 }
 
-// CommitInput is one successful, usable generated version.
+// CommitInput is one successful, usable generated version. Dependencies are the
+// exact typed inputs of this revision; the service never derives them from
+// model output.
 type CommitInput struct {
-	Kind             Kind
-	TargetKey        string
-	ScopeKey         string
-	Topic            string
-	ExperienceID     string
-	Title            string
-	Content          string
-	Payload          json.RawMessage
-	ReasonCode       string
-	Truncated        bool
-	Generator        string
-	ProtocolVersion  string
-	TaxonomyVersion  string
-	GeneratorVersion string
-	RunID            string
-	Memories         []MemoryInput
-	Runs             []RunRef
+	Target          Target
+	Title           string
+	Content         string
+	Payload         json.RawMessage
+	ReasonCode      string
+	Truncated       bool
+	Generator       string
+	ProtocolVersion string
+	Dependencies    []DependencyRef
 }
 
 // ExperienceInput is one bounded application result supplied as evidence for an
@@ -517,42 +569,30 @@ type ExperienceInput struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
-// ExperienceRequest is the bounded input for one experience-case model call.
+// ExperienceRequest is the bounded input for one L4 experience-case model
+// call. The service sends only readable lower-layer content; the run itself is
+// an application report, never a verified execution record.
 type ExperienceRequest struct {
 	Run       ExperienceInput `json:"run"`
 	ScopeKey  string          `json:"scope_key,omitempty"`
-	Skill     *SkillContext   `json:"skill,omitempty"`
-	Memories  []MemoryInput   `json:"memories"`
+	Inputs    []InputRef      `json:"inputs"`
 	Truncated bool            `json:"truncated"`
 }
 
-// SkillContext is the exact skill text a run reported against, when it still
-// exists. It is context, not evidence.
-type SkillContext struct {
-	ID      string `json:"id"`
-	Version int    `json:"version"`
-	Title   string `json:"title"`
-	Content string `json:"content"`
-}
-
-// ExperienceResult is the tolerant parsed case output. The service attaches the
-// real run and memory references and preserves the application-reported
-// outcome; model-supplied references and verification claims are ignored.
+// ExperienceResult is the generated case body. The service owns the title,
+// application-reported outcome, verification statement, dependencies and
+// revision metadata; the model cannot supply any of them.
 type ExperienceResult struct {
-	Problem       string   `json:"problem"`
-	Preconditions []string `json:"preconditions"`
-	Actions       []string `json:"actions"`
-	Lessons       []string `json:"lessons"`
-	FailureModes  []string `json:"failure_modes"`
-	Content       string   `json:"content"`
+	Content string `json:"content"`
 }
 
 // Reader is the artifact read capability backed by the read pool.
 type Reader interface {
-	GetArtifact(ctx context.Context, id string) (Artifact, error)
-	GetArtifactByTarget(ctx context.Context, kind Kind, targetKey string) (Artifact, error)
+	GetArtifact(ctx context.Context, id string) (DerivedMemory, error)
+	GetArtifactByTarget(ctx context.Context, kind Kind, targetKey string) (DerivedMemory, error)
 	GetArtifactRevision(ctx context.Context, id string, version int) (Revision, error)
 	ListArtifactRevisions(ctx context.Context, id string, limit int) ([]Revision, error)
+	ListArtifactDependencies(ctx context.Context, id string, version int) ([]DependencyRef, error)
 	ListArtifacts(ctx context.Context, query ListQuery) (ListPage, error)
 }
 
@@ -571,8 +611,6 @@ type Searcher interface {
 type ReconcileReader interface {
 	ListStaleTargets(ctx context.Context, after string, limit int) ([]Target, error)
 	ListExpiredTargets(ctx context.Context, asOf time.Time, after string, limit int) ([]Target, error)
-	ListAggregationGroups(ctx context.Context, after string, limit int) ([]GroupTarget, error)
-	ListSkillGroups(ctx context.Context, after string, limit int) ([]GroupTarget, error)
 }
 
 // Backend is the read capability set consumed by Service.
@@ -597,28 +635,24 @@ type ServiceAPI interface {
 // completion commit together.
 type Tx interface {
 	task.Tx
+	DependencyTx
 
-	GetArtifact(ctx context.Context, id string) (Artifact, error)
-	GetArtifactByTarget(ctx context.Context, kind Kind, targetKey string) (Artifact, error)
+	GetArtifact(ctx context.Context, id string) (DerivedMemory, error)
+	GetArtifactByTarget(ctx context.Context, kind Kind, targetKey string) (DerivedMemory, error)
 	GetArtifactRevision(ctx context.Context, id string, version int) (Revision, error)
-	CreateArtifact(ctx context.Context, item Artifact) error
-	UpdateArtifact(ctx context.Context, item Artifact) error
+	CreateArtifact(ctx context.Context, item DerivedMemory) error
+	UpdateArtifact(ctx context.Context, item DerivedMemory) error
 	InsertArtifactRevision(ctx context.Context, revision Revision) error
-	LinkArtifactMemoryDependencies(ctx context.Context, artifactID string, version int, refs []MemoryRef) error
-	LinkArtifactRunDependencies(ctx context.Context, artifactID string, version int, refs []RunRef) error
 	UpsertArtifactSearchDocument(ctx context.Context, document SearchDocument) error
 	DeleteArtifactSearchDocument(ctx context.Context, artifactID string) error
 
-	ListArtifactsForMemory(ctx context.Context, memoryID string) ([]Artifact, error)
-	ListAllArtifactsForMemory(ctx context.Context, memoryID string) ([]Artifact, error)
-	ListArtifactsForRun(ctx context.Context, experienceID string) ([]Artifact, error)
-	ListAllArtifactsForRun(ctx context.Context, experienceID string) ([]Artifact, error)
-	ListArtifactsByScope(ctx context.Context, kind Kind, scopeKey string) ([]Artifact, error)
+	ListArtifactsForMemory(ctx context.Context, memoryID string) ([]DerivedMemory, error)
+	ListAllArtifactsForMemory(ctx context.Context, memoryID string) ([]DerivedMemory, error)
+	ListArtifactsForRun(ctx context.Context, experienceID string) ([]DerivedMemory, error)
+	ListAllArtifactsForRun(ctx context.Context, experienceID string) ([]DerivedMemory, error)
+	ListArtifactsByScope(ctx context.Context, kind Kind, scopeKey string) ([]DerivedMemory, error)
 	DeleteArtifactsForMemory(ctx context.Context, memoryID string) error
 	DeleteArtifactsForRun(ctx context.Context, experienceID string) error
-	ListAggregationInputs(ctx context.Context, target Target, asOf time.Time, limit int) ([]MemoryInput, bool, error)
-	CountAggregationInputs(ctx context.Context, target Target, asOf time.Time) (int, error)
-	HasProcedureInputs(ctx context.Context, scopeKey string, asOf time.Time) (bool, error)
 	UpsertTargetEvaluation(ctx context.Context, evaluation TargetEvaluation) error
 	DeleteTargetEvaluation(ctx context.Context, kind Kind, targetKey string) error
 }

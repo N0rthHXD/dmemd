@@ -1,76 +1,34 @@
--- Temporal fact groups, relations, conflicts and the single-row semantic
--- catalog generation. The snapshot tables already carry the valid-time and
--- assertion columns; this migration adds the graph and audit structures.
-
-CREATE TABLE memory_fact_groups (
-    id             TEXT NOT NULL PRIMARY KEY,
-    scope_key      TEXT NOT NULL DEFAULT '',
-    subject        TEXT NOT NULL DEFAULT '',
-    predicate      TEXT NOT NULL DEFAULT '',
-    scope          TEXT NOT NULL DEFAULT '',
-    conditions_json TEXT NOT NULL DEFAULT '[]',
-    subject_key    TEXT NOT NULL DEFAULT '',
-    predicate_key  TEXT NOT NULL DEFAULT '',
-    scene_key      TEXT NOT NULL DEFAULT '',
-    conditions_key TEXT NOT NULL DEFAULT '',
-    cardinality    TEXT NOT NULL DEFAULT 'unknown'
-                   CHECK (cardinality IN ('single', 'multiple', 'unknown')),
-    generation     INTEGER NOT NULL DEFAULT 1 CHECK (generation >= 1),
-    created_at     TEXT NOT NULL,
-    updated_at     TEXT NOT NULL
-);
-
-CREATE INDEX idx_fact_groups_subject_predicate
-    ON memory_fact_groups(scope_key, subject_key, predicate_key);
-
-CREATE UNIQUE INDEX idx_fact_groups_identity
-    ON memory_fact_groups(scope_key, subject_key, predicate_key, scene_key, conditions_key);
+-- Typed governed relations and conflict audit. Relations connect observations or
+-- canonical memories; the service validates endpoints before insert. A relation
+-- is a persisted semantic fact, never a database action.
 
 CREATE TABLE memory_relations (
-    id             TEXT NOT NULL PRIMARY KEY,
-    from_memory_id TEXT NOT NULL,
-    from_version   INTEGER NOT NULL,
-    to_memory_id   TEXT NOT NULL,
-    to_version     INTEGER NOT NULL,
-    kind           TEXT NOT NULL CHECK (kind IN ('supersedes')),
-    created_at     TEXT NOT NULL,
-    UNIQUE (from_memory_id, to_memory_id, kind),
-    FOREIGN KEY (from_memory_id, from_version)
-        REFERENCES memory_revisions(memory_id, version) ON DELETE CASCADE,
-    FOREIGN KEY (to_memory_id, to_version)
-        REFERENCES memory_revisions(memory_id, version) ON DELETE CASCADE,
-    CHECK (from_memory_id <> to_memory_id)
+    id           TEXT NOT NULL PRIMARY KEY,
+    kind         TEXT NOT NULL,
+    from_type    TEXT NOT NULL CHECK (from_type IN ('observation', 'memory')),
+    from_id      TEXT NOT NULL,
+    from_version INTEGER NOT NULL DEFAULT 0,
+    to_type      TEXT NOT NULL CHECK (to_type IN ('observation', 'memory')),
+    to_id        TEXT NOT NULL,
+    to_version   INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT NOT NULL
 );
 
-CREATE INDEX idx_relations_to ON memory_relations(to_memory_id);
+CREATE INDEX idx_memory_relations_from
+    ON memory_relations(from_type, from_id, kind);
+CREATE INDEX idx_memory_relations_to
+    ON memory_relations(to_type, to_id, kind);
 
-CREATE TABLE memory_evolution_events (
-    id             TEXT NOT NULL PRIMARY KEY,
-    fact_group_id  TEXT REFERENCES memory_fact_groups(id) ON DELETE SET NULL,
-    from_memory_id TEXT NOT NULL,
-    from_version   INTEGER NOT NULL CHECK (from_version >= 1),
-    to_memory_id   TEXT NOT NULL,
-    to_version     INTEGER NOT NULL CHECK (to_version >= 1),
-    action         TEXT NOT NULL CHECK (action IN ('change', 'correction', 'reschedule', 'cancel', 'supersede')),
-    reason_code    TEXT NOT NULL DEFAULT '',
-    created_at     TEXT NOT NULL,
-    FOREIGN KEY (from_memory_id, from_version)
-        REFERENCES memory_revisions(memory_id, version) ON DELETE CASCADE,
-    FOREIGN KEY (to_memory_id, to_version)
-        REFERENCES memory_revisions(memory_id, version) ON DELETE CASCADE,
-    CHECK (from_memory_id <> to_memory_id)
-);
+-- Repeated detection of the exact same relation is idempotent.
+CREATE UNIQUE INDEX idx_memory_relations_unique
+    ON memory_relations(from_type, from_id, from_version, to_type, to_id, to_version, kind);
 
-CREATE INDEX idx_evolution_group ON memory_evolution_events(fact_group_id, created_at, id);
-CREATE INDEX idx_evolution_from ON memory_evolution_events(from_memory_id);
-CREATE INDEX idx_evolution_to ON memory_evolution_events(to_memory_id);
-
+-- Explicit contradiction review remains a management capability; it never
+-- embeds fact-group identity or temporal intervals in the current view.
 CREATE TABLE memory_conflicts (
     id            TEXT NOT NULL PRIMARY KEY,
-    fact_group_id TEXT REFERENCES memory_fact_groups(id) ON DELETE SET NULL,
     status        TEXT NOT NULL CHECK (status IN ('open', 'resolved')),
-    reason_code   TEXT NOT NULL CHECK (reason_code IN
-                  ('contradictory_value', 'uncertain_time', 'ambiguous_scope', 'complex_timeline')),
+    reason_code   TEXT NOT NULL,
     resolution    TEXT NOT NULL DEFAULT '',
     revision      INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
     created_at    TEXT NOT NULL,

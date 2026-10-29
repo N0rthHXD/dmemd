@@ -53,23 +53,9 @@ func (s *Store) Search(ctx context.Context, query retrieval.Query) ([]retrieval.
 		conditions = append(conditions, "(m.scope_key = ? OR m.scope_key = 'user')")
 		args = append(args, query.Filters.ScopeKey)
 	}
-	if query.Filters.AsOf != nil {
-		conditions = append(conditions, "(m.valid_from IS NULL OR m.valid_from <= ?)")
-		args = append(args, formatTime(*query.Filters.AsOf))
-		conditions = append(conditions, "(m.valid_to IS NULL OR ? < m.valid_to)")
-		args = append(args, formatTime(*query.Filters.AsOf))
-	}
-	if query.Filters.EventAt != nil {
-		// The lower bound is a coarse guard; retrieval re-checks the exact
-		// precision window in Go after loading the snapshot.
-		lower := query.Filters.EventAt.AddDate(-1, 0, -1)
-		conditions = append(conditions, "m.event_time IS NOT NULL AND m.event_time <= ? AND m.event_time >= ?")
-		args = append(args, formatTime(*query.Filters.EventAt), formatTime(lower))
-	}
-	if query.Filters.CreatedByApp != "" {
-		conditions = append(conditions, "m.created_by_app = ?")
-		args = append(args, query.Filters.CreatedByApp)
-	}
+	// As-of and event-at filtering belongs to a future temporal annotation task.
+	// The canonical view no longer stores temporal columns, so ordinary recall
+	// does not narrow on them.
 	if query.Filters.UpdatedAfter != nil {
 		conditions = append(conditions, "m.updated_at >= ?")
 		args = append(args, formatTime(*query.Filters.UpdatedAfter))
@@ -155,6 +141,9 @@ func (s *Store) RebuildSearchDocuments(ctx context.Context, builder memory.Docum
 		if _, err := tx.tx.ExecContext(ctx, `INSERT INTO memory_fts(memory_fts) VALUES('rebuild')`); err != nil {
 			return fmt.Errorf("重建全文索引: %w", err)
 		}
+		if err := rebuildObservationSearchDocuments(ctx, tx); err != nil {
+			return err
+		}
 		return nil
 	})
 	if err != nil {
@@ -211,6 +200,9 @@ func searchStates(states []memory.State) []memory.State {
 func (s *Store) RebuildSearchIndex(ctx context.Context) error {
 	if _, err := s.writer.ExecContext(ctx, "INSERT INTO memory_fts(memory_fts) VALUES('rebuild')"); err != nil {
 		return fmt.Errorf("重建搜索索引: %w", err)
+	}
+	if _, err := s.writer.ExecContext(ctx, "INSERT INTO observation_fts(observation_fts) VALUES('rebuild')"); err != nil {
+		return fmt.Errorf("重建观察搜索索引: %w", err)
 	}
 	return nil
 }

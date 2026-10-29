@@ -118,47 +118,6 @@ func (s *Store) LoadSearchAssemblies(ctx context.Context, keys []retrieval.Versi
 	return result, nil
 }
 
-// LoadFactGroupMembers loads a bounded, per-group set of current candidates for
-// same-fact association expansion. Deleted tombstones are excluded; every other
-// filter is applied by the retrieval layer so diagnostics and the actual result
-// share one filter predicate.
-func (s *Store) LoadFactGroupMembers(ctx context.Context, groupIDs []string, limitPerGroup int) (map[string][]retrieval.Candidate, error) {
-	result := make(map[string][]retrieval.Candidate, len(groupIDs))
-	unique := uniqueIDs(groupIDs)
-	if len(unique) == 0 {
-		return result, nil
-	}
-	if limitPerGroup <= 0 {
-		limitPerGroup = 5
-	}
-	args := stringsToAny(unique)
-	args = append(args, string(memory.StateDeleted), limitPerGroup)
-	rows, err := s.reader.QueryContext(ctx, `SELECT `+memoryColumns+` FROM (
-		SELECT `+memoryColumns+`, ROW_NUMBER() OVER (
-			PARTITION BY fact_group_id ORDER BY updated_at DESC, id ASC
-		) AS association_rank
-		FROM memories
-		WHERE fact_group_id IN (`+placeholders(len(unique))+`) AND state <> ?
-	) WHERE association_rank <= ?`,
-		args...)
-	if err != nil {
-		return nil, fmt.Errorf("读取事实组关联候选: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		item, scanErr := scanMemory(rows)
-		if scanErr != nil {
-			return nil, fmt.Errorf("读取事实组关联候选: %w", scanErr)
-		}
-		candidate := retrieval.Candidate{Memory: item}
-		result[item.FactGroupID] = append(result[item.FactGroupID], candidate)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("读取事实组关联候选: %w", err)
-	}
-	return result, nil
-}
-
 // CurrentVectorCount reports eligible current documents and vectors that match
 // the exact profile, dimensions and content hash. It is used only for
 // degradation diagnostics, never to widen a search.
@@ -203,37 +162,6 @@ func (s *Store) OpenConflictsForMemories(ctx context.Context, memoryIDs []string
 // CatalogGeneration is the read-pool semantic catalog version.
 func (s *Store) CatalogGeneration(ctx context.Context) (int64, error) {
 	return s.GetCatalogGeneration(ctx)
-}
-
-// FactTimeline reads all non-deleted members of a group, bounded by limit+1 so
-// callers can detect truncation.
-func (s *Store) FactTimeline(ctx context.Context, groupID string, limit int) ([]memory.Memory, error) {
-	if groupID == "" {
-		return []memory.Memory{}, nil
-	}
-	if limit <= 0 {
-		limit = 50
-	}
-	rows, err := s.reader.QueryContext(ctx, `SELECT `+memoryColumns+` FROM memories
-		WHERE fact_group_id = ? AND state <> ?
-		ORDER BY valid_from ASC, updated_at ASC, id ASC LIMIT ?`,
-		groupID, string(memory.StateDeleted), limit+1)
-	if err != nil {
-		return nil, fmt.Errorf("读取事实组时间线 %s: %w", groupID, err)
-	}
-	defer rows.Close()
-	items := []memory.Memory{}
-	for rows.Next() {
-		item, err := scanMemory(rows)
-		if err != nil {
-			return nil, fmt.Errorf("读取事实组时间线 %s: %w", groupID, err)
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("读取事实组时间线 %s: %w", groupID, err)
-	}
-	return items, nil
 }
 
 func uniqueIDs(ids []string) []string {

@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/N0rthHXD/dmemd/internal/governance/task"
@@ -63,9 +62,6 @@ func (s *Service) ChangeState(ctx context.Context, tx Tx, input StateChangeInput
 	if err := s.syncMemoryChanged(ctx, tx, &current, &candidate, true); err != nil {
 		return Memory{}, err
 	}
-	if err := s.syncConflictReviews(ctx, tx, []string{candidate.ID}); err != nil {
-		return Memory{}, err
-	}
 	return candidate, nil
 }
 
@@ -109,10 +105,7 @@ func (s *Service) deleteInTx(ctx context.Context, tx Tx, current Memory, reason 
 	if err := s.syncMemoryChanged(ctx, tx, &current, &candidate, true); err != nil {
 		return Memory{}, err
 	}
-	if err := s.syncConflictReviews(ctx, tx, []string{candidate.ID}); err != nil {
-		return Memory{}, err
-	}
-	if _, err := tx.CancelJob(ctx, task.KindClassify, task.MemoryKey(candidate.ID), now); err != nil {
+	if _, err := tx.CancelJob(ctx, task.KindClassifyObservation, task.MemoryKey(candidate.ID), now); err != nil {
 		return Memory{}, err
 	}
 	return candidate, nil
@@ -140,7 +133,7 @@ func (s *Service) PurgeInTx(ctx context.Context, tx Tx, id string) error {
 	if err := s.syncMemoryPurged(ctx, tx, current); err != nil {
 		return err
 	}
-	if _, err := tx.CancelJob(ctx, task.KindClassify, task.MemoryKey(id), s.timestamp()); err != nil {
+	if _, err := tx.CancelJob(ctx, task.KindClassifyObservation, task.MemoryKey(id), s.timestamp()); err != nil {
 		return err
 	}
 	if err := tx.PurgeMemory(ctx, id); err != nil {
@@ -163,9 +156,8 @@ func (s *Service) PurgeInTx(ctx context.Context, tx Tx, id string) error {
 
 // Restore copies a historical revision into a new active current version. The
 // selected revision is never modified and redacted evidence stays redacted.
-// Before committing, the restored assertion is checked against the current
-// members of its fact group. A new unmarked accepted contradiction aborts the
-// whole restore with ErrRestoreConflict instead of being silently accepted.
+// The restored assertion is never marked accepted beyond the historical
+// assertion status: restoration alone cannot adjudicate a contradiction.
 func (s *Service) Restore(ctx context.Context, input RestoreInput) (Memory, error) {
 	var result Memory
 	err := s.store.WithTx(ctx, func(ctx context.Context, tx Tx) error {
@@ -199,9 +191,6 @@ func (s *Service) RestoreVersion(ctx context.Context, tx Tx, input RestoreInput)
 	if candidate.AssertionStatus == "" {
 		candidate.AssertionStatus = current.AssertionStatus
 	}
-	if err := s.checkRestoreTimeline(ctx, tx, candidate); err != nil {
-		return Memory{}, err
-	}
 	if err := tx.UpdateMemory(ctx, candidate); err != nil {
 		return Memory{}, err
 	}
@@ -217,32 +206,7 @@ func (s *Service) RestoreVersion(ctx context.Context, tx Tx, input RestoreInput)
 	if err := s.syncMemoryChanged(ctx, tx, &current, &candidate, true); err != nil {
 		return Memory{}, err
 	}
-	if err := s.syncConflictReviews(ctx, tx, []string{candidate.ID}); err != nil {
-		return Memory{}, err
-	}
 	return candidate, nil
-}
-
-func (s *Service) checkRestoreTimeline(ctx context.Context, tx Tx, candidate Memory) error {
-	if candidate.AssertionStatus != AssertionAccepted || candidate.FactGroupID == "" {
-		return nil
-	}
-	members, err := tx.ListFactGroupMemories(ctx, candidate.FactGroupID)
-	if err != nil {
-		return err
-	}
-	for _, member := range members {
-		if member.ID == candidate.ID || member.State != StateActive || member.AssertionStatus != AssertionAccepted {
-			continue
-		}
-		if !Overlaps(candidate.ValidFrom, candidate.ValidTo, member.ValidFrom, member.ValidTo) {
-			continue
-		}
-		if normalizeComparable(candidate.Content) != normalizeComparable(member.Content) {
-			return errors.Join(ErrRestoreConflict, ErrConflictStale)
-		}
-	}
-	return nil
 }
 
 func knownState(state State) bool {

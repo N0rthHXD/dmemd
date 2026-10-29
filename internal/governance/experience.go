@@ -204,7 +204,7 @@ func (s *ExperienceServiceAPI) Submit(ctx context.Context, submission Experience
 			return err
 		}
 		if _, _, err := tx.UpsertJob(ctx, task.UpsertInput{
-			Kind:          task.KindAggregate,
+			Kind:          task.KindBuildGuidance,
 			TargetKey:     artifact.ExperienceTarget(run.ID).TargetKey(),
 			InputHash:     task.InputHash("experience-case", run.ID, string(run.Outcome), strconv.Itoa(run.SkillVersion)),
 			NextAttemptAt: &now,
@@ -212,10 +212,8 @@ func (s *ExperienceServiceAPI) Submit(ctx context.Context, submission Experience
 		}); err != nil {
 			return fmt.Errorf("登记经验案例任务: %w", err)
 		}
-		if run.SkillID != "" {
-			if err := invalidateSkillForRun(ctx, tx, run, now); err != nil {
-				return err
-			}
+		if err := enqueueExperienceSkills(ctx, tx, run, now); err != nil {
+			return err
 		}
 		receipt = receiptFromRun(run)
 		return nil
@@ -250,21 +248,11 @@ func (s *ExperienceServiceAPI) Retract(ctx context.Context, id string) (Experien
 		run.State = ExperienceRevoked
 		run.UpdatedAt = now
 		run.RevokedAt = &now
-		if run.ScopeKey != "" {
-			if _, err := tx.BumpSkillJobsForScope(ctx, run.ScopeKey, now); err != nil {
-				return err
-			}
-		}
-		if run.SkillID != "" {
-			if err := invalidateSkillForRun(ctx, tx, run, now); err != nil {
-				return err
-			}
-		}
 
 		caseTarget := artifact.ExperienceTarget(id).TargetKey()
-		if job, err := tx.GetGovernanceJobByTarget(ctx, task.KindAggregate, caseTarget); err == nil {
+		if job, err := tx.GetGovernanceJobByTarget(ctx, task.KindBuildGuidance, caseTarget); err == nil {
 			if !job.Status.Terminal() {
-				if _, err := tx.CancelJob(ctx, task.KindAggregate, caseTarget, now); err != nil {
+				if _, err := tx.CancelJob(ctx, task.KindBuildGuidance, caseTarget, now); err != nil {
 					return err
 				}
 			}
@@ -274,21 +262,8 @@ func (s *ExperienceServiceAPI) Retract(ctx context.Context, id string) (Experien
 		if err := invalidateCaseForRun(ctx, tx, id, now); err != nil {
 			return err
 		}
-		affected, err := tx.ListArtifactsForRun(ctx, id)
-		if err != nil {
+		if err := invalidateExperienceDependents(ctx, tx, id, now); err != nil {
 			return err
-		}
-		for _, item := range affected {
-			switch item.Kind {
-			case artifact.KindExperienceCase:
-				if err := disableArtifact(ctx, tx, item, now); err != nil {
-					return err
-				}
-			case artifact.KindSkill:
-				if err := staleSkill(ctx, tx, item, now); err != nil {
-					return err
-				}
-			}
 		}
 		receipt = receiptFromRun(run)
 		return nil
@@ -297,50 +272,6 @@ func (s *ExperienceServiceAPI) Retract(ctx context.Context, id string) (Experien
 		return ExperienceReceipt{}, err
 	}
 	return receipt, nil
-}
-
-func invalidateSkillForRun(ctx context.Context, tx Tx, run ExperienceRun, now time.Time) error {
-	item, err := tx.GetArtifact(ctx, run.SkillID)
-	if errors.Is(err, artifact.ErrNotFound) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if item.Kind != artifact.KindSkill {
-		return nil
-	}
-	if err := staleSkill(ctx, tx, item, now); err != nil {
-		return err
-	}
-	return nil
-}
-
-func staleSkill(ctx context.Context, tx Tx, item artifact.Artifact, now time.Time) error {
-	target, err := artifact.TargetForArtifact(item)
-	if err != nil {
-		return err
-	}
-	if item.State == artifact.StateActive {
-		item.State = artifact.StateStale
-		item.UpdatedAt = now
-		if err := tx.UpdateArtifact(ctx, item); err != nil {
-			return err
-		}
-	}
-	if err := tx.DeleteArtifactSearchDocument(ctx, item.ID); err != nil {
-		return err
-	}
-	if _, _, err := tx.UpsertJob(ctx, task.UpsertInput{
-		Kind:          task.KindBuildSkill,
-		TargetKey:     target.TargetKey(),
-		InputHash:     task.InputHash("experience-feedback", item.ID, strconv.Itoa(item.CurrentVersion), now.Format(time.RFC3339Nano)),
-		NextAttemptAt: &now,
-		Now:           now,
-	}); err != nil {
-		return fmt.Errorf("登记 Skill 重建任务: %w", err)
-	}
-	return nil
 }
 
 func invalidateCaseForRun(ctx context.Context, tx Tx, experienceID string, now time.Time) error {
@@ -355,7 +286,7 @@ func invalidateCaseForRun(ctx context.Context, tx Tx, experienceID string, now t
 	return disableArtifact(ctx, tx, item, now)
 }
 
-func disableArtifact(ctx context.Context, tx Tx, item artifact.Artifact, now time.Time) error {
+func disableArtifact(ctx context.Context, tx Tx, item artifact.DerivedMemory, now time.Time) error {
 	if item.State != artifact.StateDisabled {
 		item.State = artifact.StateDisabled
 		item.UpdatedAt = now

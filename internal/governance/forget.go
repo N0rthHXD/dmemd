@@ -19,7 +19,7 @@ var ErrInvalidForget = errors.New("invalid forget request")
 
 // ForgetRequest names leaves to forget permanently. At least one list must
 // contain an identifier. Sources expand through origins and evidence in every
-// revision, then memories expand through safe same-group duplicates. Runs also
+// revision; memory deletion never guesses same-group duplicates. Runs also
 // remove their dedicated report source.
 type ForgetRequest struct {
 	MemoryIDs     []string `json:"memory_ids,omitempty"`
@@ -29,11 +29,9 @@ type ForgetRequest struct {
 
 // ForgetResult lists the identifiers removed by one committed transaction.
 type ForgetResult struct {
-	MemoryIDs                []string `json:"memory_ids"`
-	SourceIDs                []string `json:"source_ids"`
-	ExperienceIDs            []string `json:"experience_ids"`
-	Warnings                 []string `json:"warnings,omitempty"`
-	RetainedRelatedMemoryIDs []string `json:"retained_related_memory_ids,omitempty"`
+	MemoryIDs     []string `json:"memory_ids"`
+	SourceIDs     []string `json:"source_ids"`
+	ExperienceIDs []string `json:"experience_ids"`
 }
 
 // ForgetService is the HTTP-facing permanent-forget capability.
@@ -100,6 +98,7 @@ func (s *ForgetServiceAPI) Forget(ctx context.Context, request ForgetRequest) (F
 		memoryIDs := make(map[string]struct{}, len(explicitMemory))
 		sourceIDs := make(map[string]struct{}, len(explicitSource))
 		experienceIDs := make(map[string]struct{}, len(explicitExperience))
+		observationIDs := make(map[string]struct{})
 
 		for _, id := range explicitMemory {
 			if _, err := tx.GetMemory(ctx, id); err != nil {
@@ -141,12 +140,15 @@ func (s *ForgetServiceAPI) Forget(ctx context.Context, request ForgetRequest) (F
 			for _, id := range runs {
 				experienceIDs[id] = struct{}{}
 			}
+			observations, err := tx.ListObservationsBySource(ctx, sourceID)
+			if err != nil {
+				return err
+			}
+			for _, item := range observations {
+				observationIDs[item.ID] = struct{}{}
+			}
 		}
 
-		retained, err := expandForgetDuplicates(ctx, tx, memoryIDs)
-		if err != nil {
-			return err
-		}
 		for _, id := range sortedSet(experienceIDs) {
 			if err := s.purgeExperienceInTx(ctx, tx, id, now); err != nil {
 				return err
@@ -161,27 +163,39 @@ func (s *ForgetServiceAPI) Forget(ctx context.Context, request ForgetRequest) (F
 			}
 		}
 		for _, sourceID := range sortedSet(sourceIDs) {
-			// Ingest jobs and evidence use RESTRICT foreign keys; remove both
-			// before the source row itself.
+			// Ingest jobs, evidence and observations use RESTRICT foreign keys;
+			// remove all three before the source row itself. Associated memories
+			// have already been purged.
 			if err := tx.DeleteIngestJobsBySource(ctx, sourceID); err != nil {
 				return err
 			}
 			if err := tx.DeleteEvidenceBySource(ctx, sourceID); err != nil {
 				return err
 			}
+			if err := tx.DeleteObservationsBySource(ctx, sourceID); err != nil {
+				return err
+			}
 			if err := tx.DeleteSource(ctx, sourceID); err != nil {
+				return err
+			}
+		}
+		// The observations were removed in this same transaction, so derived
+		// targets that used them now have no legal input. This invalidation also
+		// propagates through L2/L3/L4 instead of leaving a high-level summary
+		// active after its only source disappeared.
+		for _, observationID := range sortedSet(observationIDs) {
+			if err := InvalidateDependents(ctx, tx, artifact.DependencyRef{
+				Type: artifact.DependencyObservation,
+				ID:   observationID,
+			}, ReasonObservationDeleted); err != nil {
 				return err
 			}
 		}
 
 		result = ForgetResult{
-			MemoryIDs:                sortedSet(memoryIDs),
-			SourceIDs:                sortedSet(sourceIDs),
-			ExperienceIDs:            sortedSet(experienceIDs),
-			RetainedRelatedMemoryIDs: retained,
-		}
-		if len(retained) > 0 {
-			result.Warnings = []string{"related_memories_retained"}
+			MemoryIDs:     sortedSet(memoryIDs),
+			SourceIDs:     sortedSet(sourceIDs),
+			ExperienceIDs: sortedSet(experienceIDs),
 		}
 		return nil
 	})
@@ -200,7 +214,7 @@ func (s *ForgetServiceAPI) purgeExperienceInTx(ctx context.Context, tx Tx, exper
 		return err
 	}
 	caseTarget := artifact.ExperienceTarget(experienceID).TargetKey()
-	if _, err := tx.CancelJob(ctx, task.KindAggregate, caseTarget, now); err != nil {
+	if _, err := tx.CancelJob(ctx, task.KindBuildGuidance, caseTarget, now); err != nil {
 		return err
 	}
 	if run.ScopeKey != "" {
@@ -230,7 +244,7 @@ func (s *ForgetServiceAPI) purgeExperienceInTx(ctx context.Context, tx Tx, exper
 			if targetErr != nil {
 				continue
 			}
-			if _, err := tx.CancelJob(ctx, task.KindAggregate, target.TargetKey(), now); err != nil {
+			if _, err := tx.CancelJob(ctx, task.KindBuildGuidance, target.TargetKey(), now); err != nil {
 				return err
 			}
 			continue
@@ -248,13 +262,13 @@ func (s *ForgetServiceAPI) purgeExperienceInTx(ctx context.Context, tx Tx, exper
 	return tx.DeleteExperienceRun(ctx, experienceID)
 }
 
-func requeueSkillAfterForget(ctx context.Context, tx Tx, item artifact.Artifact, now time.Time) error {
+func requeueSkillAfterForget(ctx context.Context, tx Tx, item artifact.DerivedMemory, now time.Time) error {
 	target, err := artifact.TargetForArtifact(item)
 	if err != nil {
 		return nil
 	}
 	if _, _, err := tx.UpsertJob(ctx, task.UpsertInput{
-		Kind:          task.KindBuildSkill,
+		Kind:          task.KindBuildGuidance,
 		TargetKey:     target.TargetKey(),
 		InputHash:     task.InputHash("forget-experience", item.ID, now.Format(time.RFC3339Nano)),
 		NextAttemptAt: &now,

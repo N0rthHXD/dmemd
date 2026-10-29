@@ -23,7 +23,6 @@ type MemoryService interface {
 	GetVersion(ctx context.Context, id string, version int) (Revision, error)
 	GetEvidence(ctx context.Context, id string, version int) ([]source.Evidence, error)
 	Relations(ctx context.Context, id string) ([]Relation, error)
-	Evolution(ctx context.Context, id string, limit int) ([]EvolutionEvent, error)
 	Restore(ctx context.Context, input RestoreInput) (Memory, error)
 }
 
@@ -33,6 +32,13 @@ type ConflictService interface {
 	ListConflicts(ctx context.Context, options ConflictListOptions) ([]Conflict, error)
 	GetConflict(ctx context.Context, id string) (Conflict, error)
 	Resolve(ctx context.Context, input ResolveInput) (Conflict, error)
+}
+
+// DetailService is the optional canonical-detail capability implemented by the
+// production Service. Transport type-asserts it so read-only test doubles that
+// only implement MemoryService remain valid.
+type DetailService interface {
+	Detail(ctx context.Context, id string) (Detail, error)
 }
 
 // Reader is the read capability used by the memory service for snapshots,
@@ -45,7 +51,10 @@ type Reader interface {
 	ListRevisions(ctx context.Context, memoryID string, limit int) ([]Revision, error)
 	ListRevisionEvidence(ctx context.Context, memoryID string, version int) ([]source.Evidence, error)
 	ListRelationsForMemory(ctx context.Context, memoryID string) ([]Relation, error)
-	ListEvolutionEvents(ctx context.Context, memoryID string, limit int) ([]EvolutionEvent, error)
+	ListMemoryObservationRefs(ctx context.Context, memoryID string, version int) ([]string, error)
+	ListMemoryRelationRefs(ctx context.Context, memoryID string) ([]RelationRef, error)
+	ListConflictIDsForMemory(ctx context.Context, memoryID string) ([]string, error)
+	ListDependents(ctx context.Context, input artifact.DependencyRef) ([]artifact.DerivedRef, error)
 	ListConflicts(ctx context.Context, options ConflictListOptions) ([]Conflict, error)
 	GetConflict(ctx context.Context, id string) (Conflict, error)
 }
@@ -69,17 +78,6 @@ type Tx interface {
 
 	GetCatalogGeneration(ctx context.Context) (int64, error)
 	BumpCatalogGeneration(ctx context.Context) error
-
-	GetFactGroup(ctx context.Context, id string) (FactGroup, error)
-	FindFactGroup(ctx context.Context, identity FactGroupIdentity) (FactGroup, error)
-	FindFactGroups(ctx context.Context, scopeKey, subject, predicate string) ([]FactGroup, error)
-	InsertFactGroup(ctx context.Context, group FactGroup) error
-	UpdateFactGroup(ctx context.Context, group FactGroup) error
-	ListFactGroupMemories(ctx context.Context, groupID string) ([]Memory, error)
-
-	InsertRelation(ctx context.Context, relation Relation) error
-	InsertEvolutionEvent(ctx context.Context, event EvolutionEvent) error
-	ListEvolutionEvents(ctx context.Context, memoryID string, limit int) ([]EvolutionEvent, error)
 
 	InsertConflict(ctx context.Context, conflict Conflict) error
 	UpdateConflict(ctx context.Context, conflict Conflict) error

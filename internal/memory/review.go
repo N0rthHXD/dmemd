@@ -46,24 +46,3 @@ func QueueConflictReview(ctx context.Context, tx Tx, conflict Conflict, debounce
 	}
 	return nil
 }
-
-// syncConflictReviews refreshes review targets for every open conflict that
-// contains one of the changed memories. New evidence, revisions and lifecycle
-// changes use the same path, so a queued review always covers the current
-// member set.
-func (s *Service) syncConflictReviews(ctx context.Context, tx Tx, memoryIDs []string) error {
-	if len(memoryIDs) == 0 {
-		return nil
-	}
-	conflicts, err := tx.ListOpenConflictsForMemories(ctx, memoryIDs)
-	if err != nil {
-		return err
-	}
-	now := s.timestamp()
-	for _, conflict := range conflicts {
-		if err := QueueConflictReview(ctx, tx, conflict, s.governanceDebounce, now); err != nil {
-			return err
-		}
-	}
-	return nil
-}

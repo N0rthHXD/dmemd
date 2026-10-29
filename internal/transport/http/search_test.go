@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/N0rthHXD/dmemd/internal/artifact"
+	"github.com/N0rthHXD/dmemd/internal/governance"
 	"github.com/N0rthHXD/dmemd/internal/memory"
+	"github.com/N0rthHXD/dmemd/internal/observation"
 	"github.com/N0rthHXD/dmemd/internal/retrieval"
 )
 
@@ -24,16 +26,17 @@ func TestRecallModeTopKValidationAndRequestMapping(t *testing.T) {
 	}}}
 
 	response := serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/recall",
-		strings.NewReader(`{"query":"吃饭有什么忌口","scope_key":"project:dmemd","layers":["atomic","summary"],"mode":"hybrid","top_k":10,"explain":true}`)))
+		strings.NewReader(`{"query":"吃饭有什么忌口","scope_key":"project:dmemd","query_mode":"detail","layers":["observations","memories"],"mode":"hybrid","top_k":10,"explain":true}`)))
 	if response.Code != http.StatusOK {
 		t.Fatalf("hybrid request = %d %q", response.Code, response.Body.String())
 	}
 	if calls != 1 || captured.Mode != retrieval.ModeHybrid ||
-		captured.TopK != 10 || !captured.Explain || captured.ScopeKey != "project:dmemd" {
+		captured.TopK != 10 || !captured.Explain || captured.ScopeKey != "project:dmemd" ||
+		captured.QueryMode != retrieval.QueryModeDetail {
 		t.Fatalf("captured request = %+v", captured)
 	}
-	if len(captured.Layers) != 2 || captured.Layers[0] != retrieval.LayerAtomic ||
-		captured.Layers[1] != retrieval.LayerSummary {
+	if len(captured.Layers) != 2 || captured.Layers[0] != retrieval.LayerObservations ||
+		captured.Layers[1] != retrieval.LayerMemories {
 		t.Fatalf("layers = %+v", captured.Layers)
 	}
 	if !strings.Contains(response.Body.String(), `"memories":[]`) {
@@ -44,6 +47,7 @@ func TestRecallModeTopKValidationAndRequestMapping(t *testing.T) {
 		`{"query":"x","mode":"semantic"}`,
 		`{"query":"x","top_k":101}`,
 		`{"query":"x","layers":["episode"]}`,
+		`{"query":"x","query_mode":"invented"}`,
 	} {
 		before := calls
 		response = serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/recall", strings.NewReader(body)))
@@ -65,10 +69,22 @@ func TestRecallModeTopKValidationAndRequestMapping(t *testing.T) {
 	}
 }
 
-func TestRecallResponseIncludesPartitionsWarningsAndExplanation(t *testing.T) {
+func TestRecallResponseIncludesLayerPartitionsWarningsAndExplanation(t *testing.T) {
 	created := time.Date(2026, 10, 22, 8, 0, 0, 0, time.UTC)
 	services := Services{Search: stubSearch{recall: func(context.Context, retrieval.RecallRequest) (retrieval.RecallResult, error) {
 		return retrieval.RecallResult{
+			QueryMode: retrieval.QueryModeDetail,
+			Observations: []retrieval.ObservationItem{{
+				Observation: observation.Observation{
+					ID: "observation-1", SourceID: "source-1", Kind: observation.KindFact,
+					Content: "项目使用 SQLite 保存记忆。", ContentMode: observation.ContentExtractive,
+					Status: observation.StatusObserved, CreatedAt: created, UpdatedAt: created,
+				},
+				Score:        1.5,
+				Snippet:      "项目使用 SQLite",
+				MatchedTerms: []string{"项目"},
+				EvidenceRefs: []retrieval.EvidenceRef{{ID: "evidence-1", SourceID: "source-1"}},
+			}},
 			Memories: []retrieval.Item{{
 				Memory:       memory.Memory{ID: "memory-1", Kind: memory.KindFact, State: memory.StateActive, Version: 1},
 				Score:        1.0 / 61.0,
@@ -80,32 +96,41 @@ func TestRecallResponseIncludesPartitionsWarningsAndExplanation(t *testing.T) {
 					Keyword:  &retrieval.KeywordExplanation{Rank: 1, BM25: -1.5},
 					Semantic: &retrieval.SemanticExplanation{Rank: 2, Cosine: 0.9},
 				},
-				Related: &retrieval.RelatedInfo{
-					ReasonCodes:     []string{retrieval.RelatedFactGroupMember},
-					AnchorMemoryIDs: []string{"memory-primary"},
-				},
-				Cluster: &retrieval.DisplayCluster{
-					FactGroupID: "group-1", MemberIDs: []string{"memory-1", "memory-2"}, EvidenceCount: 2,
-				},
 			}},
-			Diagnostics: &retrieval.SearchDiagnostics{
-				KeywordCandidates: 3, SemanticCandidates: 2, TermCandidates: 5,
-				KindFilterExcluded: 1, StateFilterExcluded: 1, TimeFilterExcluded: 1,
-				RankingCandidates: 2, RelatedExpanded: 1, RelatedExcluded: 1,
-				ReturnedItems: 1, ContextBudgetTruncated: 1,
-				SemanticDegradation: retrieval.WarningSemanticTimeout,
-			},
-			Summaries: []artifact.SearchHit{{
-				Artifact: artifact.Artifact{
-					ID: "artifact-1", Kind: artifact.KindTopicSummary, ScopeKey: "project:dmemd",
-					Topic: "go", State: artifact.StateActive, CurrentVersion: 1, UpdatedAt: created,
+			L1: []retrieval.DerivedItem{{
+				DerivedMemory: artifact.DerivedMemory{
+					ID: "artifact-1", Layer: artifact.LayerL1, Kind: artifact.KindLocalSummary,
+					ScopeKey: "project:dmemd", State: artifact.StateActive, CurrentVersion: 1, UpdatedAt: created,
 				},
 				Revision: artifact.Revision{
 					ArtifactID: "artifact-1", Version: 1, Title: "Go 摘要", Content: "使用 SQLite",
-					MemoryRefs: []artifact.MemoryRef{{MemoryID: "memory-1", Version: 1}}, CreatedAt: created,
+					CreatedAt: created,
 				},
-				Score: -1.2,
+				Score:        -1.2,
+				Snippet:      "使用 SQLite",
+				MatchedTerms: []string{"SQLite"},
+				Dependencies: []artifact.DependencyRef{{
+					Type: artifact.DependencyObservation, ID: "observation-1", Required: true,
+				}},
 			}},
+			L4: []retrieval.DerivedItem{{
+				DerivedMemory: artifact.DerivedMemory{
+					ID: "artifact-skill", Layer: artifact.LayerL4, Kind: artifact.KindSkill,
+					ScopeKey: "project:dmemd", State: artifact.StateActive, CurrentVersion: 1, UpdatedAt: created,
+				},
+				Revision: artifact.Revision{ArtifactID: "artifact-skill", Version: 1, Title: "验证流程", Content: "运行测试", CreatedAt: created},
+			}},
+			Relations: []governance.Relation{{
+				ID: "relation-1", Kind: governance.RelationSupports,
+				FromType: governance.EndpointObservation, FromID: "observation-1",
+				ToType: governance.EndpointMemory, ToID: "memory-1", ToVersion: 1, CreatedAt: created,
+			}},
+			Diagnostics: &retrieval.SearchDiagnostics{
+				KeywordCandidates: 3, ObservationCandidates: 1, MemoryCandidates: 1,
+				DerivedCandidates: 2, TermCandidates: 5, KindFilterExcluded: 1,
+				StateFilterExcluded: 1, RankingCandidates: 2, ReturnedItems: 4,
+				ContextBudgetTruncated: 1, SemanticDegradation: retrieval.WarningSemanticTimeout,
+			},
 			Warnings: []string{retrieval.WarningSemanticTimeout},
 		}, nil
 	}}}
@@ -115,6 +140,16 @@ func TestRecallResponseIncludesPartitionsWarningsAndExplanation(t *testing.T) {
 		t.Fatalf("response = %d %q", response.Code, response.Body.String())
 	}
 	var decoded struct {
+		QueryMode    string `json:"query_mode"`
+		Observations []struct {
+			Observation struct {
+				ID     string `json:"id"`
+				Status string `json:"status"`
+			} `json:"observation"`
+			EvidenceRefs []struct {
+				ID string `json:"id"`
+			} `json:"evidence_refs"`
+		} `json:"observations"`
 		Memories []struct {
 			MatchedTerms []string `json:"matched_terms"`
 			Explanation  struct {
@@ -129,73 +164,78 @@ func TestRecallResponseIncludesPartitionsWarningsAndExplanation(t *testing.T) {
 					Cosine float64 `json:"cosine"`
 				} `json:"semantic"`
 			} `json:"explanation"`
-			Related *struct {
-				ReasonCodes     []string `json:"reason_codes"`
-				AnchorMemoryIDs []string `json:"anchor_memory_ids"`
-			} `json:"related"`
-			Cluster *struct {
-				FactGroupID   string   `json:"fact_group_id"`
-				MemberIDs     []string `json:"member_ids"`
-				EvidenceCount int      `json:"evidence_count"`
-			} `json:"cluster"`
 		} `json:"memories"`
+		L1 []struct {
+			Artifact struct {
+				ID    string `json:"id"`
+				Kind  string `json:"kind"`
+				State string `json:"state"`
+			} `json:"artifact"`
+			Dependencies []struct {
+				Type string `json:"type"`
+				ID   string `json:"id"`
+			} `json:"dependencies"`
+		} `json:"l1"`
+		L4 []struct {
+			Artifact struct {
+				Kind string `json:"kind"`
+			} `json:"artifact"`
+		} `json:"l4"`
+		Relations []struct {
+			ID   string `json:"id"`
+			Kind string `json:"kind"`
+		} `json:"relations"`
+		Conflicts   []any    `json:"conflicts"`
+		Warnings    []string `json:"warnings"`
 		Diagnostics *struct {
 			KeywordCandidates      int    `json:"keyword_candidates"`
+			ObservationCandidates  int    `json:"observation_candidates"`
+			DerivedCandidates      int    `json:"derived_candidates"`
 			KindFilterExcluded     int    `json:"kind_filter_excluded"`
-			RelatedExpanded        int    `json:"related_expanded"`
 			ContextBudgetTruncated int    `json:"context_budget_truncated"`
 			SemanticDegradation    string `json:"semantic_degradation"`
 		} `json:"diagnostics"`
-		Summaries []struct {
-			ID         string `json:"id"`
-			Kind       string `json:"kind"`
-			Version    int    `json:"version"`
-			MemoryRefs []struct {
-				MemoryID string `json:"memory_id"`
-				Version  int    `json:"version"`
-			} `json:"memory_refs"`
-		} `json:"summaries"`
-		Experiences []any    `json:"experiences"`
-		Skills      []any    `json:"skills"`
-		Conflicts   []any    `json:"conflicts"`
-		Warnings    []string `json:"warnings"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
+	if decoded.QueryMode != string(retrieval.QueryModeDetail) {
+		t.Fatalf("query mode = %q", decoded.QueryMode)
+	}
 	if len(decoded.Warnings) != 1 || decoded.Warnings[0] != retrieval.WarningSemanticTimeout {
 		t.Fatalf("warnings = %+v", decoded.Warnings)
 	}
+	if len(decoded.Observations) != 1 || decoded.Observations[0].Observation.ID != "observation-1" ||
+		decoded.Observations[0].Observation.Status != "observed" ||
+		len(decoded.Observations[0].EvidenceRefs) != 1 {
+		t.Fatalf("observations = %+v", decoded.Observations)
+	}
 	if len(decoded.Memories) != 1 || decoded.Memories[0].Explanation.Ranking != "rrf" {
 		t.Fatalf("memories = %+v", decoded.Memories)
-	}
-	item := decoded.Memories[0]
-	if item.Related == nil || len(item.Related.ReasonCodes) != 1 ||
-		item.Related.ReasonCodes[0] != retrieval.RelatedFactGroupMember ||
-		len(item.Related.AnchorMemoryIDs) != 1 || item.Related.AnchorMemoryIDs[0] != "memory-primary" {
-		t.Fatalf("related = %+v", item.Related)
-	}
-	if item.Cluster == nil || item.Cluster.FactGroupID != "group-1" ||
-		len(item.Cluster.MemberIDs) != 2 || item.Cluster.EvidenceCount != 2 {
-		t.Fatalf("cluster = %+v", item.Cluster)
-	}
-	if decoded.Diagnostics == nil || decoded.Diagnostics.KeywordCandidates != 3 ||
-		decoded.Diagnostics.KindFilterExcluded != 1 || decoded.Diagnostics.RelatedExpanded != 1 ||
-		decoded.Diagnostics.ContextBudgetTruncated != 1 ||
-		decoded.Diagnostics.SemanticDegradation != retrieval.WarningSemanticTimeout {
-		t.Fatalf("diagnostics = %+v", decoded.Diagnostics)
 	}
 	explanation := decoded.Memories[0].Explanation
 	if len(explanation.FieldWeights) != 0 || explanation.Keyword.Rank != 1 || explanation.Semantic.Rank != 2 {
 		t.Fatalf("explanation = %+v", explanation)
 	}
-	if len(decoded.Summaries) != 1 || decoded.Summaries[0].ID != "artifact-1" ||
-		decoded.Summaries[0].Kind != "topic_summary" ||
-		len(decoded.Summaries[0].MemoryRefs) != 1 || decoded.Summaries[0].MemoryRefs[0].MemoryID != "memory-1" {
-		t.Fatalf("summaries = %+v", decoded.Summaries)
+	if len(decoded.L1) != 1 || decoded.L1[0].Artifact.ID != "artifact-1" ||
+		decoded.L1[0].Artifact.Kind != "local_summary" || decoded.L1[0].Artifact.State != "active" ||
+		len(decoded.L1[0].Dependencies) != 1 || decoded.L1[0].Dependencies[0].Type != "observation" {
+		t.Fatalf("l1 = %+v", decoded.L1)
 	}
-	if decoded.Experiences == nil || decoded.Skills == nil || decoded.Conflicts == nil {
+	if len(decoded.L4) != 1 || decoded.L4[0].Artifact.Kind != "skill" {
+		t.Fatalf("l4 = %+v", decoded.L4)
+	}
+	if len(decoded.Relations) != 1 || decoded.Relations[0].Kind != "supports" {
+		t.Fatalf("relations = %+v", decoded.Relations)
+	}
+	if decoded.Conflicts == nil || decoded.Warnings == nil {
 		t.Fatalf("empty partitions must be arrays: %+v", decoded)
+	}
+	if decoded.Diagnostics == nil || decoded.Diagnostics.KeywordCandidates != 3 ||
+		decoded.Diagnostics.ObservationCandidates != 1 || decoded.Diagnostics.DerivedCandidates != 2 ||
+		decoded.Diagnostics.KindFilterExcluded != 1 || decoded.Diagnostics.ContextBudgetTruncated != 1 ||
+		decoded.Diagnostics.SemanticDegradation != retrieval.WarningSemanticTimeout {
+		t.Fatalf("diagnostics = %+v", decoded.Diagnostics)
 	}
 }
 

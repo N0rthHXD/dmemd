@@ -33,15 +33,17 @@ type Location struct {
 	End   int    `json:"end"`
 }
 
-// Evidence links a source (and optionally one message inside it) to a quoted
-// fragment. Quote and Location are cleared when the source is redacted.
+// Evidence links a source segment to its quoted fragment. Every field except
+// the generated identifier and timestamps is copied from the deterministic
+// segment by code; model output never supplies a quote, offset or model name.
+// Quote and Location are cleared when the source is redacted.
 type Evidence struct {
 	ID         string     `json:"id"`
 	SourceID   string     `json:"source_id"`
+	SegmentID  string     `json:"segment_id,omitempty"`
 	MessageID  string     `json:"message_id,omitempty"`
 	Quote      string     `json:"quote,omitempty"`
 	Location   *Location  `json:"location,omitempty"`
-	ModelName  string     `json:"model_name,omitempty"`
 	Redacted   bool       `json:"redacted"`
 	RedactedAt *time.Time `json:"redacted_at,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
@@ -49,7 +51,9 @@ type Evidence struct {
 
 // RedactResult reports the outcome of an explicit source redaction.
 type RedactResult struct {
-	SourceID      string `json:"id"`
-	Redacted      bool   `json:"redacted"`
-	CancelledJobs int64  `json:"cancelled_jobs"`
+	SourceID              string   `json:"id"`
+	Redacted              bool     `json:"redacted"`
+	CancelledJobs         int64    `json:"cancelled_jobs"`
+	RetractedObservations int      `json:"retracted_observations,omitempty"`
+	InvalidatedDerived    []string `json:"invalidated_derived_ids,omitempty"`
 }

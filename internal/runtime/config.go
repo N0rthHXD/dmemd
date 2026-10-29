@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/N0rthHXD/dmemd/internal/artifact"
 	"github.com/N0rthHXD/dmemd/internal/embedding"
 	"github.com/N0rthHXD/dmemd/internal/ingest"
 )
@@ -45,8 +46,15 @@ const (
 	DefaultReconcileInterval = 15 * time.Minute
 	// DefaultGovernanceMinCallInterval spaces governance model calls.
 	DefaultGovernanceMinCallInterval = 2 * time.Minute
-	// DefaultGovernanceMaxInputs bounds one derived-generation input set.
+	// DefaultGovernanceMaxInputs bounds one governance candidate set.
 	DefaultGovernanceMaxInputs = 64
+	// DefaultAggregationDebounce converges a burst of lower-layer changes before
+	// rebuilding the next derived layer.
+	DefaultAggregationDebounce = 10 * time.Second
+	// DefaultAggregationReconcileInterval is the periodic derived-target scan.
+	DefaultAggregationReconcileInterval = 15 * time.Minute
+	// DefaultAggregationMaxInputs bounds one aggregation input set.
+	DefaultAggregationMaxInputs = 64
 	// defaultGovernanceMaxCallsPerHour is a soft in-process budget. It is a
 	// fixed operational bound rather than a per-installation setting.
 	defaultGovernanceMaxCallsPerHour = 30
@@ -95,7 +103,7 @@ type DatabaseConfig struct {
 }
 
 // ModelTaskConfig optionally overrides the model, timeout and reasoning hint
-// for one task. Extraction, decision and governance calls are deliberately
+// for one stage. Extraction, governance and aggregation calls are deliberately
 // separable so a cheap model cannot be mistaken for a protocol fix.
 type ModelTaskConfig struct {
 	Name            string   `json:"name,omitempty"`
@@ -106,13 +114,13 @@ type ModelTaskConfig struct {
 // ModelConfig maps to the first remote provider protocol. Credentials belong
 // only in this local, permission-restricted config file.
 type ModelConfig struct {
-	Name       string           `json:"name"`
-	BaseURL    string           `json:"base_url"`
-	APIKey     string           `json:"api_key"`
-	Timeout    Duration         `json:"timeout"`
-	Extraction *ModelTaskConfig `json:"extraction,omitempty"`
-	Decision   *ModelTaskConfig `json:"decision,omitempty"`
-	Governance *ModelTaskConfig `json:"governance,omitempty"`
+	Name        string           `json:"name"`
+	BaseURL     string           `json:"base_url"`
+	APIKey      string           `json:"api_key"`
+	Timeout     Duration         `json:"timeout"`
+	Extraction  *ModelTaskConfig `json:"extraction,omitempty"`
+	Governance  *ModelTaskConfig `json:"governance,omitempty"`
+	Aggregation *ModelTaskConfig `json:"aggregation,omitempty"`
 }
 
 // EmbeddingConfig is the separate document/query Embedding provider. It is
@@ -128,22 +136,22 @@ type EmbeddingConfig struct {
 	MinSimilarity float64  `json:"min_similarity"`
 }
 
-// WorkerConfig controls attempt/call budgets, protocol-failure isolation and
-// transient retries. Ingestion still has one sequential executor.
+// WorkerConfig controls per-stage call budgets, protocol-failure isolation and
+// transient retries. Each background stage owns one sequential executor.
 type WorkerConfig struct {
-	ProcessBudget        Duration   `json:"process_budget"`
 	ExtractionTimeout    Duration   `json:"extraction_timeout"`
-	DecisionTimeout      Duration   `json:"decision_timeout"`
+	GovernanceTimeout    Duration   `json:"governance_timeout"`
+	AggregationTimeout   Duration   `json:"aggregation_timeout"`
 	Workers              int        `json:"workers"`
 	MaxAttempts          int        `json:"max_attempts"`
 	RetryDelays          []Duration `json:"retry_delays"`
 	ExtractionChunkRunes int        `json:"extraction_chunk_runes"`
 }
 
-// GovernanceConfig controls the single persistent governance worker. Call
-// spacing and the soft hourly budget remain internal operational bounds;
-// MaxWait is the bounded fairness window for continuous ingest. Enabled
-// defaults to true when omitted.
+// GovernanceConfig controls the independent governance worker. Call spacing and
+// the soft hourly budget remain internal operational bounds; MaxWait is the
+// bounded fairness window for continuous ingest. Enabled defaults to true when
+// omitted.
 type GovernanceConfig struct {
 	Enabled           *bool    `json:"enabled,omitempty"`
 	Debounce          Duration `json:"debounce"`
@@ -159,6 +167,19 @@ func (g GovernanceConfig) IsEnabled() bool {
 	return g.Enabled == nil || *g.Enabled
 }
 
+// AggregationConfig controls the independent derived-memory worker. L1BucketSize
+// is a code-generated time window; the model never chooses a bucket.
+type AggregationConfig struct {
+	Enabled           bool     `json:"enabled"`
+	Debounce          Duration `json:"debounce"`
+	ReconcileInterval Duration `json:"reconcile_interval"`
+	MaxInputs         int      `json:"max_inputs"`
+	L1BucketSize      Duration `json:"l1_bucket_size"`
+}
+
+// IsEnabled reports whether the aggregation worker should run.
+func (a AggregationConfig) IsEnabled() bool { return a.Enabled }
+
 // LogConfig controls logging. An empty File uses DefaultLogPath.
 type LogConfig struct {
 	Level string `json:"level"`
@@ -167,14 +188,15 @@ type LogConfig struct {
 
 // Config is the complete local configuration file shape.
 type Config struct {
-	Listen     string           `json:"listen"`
-	DataDir    string           `json:"data_dir"`
-	Database   DatabaseConfig   `json:"database"`
-	Model      ModelConfig      `json:"model"`
-	Embedding  EmbeddingConfig  `json:"embedding"`
-	Worker     WorkerConfig     `json:"worker"`
-	Governance GovernanceConfig `json:"governance"`
-	Log        LogConfig        `json:"log"`
+	Listen      string            `json:"listen"`
+	DataDir     string            `json:"data_dir"`
+	Database    DatabaseConfig    `json:"database"`
+	Model       ModelConfig       `json:"model"`
+	Embedding   EmbeddingConfig   `json:"embedding"`
+	Worker      WorkerConfig      `json:"worker"`
+	Governance  GovernanceConfig  `json:"governance"`
+	Aggregation AggregationConfig `json:"aggregation"`
+	Log         LogConfig         `json:"log"`
 }
 
 // LoadedConfig records the effective config and the file it came from. Path is
@@ -235,9 +257,9 @@ func DefaultConfig() Config {
 			Timeout: Duration(embedding.DefaultTimeout),
 		},
 		Worker: WorkerConfig{
-			ProcessBudget:        Duration(ingest.DefaultProcessBudget),
 			ExtractionTimeout:    Duration(ingest.DefaultExtractionTimeout),
-			DecisionTimeout:      Duration(ingest.DefaultDecisionTimeout),
+			GovernanceTimeout:    Duration(DefaultModelTimeout),
+			AggregationTimeout:   Duration(DefaultModelTimeout),
 			Workers:              DefaultWorkerCount,
 			MaxAttempts:          DefaultMaxAttempts,
 			RetryDelays:          durations(defaultRetryDelays),
@@ -250,6 +272,13 @@ func DefaultConfig() Config {
 			MinCallInterval:   Duration(DefaultGovernanceMinCallInterval),
 			MaxInputs:         DefaultGovernanceMaxInputs,
 			MaxWait:           Duration(DefaultGovernanceMaxWait),
+		},
+		Aggregation: AggregationConfig{
+			Enabled:           true,
+			Debounce:          Duration(DefaultAggregationDebounce),
+			ReconcileInterval: Duration(DefaultAggregationReconcileInterval),
+			MaxInputs:         DefaultAggregationMaxInputs,
+			L1BucketSize:      Duration(artifact.DefaultL1BucketSize),
 		},
 		Log: LogConfig{Level: "info", File: DefaultLogPath()},
 	}
@@ -355,14 +384,14 @@ func (cfg *Config) applyDefaults() {
 	if cfg.Worker.Workers == 0 {
 		cfg.Worker.Workers = defaults.Worker.Workers
 	}
-	if cfg.Worker.ProcessBudget == 0 {
-		cfg.Worker.ProcessBudget = defaults.Worker.ProcessBudget
-	}
 	if cfg.Worker.ExtractionTimeout == 0 {
 		cfg.Worker.ExtractionTimeout = defaults.Worker.ExtractionTimeout
 	}
-	if cfg.Worker.DecisionTimeout == 0 {
-		cfg.Worker.DecisionTimeout = defaults.Worker.DecisionTimeout
+	if cfg.Worker.GovernanceTimeout == 0 {
+		cfg.Worker.GovernanceTimeout = defaults.Worker.GovernanceTimeout
+	}
+	if cfg.Worker.AggregationTimeout == 0 {
+		cfg.Worker.AggregationTimeout = defaults.Worker.AggregationTimeout
 	}
 	if cfg.Worker.MaxAttempts == 0 {
 		cfg.Worker.MaxAttempts = defaults.Worker.MaxAttempts
@@ -384,6 +413,12 @@ func (cfg *Config) applyDefaults() {
 	}
 	if time.Duration(cfg.Governance.MaxWait) == 0 {
 		cfg.Governance.MaxWait = defaults.Governance.MaxWait
+	}
+	if cfg.Aggregation.MaxInputs == 0 {
+		cfg.Aggregation.MaxInputs = defaults.Aggregation.MaxInputs
+	}
+	if time.Duration(cfg.Aggregation.L1BucketSize) == 0 {
+		cfg.Aggregation.L1BucketSize = defaults.Aggregation.L1BucketSize
 	}
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = defaults.Log.Level
@@ -431,8 +466,9 @@ func (cfg Config) Validate() error {
 	if cfg.Worker.MaxAttempts <= 0 {
 		return errors.New("worker.max_attempts 必须大于 0")
 	}
-	if cfg.Worker.ProcessBudget <= 0 || cfg.Worker.ExtractionTimeout <= 0 || cfg.Worker.DecisionTimeout <= 0 {
-		return errors.New("worker.process_budget、extraction_timeout 和 decision_timeout 必须大于 0")
+	if cfg.Worker.ExtractionTimeout <= 0 || cfg.Worker.GovernanceTimeout <= 0 ||
+		cfg.Worker.AggregationTimeout <= 0 {
+		return errors.New("worker 的 extraction_timeout、governance_timeout 和 aggregation_timeout 必须大于 0")
 	}
 	if cfg.Worker.ExtractionChunkRunes <= 0 {
 		return errors.New("worker.extraction_chunk_runes 必须大于 0")
@@ -460,13 +496,25 @@ func (cfg Config) Validate() error {
 	if time.Duration(cfg.Governance.MaxWait) <= 0 {
 		return errors.New("governance.max_wait 必须大于 0")
 	}
+	if time.Duration(cfg.Aggregation.Debounce) < 0 {
+		return errors.New("aggregation.debounce 不能为负数")
+	}
+	if time.Duration(cfg.Aggregation.ReconcileInterval) <= 0 {
+		return errors.New("aggregation.reconcile_interval 必须大于 0")
+	}
+	if cfg.Aggregation.MaxInputs <= 0 {
+		return errors.New("aggregation.max_inputs 必须大于 0")
+	}
+	if time.Duration(cfg.Aggregation.L1BucketSize) <= 0 {
+		return errors.New("aggregation.l1_bucket_size 必须大于 0")
+	}
 	if time.Duration(cfg.Model.Timeout) <= 0 {
 		return errors.New("model.timeout 必须大于 0")
 	}
 	for name, task := range map[string]*ModelTaskConfig{
-		"extraction": cfg.Model.Extraction,
-		"decision":   cfg.Model.Decision,
-		"governance": cfg.Model.Governance,
+		"extraction":  cfg.Model.Extraction,
+		"governance":  cfg.Model.Governance,
+		"aggregation": cfg.Model.Aggregation,
 	} {
 		if task == nil {
 			continue

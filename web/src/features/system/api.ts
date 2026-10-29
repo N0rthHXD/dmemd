@@ -25,7 +25,7 @@ export async function getReadiness(signal?: AbortSignal): Promise<ReadinessState
   if (status !== 200 && status !== 503) {
     throw protocolError('就绪检查', `未预期的 HTTP ${status}`);
   }
-  return { status: body.status, httpStatus: status };
+  return { status: body.status as Health['status'], httpStatus: status };
 }
 
 function checkedEmbedding(value: EmbeddingStatus): EmbeddingStatus {

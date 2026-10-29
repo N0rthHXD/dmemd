@@ -82,12 +82,31 @@ func (f *FakeModel) EnqueueContent(content string) {
 	f.Enqueue(FakeResponse{Status: http.StatusOK, Content: content})
 }
 
-// EnqueueCandidates encodes candidates as the JSON content of a successful
-// completion.
-func (f *FakeModel) EnqueueCandidates(candidates any) {
-	data, err := json.Marshal(map[string]any{"candidates": candidates})
+// EnqueueExtraction encodes the minimal extraction protocol from a draft list.
+// It keeps only kind and content and uses the first source span as the
+// model-selected reference; evidence, IDs and titles are never part of the
+// model protocol.
+func (f *FakeModel) EnqueueExtraction(drafts any) {
+	items := make([]any, 0)
+	if list, ok := drafts.([]any); ok {
+		for _, raw := range list {
+			object, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			item := map[string]any{"span_ids": []string{"seg-0001"}}
+			if kind, ok := object["kind"]; ok {
+				item["kind"] = kind
+			}
+			if content, ok := object["content"]; ok {
+				item["content"] = content
+			}
+			items = append(items, item)
+		}
+	}
+	data, err := json.Marshal(map[string]any{"items": items})
 	if err != nil {
-		panic("testutil: encode fake candidates: " + err.Error())
+		panic("testutil: encode fake extraction items: " + err.Error())
 	}
 	f.EnqueueContent(string(data))
 }
@@ -216,7 +235,7 @@ func (f *FakeModel) handle(w http.ResponseWriter, request *http.Request) {
 	}
 	content := response.Content
 	if content == "" {
-		content = `{"candidates":[]}`
+		content = `{"items":[]}`
 	}
 	_, _ = io.WriteString(w, completionEnvelope(content))
 }

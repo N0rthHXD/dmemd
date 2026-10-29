@@ -1,6 +1,5 @@
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
-import type { MemoryPrecision, TemporalDetail } from '../api/types';
 
 dayjs.extend(utc);
 
@@ -54,84 +53,6 @@ export function fromRFC3339(value: string | null | undefined): dayjs.Dayjs | nul
   }
   const parsed = dayjs(value);
   return parsed.isValid() ? parsed : null;
-}
-
-function rawISOWithoutZone(value: string): string {
-  return value.replace('T', ' ').replace(/(?:Z|[+-]\d\d:\d\d)$/, '').slice(0, 19);
-}
-
-function precisionFormat(precision: MemoryPrecision | undefined): string | null {
-  switch (precision) {
-    case 'year':
-      return 'YYYY';
-    case 'month':
-      return 'YYYY-MM';
-    case 'day':
-      return 'YYYY-MM-DD';
-    case 'hour':
-      return 'YYYY-MM-DD HH时';
-    case 'minute':
-      return 'YYYY-MM-DD HH:mm';
-    case 'second':
-      return LOCAL_TIME_FORMAT;
-    case 'unknown':
-    default:
-      return null;
-  }
-}
-
-/**
- * Prefer the preserved source wording, then apply only the known precision.
- * A calendar value without a known timezone is never shifted by the browser.
- */
-export function formatTemporal(
-  value: string | null | undefined,
-  detail: TemporalDetail | undefined,
-  emptyText = '未知',
-): string {
-  if (!value || isZeroTimestamp(value)) {
-    return detail?.text?.trim() || emptyText;
-  }
-  if (detail?.text?.trim()) {
-    return detail.text.trim();
-  }
-  if (!detail || detail.precision === 'unknown') {
-    return emptyText;
-  }
-  const format = precisionFormat(detail.precision);
-  if (!format) {
-    return emptyText;
-  }
-  if (!detail.timezone_known) {
-    const raw = rawISOWithoutZone(value);
-    if (detail.precision === 'year') {
-      return raw.slice(0, 4);
-    }
-    if (detail.precision === 'month') {
-      return raw.slice(0, 7);
-    }
-    if (detail.precision === 'day') {
-      return raw.slice(0, 10);
-    }
-    if (detail.precision === 'hour') {
-      return `${raw.slice(0, 10)} ${raw.slice(11, 13)}时`;
-    }
-    if (detail.precision === 'minute') {
-      return raw.slice(0, 16);
-    }
-    return raw;
-  }
-  const parsed = dayjs(value);
-  return parsed.isValid() ? parsed.format(format) : value;
-}
-
-export function formatValidInterval(
-  from: string | null | undefined,
-  to: string | null | undefined,
-  fromDetail: TemporalDetail | undefined,
-  toDetail: TemporalDetail | undefined,
-): string {
-  return `${formatTemporal(from, fromDetail)} 至 ${formatTemporal(to, toDetail)}`;
 }
 
 export function formatSeconds(value: number | undefined | null): string {

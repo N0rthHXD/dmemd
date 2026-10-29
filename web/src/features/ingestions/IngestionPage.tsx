@@ -125,7 +125,7 @@ export default function IngestionPage() {
       <UnsavedChangesGuard when={dirty} />
       <Typography.Title level={3}>{memoryContext ? '更正记忆' : '添加内容'}</Typography.Title>
       <Typography.Paragraph type="secondary">
-        写下想记住的内容，系统会在后台提取和整理。提交后可继续查看处理进展。
+        写下想记住的内容。系统会先保存来源，再在后台提取 L0 原始观察，随后异步治理为当前记忆。提交后可继续查看处理进展。
       </Typography.Paragraph>
 
       {memoryContext ? (
@@ -159,8 +159,8 @@ export default function IngestionPage() {
             style={{ marginTop: 12 }}
             type="warning"
             showIcon
-            message="更正内容会重新核对，不会直接覆盖原记忆"
-            description="请说明准确的信息、适用时间和情况。系统可能补充来源、新增记忆或提出需要核对的问题，请以处理结果为准。"
+            message="更正内容会重新提取和治理，不会直接覆盖原记忆"
+            description="请说明准确的信息和适用条件。系统会先形成新的原始观察，再由治理阶段决定新增、补充或形成冲突，请以处理结果为准。"
           />
         </Card>
       ) : null}
@@ -269,7 +269,7 @@ export default function IngestionPage() {
                   <Tag color="success">已接收</Tag>
                   <StatusTag category="jobStatus" value={receipt.status} />
                 </Space>
-                <Typography.Paragraph>已收到内容，正在后台整理。处理完成后，可查看实际记住了哪些信息。</Typography.Paragraph>
+                <Typography.Paragraph>已收到内容，提取任务已排队。处理完成后，可查看保存的 L0 原始观察和后续治理状态。</Typography.Paragraph>
                 <TechnicalDetails label="保存回执编号"><Descriptions size="small" column={1} bordered>
                   <Descriptions.Item label="来源 ID">
                     <IdText value={receipt.source_id} maxWidth={300} />
@@ -289,15 +289,17 @@ export default function IngestionPage() {
                 <Alert
                   type="info"
                   showIcon
-                  message="已接收不代表全部内容已保存为记忆"
-                  description="系统会筛选值得保留的信息；有些内容可能需要进一步核对。"
+                  message="已接收不代表已形成当前记忆"
+                  description="系统会先形成原始观察，再由治理阶段决定是否形成或更新当前记忆。"
                 />
               </Space>
             </Card>
           ) : null}
           <Card title="提交后会发生什么？">
             <Typography.Paragraph>
-              1. 接收内容，保留来源。<br />2. 提取有用信息，与已有记忆核对。<br />3. 保存处理结果，并在后台自动整理。
+              1. 接收内容，保存不可变来源和稳定 span。<br />
+              2. 提取阶段只形成 L0 原始观察，不读取已有记忆。<br />
+              3. 治理阶段异步形成当前记忆；聚合阶段再逐层生成 L1-L4 派生内容。
             </Typography.Paragraph>
             <Typography.Paragraph>
               本次打开页面期间的提交会出现在处理记录中。刷新页面前，建议保存处理详情链接，方便稍后查看。

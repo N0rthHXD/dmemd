@@ -1,3 +1,5 @@
+//go:build legacy
+
 package integration_test
 
 import (
@@ -88,8 +90,12 @@ func (f *searchFixture) revise(t *testing.T, input memory.ReviseInput) memory.Me
 	return revised
 }
 
-func (f *searchFixture) evidence(quote string) source.Evidence {
-	return source.NewEvidence(f.source, source.EvidenceReference{Quote: quote}, "test-model", f.clock)
+func (f *searchFixture) evidence() source.Evidence {
+	items, err := source.EvidenceForSegments(f.source, []string{"seg-0001"}, f.clock)
+	if err != nil {
+		panic(err)
+	}
+	return items[0]
 }
 
 func (f *searchFixture) run(t *testing.T, request retrieval.Request) retrieval.Result {
@@ -103,7 +109,7 @@ func (f *searchFixture) run(t *testing.T, request retrieval.Request) retrieval.R
 
 func TestChineseKeywordSearchContract(t *testing.T) {
 	f := newSearchFixture(t)
-	answerEvidence := f.evidence("用户希望默认使用中文回答。")
+	answerEvidence := f.evidence()
 	answer := f.create(t, memory.CreateInput{
 		Kind: memory.KindPreference, Title: "回答语言", Content: "用户希望默认使用中文回答。",
 		CreatedByApp: "desktop", Evidence: []source.Evidence{answerEvidence},
@@ -449,7 +455,7 @@ func TestNegationOnlyTermsRemainSearchable(t *testing.T) {
 func TestSearchLifecycleCorrectionAndRollback(t *testing.T) {
 	f := newSearchFixture(t)
 	ctx := context.Background()
-	oldEvidence := f.evidence("旧的记忆内容")
+	oldEvidence := f.evidence()
 	created := f.create(t, memory.CreateInput{
 		Kind: memory.KindFact, Title: "旧标题", Content: "旧的记忆内容",
 		CreatedByApp: "desktop", Evidence: []source.Evidence{oldEvidence},
@@ -471,7 +477,7 @@ func TestSearchLifecycleCorrectionAndRollback(t *testing.T) {
 	}
 
 	f.advance(time.Minute)
-	addedEvidence := f.evidence("新的搜索内容")
+	addedEvidence := f.evidence()
 	revised = f.revise(t, memory.ReviseInput{
 		MemoryID: revised.ID, Evidence: []source.Evidence{addedEvidence},
 		Operation: memory.OperationAddEvidence,

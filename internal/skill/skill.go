@@ -13,14 +13,14 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/artifact"
 )
 
-// Request is the bounded input for one skill-generation call. Procedures are
-// the primary source; experience cases and results supply counterexamples.
+// Request is the bounded input for one L4 skill-generation call. Inputs carry
+// only stable procedure memories, L1/L2 aggregates and application-reported
+// experience runs; raw observations are never selected for an L4 skill.
 type Request struct {
-	ScopeKey    string                     `json:"scope_key"`
-	Topic       string                     `json:"topic,omitempty"`
-	Procedures  []artifact.MemoryInput     `json:"procedures"`
-	Experiences []artifact.ExperienceInput `json:"experiences"`
-	Truncated   bool                       `json:"truncated"`
+	ScopeKey  string              `json:"scope_key"`
+	Topic     string              `json:"topic,omitempty"`
+	Inputs    []artifact.InputRef `json:"inputs"`
+	Truncated bool                `json:"truncated"`
 }
 
 // Draft is the tolerant parsed model output. At least Content or one usable
@@ -154,15 +154,15 @@ func (s *Service) Get(ctx context.Context, id string, version int) (Content, err
 		detail, err = s.artifacts.GetVersion(ctx, id, version)
 	} else {
 		detail, err = s.artifacts.Get(ctx, id)
-		if err == nil && detail.Artifact.State != artifact.StateActive {
+		if err == nil && detail.DerivedMemory.State != artifact.StateActive {
 			return Content{}, fmt.Errorf("%w: %s", artifact.ErrNotFound, id)
 		}
 	}
 	if err != nil {
 		return Content{}, err
 	}
-	if detail.Artifact.Kind != artifact.KindSkill || detail.Revision == nil ||
-		detail.Artifact.CurrentVersion == 0 && version <= 0 {
+	if detail.DerivedMemory.Kind != artifact.KindSkill || detail.Revision == nil ||
+		detail.DerivedMemory.CurrentVersion == 0 && version <= 0 {
 		return Content{}, fmt.Errorf("%w: %s", artifact.ErrNotFound, id)
 	}
 	description := payloadDescription(detail.Revision.Payload)
@@ -170,15 +170,13 @@ func (s *Service) Get(ctx context.Context, id string, version int) (Content, err
 		description = detail.Revision.Title
 	}
 	return Content{
-		ArtifactID:  detail.Artifact.ID,
+		ArtifactID:  detail.DerivedMemory.ID,
 		Version:     detail.Revision.Version,
-		State:       string(detail.Artifact.State),
+		State:       string(detail.DerivedMemory.State),
 		Name:        detail.Revision.Title,
 		Description: description,
 		Content:     Render(detail.Revision.Title, description, detail.Revision.Content),
 		Truncated:   detail.Revision.Truncated,
-		MemoryRefs:  detail.Revision.MemoryRefs,
-		RunRefs:     detail.Revision.RunRefs,
 	}, nil
 }
 

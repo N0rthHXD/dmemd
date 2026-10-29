@@ -53,11 +53,11 @@ func WithServices(services Services) Option {
 	}
 }
 
-// WithWorker installs the single sequential ingest worker. Serve recovers
-// leftover jobs before accepting HTTP traffic and stops the worker on shutdown.
-func WithWorker(worker *ingest.Worker) Option {
+// WithExtractionWorker installs the single sequential source/extraction worker.
+// Serve starts it before governance and stops it on shutdown.
+func WithExtractionWorker(worker *ingest.Worker) Option {
 	return func(app *App) {
-		app.worker = worker
+		app.extractionWorker = worker
 	}
 }
 
@@ -70,7 +70,7 @@ func WithEmbeddingWorker(worker *embedding.Worker) Option {
 }
 
 // WithGovernanceWorker installs the single persistent governance worker. Its
-// failures degrade background organization only; HTTP and atomic reads remain
+// failures degrade current-view organization only; HTTP and atomic reads remain
 // available.
 func WithGovernanceWorker(worker *governance.Worker) Option {
 	return func(app *App) {
@@ -78,17 +78,26 @@ func WithGovernanceWorker(worker *governance.Worker) Option {
 	}
 }
 
+// WithAggregationWorker installs the single persistent derived-memory worker.
+// Its model failures never block extraction, governance or HTTP reads.
+func WithAggregationWorker(worker *governance.Worker) Option {
+	return func(app *App) {
+		app.aggregationWorker = worker
+	}
+}
+
 // App is the process runtime: configuration, HTTP lifecycle, health endpoints,
 // business routes and the optional background workers.
 type App struct {
-	cfg              Config
-	logger           *slog.Logger
-	ready            Readiness
-	services         Services
-	worker           *ingest.Worker
-	governanceWorker *governance.Worker
-	embeddingWorker  *embedding.Worker
-	server           *http.Server
+	cfg               Config
+	logger            *slog.Logger
+	ready             Readiness
+	services          Services
+	extractionWorker  *ingest.Worker
+	governanceWorker  *governance.Worker
+	aggregationWorker *governance.Worker
+	embeddingWorker   *embedding.Worker
+	server            *http.Server
 }
 
 // New validates configuration and assembles the HTTP surface. Business routes
@@ -162,22 +171,32 @@ func (a *App) Serve(ctx context.Context, listener net.Listener) error {
 	var workerWG sync.WaitGroup
 	activeWorkers := 0
 
-	if a.worker != nil || a.governanceWorker != nil || a.embeddingWorker != nil {
+	if a.extractionWorker != nil || a.governanceWorker != nil ||
+		a.aggregationWorker != nil || a.embeddingWorker != nil {
 		workerCtx, cancelWorker = context.WithCancel(ctx)
 		defer cancelWorker()
 	}
 
-	if a.worker != nil {
+	// Stage order is fixed: source/extraction, governance, aggregation,
+	// embedding, then HTTP. Starting a goroutine does not wait for it, so a
+	// parked model stage cannot delay readiness.
+	if a.extractionWorker != nil {
 		activeWorkers++
 		workerWG.Add(1)
-		go a.superviseWorker(workerCtx, &workerWG, "ingest", a.worker.Run)
-		a.logger.Info("ingest worker starting")
+		go a.superviseWorker(workerCtx, &workerWG, "extraction", a.extractionWorker.Run)
+		a.logger.Info("extraction worker starting")
 	}
 	if a.governanceWorker != nil {
 		activeWorkers++
 		workerWG.Add(1)
 		go a.superviseWorker(workerCtx, &workerWG, "governance", a.governanceWorker.Run)
 		a.logger.Info("governance worker starting")
+	}
+	if a.aggregationWorker != nil {
+		activeWorkers++
+		workerWG.Add(1)
+		go a.superviseWorker(workerCtx, &workerWG, "aggregation", a.aggregationWorker.Run)
+		a.logger.Info("aggregation worker starting")
 	}
 	if a.embeddingWorker != nil {
 		activeWorkers++

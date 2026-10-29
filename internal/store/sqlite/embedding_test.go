@@ -26,9 +26,6 @@ func seedEmbeddingMemory(t *testing.T, store *Store, item memory.Memory) (memory
 	if item.Version == 0 {
 		item.Version = 1
 	}
-	if item.ObservedAt.IsZero() {
-		item.ObservedAt = testTime(0)
-	}
 	if item.CreatedAt.IsZero() {
 		item.CreatedAt = testTime(0)
 	}
@@ -290,9 +287,9 @@ func TestSearchVectorsFiltersReadinessAndThreshold(t *testing.T) {
 	early := testTime(0)
 	late := testTime(time.Minute)
 	fixtures := []fixture{
-		{item: memory.Memory{Kind: memory.KindPreference, Title: "A", Content: "a", CreatedByApp: "app-a", UpdatedAt: early}, vector: []float32{1, 0, 0}},
-		{item: memory.Memory{Kind: memory.KindFact, Title: "B", Content: "b", CreatedByApp: "app-b", UpdatedAt: late}, vector: []float32{0.8, 0.6, 0}},
-		{item: memory.Memory{Kind: memory.KindPreference, Title: "C", Content: "c", State: memory.StateArchived, CreatedByApp: "app-a", UpdatedAt: late}, vector: []float32{0.9, 0.1, 0}},
+		{item: memory.Memory{Kind: memory.KindPreference, Title: "A", Content: "a", UpdatedAt: early}, vector: []float32{1, 0, 0}},
+		{item: memory.Memory{Kind: memory.KindFact, Title: "B", Content: "b", UpdatedAt: late}, vector: []float32{0.8, 0.6, 0}},
+		{item: memory.Memory{Kind: memory.KindPreference, Title: "C", Content: "c", State: memory.StateArchived, UpdatedAt: late}, vector: []float32{0.9, 0.1, 0}},
 	}
 	for index := range fixtures {
 		fixtures[index].item, _ = seedEmbeddingMemory(t, store, fixtures[index].item)
@@ -319,11 +316,6 @@ func TestSearchVectorsFiltersReadinessAndThreshold(t *testing.T) {
 	hits, err = store.SearchVectors(ctx, query)
 	if err != nil || len(hits) != 1 || hits[0].MemoryID != fixtures[0].item.ID {
 		t.Fatalf("kind filter = %+v, %v", hits, err)
-	}
-	query.Filters = retrieval.Filters{States: []memory.State{memory.StateActive}, CreatedByApp: "app-b"}
-	hits, err = store.SearchVectors(ctx, query)
-	if err != nil || len(hits) != 1 || hits[0].MemoryID != fixtures[1].item.ID {
-		t.Fatalf("app filter = %+v, %v", hits, err)
 	}
 	query.Filters = retrieval.Filters{States: []memory.State{memory.StateArchived}}
 	hits, err = store.SearchVectors(ctx, query)
@@ -455,7 +447,7 @@ func TestHasUnhashedDocumentsTriggersOneFullRebuild(t *testing.T) {
 	ctx := context.Background()
 	item := memory.Memory{
 		ID: idgen.NewUUID(), Kind: memory.KindFact, Title: "legacy", Content: "legacy content",
-		State: memory.StateActive, Version: 1, ObservedAt: testTime(0),
+		State: memory.StateActive, Version: 1,
 		CreatedAt: testTime(0), UpdatedAt: testTime(0),
 	}
 	if err := store.WithTx(ctx, func(ctx context.Context, tx *Tx) error {

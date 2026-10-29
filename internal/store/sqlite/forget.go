@@ -7,7 +7,6 @@ import (
 
 	"github.com/N0rthHXD/dmemd/internal/governance"
 	"github.com/N0rthHXD/dmemd/internal/governance/task"
-	"github.com/N0rthHXD/dmemd/internal/memory"
 	"github.com/N0rthHXD/dmemd/internal/source"
 )
 
@@ -45,30 +44,10 @@ func (t *Tx) DeleteForgetConflicts(ctx context.Context, memoryID string, now tim
 	return nil
 }
 
-// ListForgetGroupMemories deliberately includes deleted tombstones: permanent
-// forget must not leave restorable copies behind. Unlike reasoning scans it has
-// no visibility filter or result limit.
-func (t *Tx) ListForgetGroupMemories(ctx context.Context, groupID string) ([]memory.Memory, error) {
-	rows, err := t.tx.QueryContext(ctx, `SELECT `+memoryColumns+` FROM memories
-		WHERE fact_group_id = ? ORDER BY id ASC`, groupID)
-	if err != nil {
-		return nil, fmt.Errorf("读取遗忘事实组 %s: %w", groupID, err)
-	}
-	defer rows.Close()
-	items := []memory.Memory{}
-	for rows.Next() {
-		item, err := scanMemory(rows)
-		if err != nil {
-			return nil, fmt.Errorf("读取遗忘事实组 %s: %w", groupID, err)
-		}
-		items = append(items, item)
-	}
-	return items, rows.Err()
-}
-
-// ListMemoryIDsForSource returns every atomic memory associated with a source,
-// including memories that only keep the source in a historical revision or an
-// evidence link. Permanent deletion removes the conservative whole set.
+// ListMemoryIDsForSource returns every canonical memory associated with a
+// source, including memories that only keep the source in a historical
+// revision, an observation reference or an evidence link. Permanent deletion
+// removes the conservative whole set.
 func (t *Tx) ListMemoryIDsForSource(ctx context.Context, sourceID string) ([]string, error) {
 	rows, err := t.tx.QueryContext(ctx, `SELECT DISTINCT m.id FROM memories m
 		WHERE m.origin_source_id = ?
@@ -76,10 +55,14 @@ func (t *Tx) ListMemoryIDsForSource(ctx context.Context, sourceID string) ([]str
 		SELECT DISTINCT r.memory_id FROM memory_revisions r
 		WHERE r.origin_source_id = ?
 		UNION
+		SELECT DISTINCT ref.memory_id FROM memory_observation_refs ref
+		JOIN observations o ON o.id = ref.observation_id
+		WHERE o.source_id = ?
+		UNION
 		SELECT DISTINCT re.memory_id FROM revision_evidence re
 		JOIN evidence e ON e.id = re.evidence_id
 		WHERE e.source_id = ?
-		ORDER BY 1 ASC`, sourceID, sourceID, sourceID)
+		ORDER BY 1 ASC`, sourceID, sourceID, sourceID, sourceID)
 	if err != nil {
 		return nil, fmt.Errorf("读取来源 %s 的关联记忆: %w", sourceID, err)
 	}
@@ -149,12 +132,23 @@ func (t *Tx) DeleteIngestJobsBySource(ctx context.Context, sourceID string) erro
 }
 
 // DeleteEvidenceBySource removes every evidence row copied from a source.
-// Revision links cascade with the evidence; associated memories are purged
-// before this call.
+// Revision links and observation/evidence links cascade with the evidence;
+// associated memories are purged before this call.
 func (t *Tx) DeleteEvidenceBySource(ctx context.Context, sourceID string) error {
 	if _, err := t.tx.ExecContext(ctx,
 		`DELETE FROM evidence WHERE source_id = ?`, sourceID); err != nil {
 		return fmt.Errorf("清除来源 %s 的证据: %w", sourceID, err)
+	}
+	return nil
+}
+
+// DeleteObservationsBySource removes the L0 observations extracted from a
+// source. Canonical memories referencing them must be purged first because
+// memory_observation_refs is RESTRICT.
+func (t *Tx) DeleteObservationsBySource(ctx context.Context, sourceID string) error {
+	if _, err := t.tx.ExecContext(ctx,
+		`DELETE FROM observations WHERE source_id = ?`, sourceID); err != nil {
+		return fmt.Errorf("清除来源 %s 的观察: %w", sourceID, err)
 	}
 	return nil
 }

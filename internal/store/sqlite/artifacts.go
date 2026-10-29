@@ -6,18 +6,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/N0rthHXD/dmemd/internal/artifact"
 	"github.com/N0rthHXD/dmemd/internal/governance/task"
-	"github.com/N0rthHXD/dmemd/internal/topic"
 )
 
-const artifactColumns = `id, kind, target_key, scope_key, topic, current_version, state, reason_code, updated_at`
+const artifactColumns = `id, layer, kind, target_key, scope_key, topic, current_version, state, reason_code, updated_at`
 
 const artifactRevisionColumns = `artifact_id, version, title, content, payload_json,
-	content_hash, generator, protocol_version, taxonomy_version, generator_version, run_id, provenance_json, reason_code, truncated, created_at`
+	content_hash, generator, protocol_version, truncated, created_at`
 
 var (
 	_ artifact.Backend = (*Store)(nil)
@@ -25,16 +25,16 @@ var (
 )
 
 // GetArtifact reads one derived object from the read pool.
-func (s *Store) GetArtifact(ctx context.Context, id string) (artifact.Artifact, error) {
+func (s *Store) GetArtifact(ctx context.Context, id string) (artifact.DerivedMemory, error) {
 	return getArtifact(ctx, s.reader, id)
 }
 
 // GetArtifactByTarget reads the unique object for one kind and target key.
-func (s *Store) GetArtifactByTarget(ctx context.Context, kind artifact.Kind, targetKey string) (artifact.Artifact, error) {
+func (s *Store) GetArtifactByTarget(ctx context.Context, kind artifact.Kind, targetKey string) (artifact.DerivedMemory, error) {
 	return getArtifactByTarget(ctx, s.reader, kind, targetKey)
 }
 
-// GetArtifactRevision reads one immutable revision and its direct sources.
+// GetArtifactRevision reads one immutable revision.
 func (s *Store) GetArtifactRevision(ctx context.Context, id string, version int) (artifact.Revision, error) {
 	return getArtifactRevision(ctx, s.reader, id, version)
 }
@@ -44,11 +44,17 @@ func (s *Store) ListArtifactRevisions(ctx context.Context, id string, limit int)
 	return listArtifactRevisions(ctx, s.reader, id, limit)
 }
 
-func (t *Tx) GetArtifact(ctx context.Context, id string) (artifact.Artifact, error) {
+// ListArtifactDependencies reads the exact typed inputs of one immutable
+// revision.
+func (s *Store) ListArtifactDependencies(ctx context.Context, id string, version int) ([]artifact.DependencyRef, error) {
+	return listArtifactDependencies(ctx, s.reader, id, version)
+}
+
+func (t *Tx) GetArtifact(ctx context.Context, id string) (artifact.DerivedMemory, error) {
 	return getArtifact(ctx, t.tx, id)
 }
 
-func (t *Tx) GetArtifactByTarget(ctx context.Context, kind artifact.Kind, targetKey string) (artifact.Artifact, error) {
+func (t *Tx) GetArtifactByTarget(ctx context.Context, kind artifact.Kind, targetKey string) (artifact.DerivedMemory, error) {
 	return getArtifactByTarget(ctx, t.tx, kind, targetKey)
 }
 
@@ -63,45 +69,49 @@ type artifactQueryer interface {
 
 func getArtifact(ctx context.Context, q interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
-}, id string) (artifact.Artifact, error) {
+}, id string) (artifact.DerivedMemory, error) {
 	item, err := scanArtifact(q.QueryRowContext(ctx,
 		`SELECT `+artifactColumns+` FROM artifacts WHERE id = ?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
-		return artifact.Artifact{}, fmt.Errorf("%w: %s", artifact.ErrNotFound, id)
+		return artifact.DerivedMemory{}, fmt.Errorf("%w: %s", artifact.ErrNotFound, id)
 	}
 	if err != nil {
-		return artifact.Artifact{}, fmt.Errorf("读取派生对象 %s: %w", id, err)
+		return artifact.DerivedMemory{}, fmt.Errorf("读取派生对象 %s: %w", id, err)
 	}
 	return item, nil
 }
 
 func getArtifactByTarget(ctx context.Context, q interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
-}, kind artifact.Kind, targetKey string) (artifact.Artifact, error) {
+}, kind artifact.Kind, targetKey string) (artifact.DerivedMemory, error) {
 	item, err := scanArtifact(q.QueryRowContext(ctx,
 		`SELECT `+artifactColumns+` FROM artifacts WHERE kind = ? AND target_key = ?`,
 		string(kind), targetKey))
 	if errors.Is(err, sql.ErrNoRows) {
-		return artifact.Artifact{}, fmt.Errorf("%w: %s/%s", artifact.ErrNotFound, kind, targetKey)
+		return artifact.DerivedMemory{}, fmt.Errorf("%w: %s/%s", artifact.ErrNotFound, kind, targetKey)
 	}
 	if err != nil {
-		return artifact.Artifact{}, fmt.Errorf("读取派生对象 %s/%s: %w", kind, targetKey, err)
+		return artifact.DerivedMemory{}, fmt.Errorf("读取派生对象 %s/%s: %w", kind, targetKey, err)
 	}
 	return item, nil
 }
 
-func scanArtifact(row rowScanner) (artifact.Artifact, error) {
-	var item artifact.Artifact
-	var kind, state, updated string
-	if err := row.Scan(&item.ID, &kind, &item.TargetKey, &item.ScopeKey, &item.Topic,
+func scanArtifact(row rowScanner) (artifact.DerivedMemory, error) {
+	var item artifact.DerivedMemory
+	var layer, kind, state, updated string
+	if err := row.Scan(&item.ID, &layer, &kind, &item.TargetKey, &item.ScopeKey, &item.Topic,
 		&item.CurrentVersion, &state, &item.ReasonCode, &updated); err != nil {
-		return artifact.Artifact{}, err
+		return artifact.DerivedMemory{}, err
+	}
+	item.Layer = artifact.Layer(layer)
+	if !item.Layer.Known() {
+		item.Layer = artifact.LayerForKind(artifact.Kind(kind))
 	}
 	item.Kind = artifact.Kind(kind)
 	item.State = artifact.State(state)
 	parsed, err := parseTime(updated)
 	if err != nil {
-		return artifact.Artifact{}, err
+		return artifact.DerivedMemory{}, err
 	}
 	item.UpdatedAt = parsed
 	return item, nil
@@ -116,14 +126,6 @@ func getArtifactRevision(ctx context.Context, q artifactQueryer, id string, vers
 	}
 	if err != nil {
 		return artifact.Revision{}, fmt.Errorf("读取派生版本 %s@%d: %w", id, version, err)
-	}
-	revision.MemoryRefs, err = listArtifactMemoryRefs(ctx, q, id, version)
-	if err != nil {
-		return artifact.Revision{}, err
-	}
-	revision.RunRefs, err = listArtifactRunRefs(ctx, q, id, version)
-	if err != nil {
-		return artifact.Revision{}, err
 	}
 	return revision, nil
 }
@@ -145,14 +147,6 @@ func listArtifactRevisions(ctx context.Context, q artifactQueryer, id string, li
 		if err != nil {
 			return nil, fmt.Errorf("读取派生版本列表 %s: %w", id, err)
 		}
-		revision.MemoryRefs, err = listArtifactMemoryRefs(ctx, q, id, revision.Version)
-		if err != nil {
-			return nil, err
-		}
-		revision.RunRefs, err = listArtifactRunRefs(ctx, q, id, revision.Version)
-		if err != nil {
-			return nil, err
-		}
 		items = append(items, revision)
 	}
 	if err := rows.Err(); err != nil {
@@ -163,15 +157,13 @@ func listArtifactRevisions(ctx context.Context, q artifactQueryer, id string, li
 
 func scanArtifactRevision(row rowScanner) (artifact.Revision, error) {
 	var item artifact.Revision
-	var payload, provenance, created string
+	var payload, created string
 	var truncated int
 	if err := row.Scan(&item.ArtifactID, &item.Version, &item.Title, &item.Content, &payload,
-		&item.ContentHash, &item.Generator, &item.ProtocolVersion, &item.TaxonomyVersion, &item.GeneratorVersion, &item.RunID, &provenance, &item.ReasonCode,
-		&truncated, &created); err != nil {
+		&item.ContentHash, &item.Generator, &item.ProtocolVersion, &truncated, &created); err != nil {
 		return artifact.Revision{}, err
 	}
 	item.Payload = json.RawMessage(payload)
-	item.Provenance = json.RawMessage(provenance)
 	if item.Payload == nil {
 		item.Payload = json.RawMessage("{}")
 	}
@@ -184,61 +176,18 @@ func scanArtifactRevision(row rowScanner) (artifact.Revision, error) {
 	return item, nil
 }
 
-func listArtifactRunRefs(ctx context.Context, q artifactQueryer, id string, version int) ([]artifact.RunRef, error) {
-	rows, err := q.QueryContext(ctx,
-		`SELECT experience_id FROM artifact_run_dependencies
-		 WHERE artifact_id = ? AND artifact_version = ?
-		 ORDER BY experience_id ASC`, id, version)
-	if err != nil {
-		return nil, fmt.Errorf("读取派生运行来源 %s@%d: %w", id, version, err)
-	}
-	defer rows.Close()
-	refs := []artifact.RunRef{}
-	for rows.Next() {
-		var ref artifact.RunRef
-		if err := rows.Scan(&ref.ExperienceID); err != nil {
-			return nil, fmt.Errorf("读取派生运行来源 %s@%d: %w", id, version, err)
-		}
-		refs = append(refs, ref)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("读取派生运行来源 %s@%d: %w", id, version, err)
-	}
-	return refs, nil
-}
-
-func listArtifactMemoryRefs(ctx context.Context, q artifactQueryer, id string, version int) ([]artifact.MemoryRef, error) {
-	rows, err := q.QueryContext(ctx,
-		`SELECT memory_id, memory_version FROM artifact_memory_dependencies
-		 WHERE artifact_id = ? AND artifact_version = ?
-		 ORDER BY memory_id ASC`, id, version)
-	if err != nil {
-		return nil, fmt.Errorf("读取派生来源 %s@%d: %w", id, version, err)
-	}
-	defer rows.Close()
-	refs := []artifact.MemoryRef{}
-	for rows.Next() {
-		var ref artifact.MemoryRef
-		if err := rows.Scan(&ref.MemoryID, &ref.Version); err != nil {
-			return nil, fmt.Errorf("读取派生来源 %s@%d: %w", id, version, err)
-		}
-		refs = append(refs, ref)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("读取派生来源 %s@%d: %w", id, version, err)
-	}
-	return refs, nil
-}
-
 // CreateArtifact inserts a new derivation target. CurrentVersion zero means no
 // usable version has been generated yet.
-func (t *Tx) CreateArtifact(ctx context.Context, item artifact.Artifact) error {
-	if !item.Kind.Known() || item.TargetKey == "" || !item.State.Known() {
+func (t *Tx) CreateArtifact(ctx context.Context, item artifact.DerivedMemory) error {
+	if item.Layer == "" {
+		item.Layer = artifact.LayerForKind(item.Kind)
+	}
+	if !item.Kind.Known() || !item.Layer.Known() || item.TargetKey == "" || !item.State.Known() {
 		return fmt.Errorf("%w: invalid artifact metadata", artifact.ErrInvalidInput)
 	}
 	if _, err := t.tx.ExecContext(ctx, `INSERT INTO artifacts(`+artifactColumns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		item.ID, string(item.Kind), item.TargetKey, item.ScopeKey, item.Topic,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		item.ID, string(item.Layer), string(item.Kind), item.TargetKey, item.ScopeKey, item.Topic,
 		item.CurrentVersion, string(item.State), item.ReasonCode, formatTime(item.UpdatedAt)); err != nil {
 		return fmt.Errorf("写入派生对象 %s: %w", item.ID, err)
 	}
@@ -246,14 +195,18 @@ func (t *Tx) CreateArtifact(ctx context.Context, item artifact.Artifact) error {
 }
 
 // UpdateArtifact replaces the mutable current pointer and state.
-func (t *Tx) UpdateArtifact(ctx context.Context, item artifact.Artifact) error {
+func (t *Tx) UpdateArtifact(ctx context.Context, item artifact.DerivedMemory) error {
 	if !item.State.Known() {
 		return fmt.Errorf("%w: state %q", artifact.ErrInvalidInput, item.State)
 	}
+	layer := item.Layer
+	if !layer.Known() {
+		layer = artifact.LayerForKind(item.Kind)
+	}
 	result, err := t.tx.ExecContext(ctx, `UPDATE artifacts SET
-		scope_key = ?, topic = ?, current_version = ?, state = ?, reason_code = ?, updated_at = ?
+		layer = ?, scope_key = ?, topic = ?, current_version = ?, state = ?, reason_code = ?, updated_at = ?
 		WHERE id = ?`,
-		item.ScopeKey, item.Topic, item.CurrentVersion, string(item.State),
+		string(layer), item.ScopeKey, item.Topic, item.CurrentVersion, string(item.State),
 		item.ReasonCode, formatTime(item.UpdatedAt), item.ID)
 	if err != nil {
 		return fmt.Errorf("更新派生对象 %s: %w", item.ID, err)
@@ -279,46 +232,52 @@ func (t *Tx) InsertArtifactRevision(ctx context.Context, revision artifact.Revis
 		truncated = 1
 	}
 	if _, err := t.tx.ExecContext(ctx, `INSERT INTO artifact_revisions(`+artifactRevisionColumns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		revision.ArtifactID, revision.Version, revision.Title, revision.Content,
 		string(payload), revision.ContentHash, revision.Generator, revision.ProtocolVersion,
-		revision.TaxonomyVersion, revision.GeneratorVersion, revision.RunID, string(revision.Provenance),
-		revision.ReasonCode, truncated, formatTime(revision.CreatedAt)); err != nil {
+		truncated, formatTime(revision.CreatedAt)); err != nil {
 		return fmt.Errorf("写入派生版本 %s@%d: %w", revision.ArtifactID, revision.Version, err)
 	}
 	return nil
 }
 
-// LinkArtifactMemoryDependencies records the exact atomic snapshots used by one
-// derived version.
-func (t *Tx) LinkArtifactMemoryDependencies(ctx context.Context, artifactID string, version int, refs []artifact.MemoryRef) error {
-	for _, ref := range refs {
-		if ref.MemoryID == "" || ref.Version <= 0 {
-			continue
-		}
-		if _, err := t.tx.ExecContext(ctx, `INSERT INTO artifact_memory_dependencies
-			(artifact_id, artifact_version, memory_id, memory_version) VALUES (?, ?, ?, ?)`,
-			artifactID, version, ref.MemoryID, ref.Version); err != nil {
-			return fmt.Errorf("关联派生来源 %s@%d/%s@%d: %w",
-				artifactID, version, ref.MemoryID, ref.Version, err)
-		}
-	}
-	return nil
+// LinkDerivedDependencies is the standalone convenience form for callers
+// outside a transaction.
+func (s *Store) LinkDerivedDependencies(ctx context.Context, derivedID string, version int, refs []artifact.DependencyRef) error {
+	return s.WithTx(ctx, func(ctx context.Context, tx *Tx) error {
+		return tx.LinkDerivedDependencies(ctx, derivedID, version, refs)
+	})
 }
 
-// LinkArtifactRunDependencies records the exact application results used by one
-// derived version. Revocation and purge enumerate this reverse index before any
-// cascade deletes the edge.
-func (t *Tx) LinkArtifactRunDependencies(ctx context.Context, artifactID string, version int, refs []artifact.RunRef) error {
+// LinkDerivedDependencies records the exact typed inputs of one derived
+// revision. Repeated refs and repeated calls are idempotent. The derived object
+// identity and version are always service-generated.
+func (t *Tx) LinkDerivedDependencies(ctx context.Context, derivedID string, version int, refs []artifact.DependencyRef) error {
+	if strings.TrimSpace(derivedID) == "" || version <= 0 {
+		return fmt.Errorf("%w: derived %q version %d", artifact.ErrInvalidInput, derivedID, version)
+	}
+	seen := make(map[string]struct{}, len(refs))
 	for _, ref := range refs {
-		if ref.ExperienceID == "" {
+		ref.ID = strings.TrimSpace(ref.ID)
+		if ref.ID == "" || !ref.Type.Known() || ref.Version < 0 {
 			continue
 		}
-		if _, err := t.tx.ExecContext(ctx, `INSERT INTO artifact_run_dependencies
-			(artifact_id, artifact_version, experience_id) VALUES (?, ?, ?)`,
-			artifactID, version, ref.ExperienceID); err != nil {
-			return fmt.Errorf("关联派生运行来源 %s@%d/%s: %w",
-				artifactID, version, ref.ExperienceID, err)
+		key := string(ref.Type) + "\x00" + ref.ID + "\x00" + strconv.Itoa(ref.Version)
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		required := 0
+		if ref.Required {
+			required = 1
+		}
+		if _, err := t.tx.ExecContext(ctx, `INSERT INTO derived_dependencies
+			(derived_id, derived_version, input_type, input_id, input_version, required)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT(derived_id, derived_version, input_type, input_id, input_version) DO NOTHING`,
+			derivedID, version, string(ref.Type), ref.ID, ref.Version, required); err != nil {
+			return fmt.Errorf("关联派生输入 %s@%d/%s:%s@%d: %w",
+				derivedID, version, ref.Type, ref.ID, ref.Version, err)
 		}
 	}
 	return nil
@@ -351,32 +310,32 @@ func (t *Tx) DeleteArtifactSearchDocument(ctx context.Context, artifactID string
 // ListArtifactsForMemory returns derived objects whose current version directly
 // depends on the memory. Historical-only dependencies still matter for purge,
 // but they no longer make an unrelated current summary stale.
-func (t *Tx) ListArtifactsForMemory(ctx context.Context, memoryID string) ([]artifact.Artifact, error) {
+func (t *Tx) ListArtifactsForMemory(ctx context.Context, memoryID string) ([]artifact.DerivedMemory, error) {
 	return t.listArtifactsForMemory(ctx, memoryID, true)
 }
 
 // ListAllArtifactsForMemory includes historical-only dependencies so purge can
 // invalidate every affected task before removing the artifact and its history.
-func (t *Tx) ListAllArtifactsForMemory(ctx context.Context, memoryID string) ([]artifact.Artifact, error) {
+func (t *Tx) ListAllArtifactsForMemory(ctx context.Context, memoryID string) ([]artifact.DerivedMemory, error) {
 	return t.listArtifactsForMemory(ctx, memoryID, false)
 }
 
-func (t *Tx) listArtifactsForMemory(ctx context.Context, memoryID string, currentOnly bool) ([]artifact.Artifact, error) {
+func (t *Tx) listArtifactsForMemory(ctx context.Context, memoryID string, currentOnly bool) ([]artifact.DerivedMemory, error) {
 	versionFilter := ""
 	if currentOnly {
-		versionFilter = " AND d.artifact_version = a.current_version"
+		versionFilter = " AND d.derived_version = a.current_version"
 	}
-	rows, err := t.tx.QueryContext(ctx, `SELECT DISTINCT a.id, a.kind, a.target_key,
+	rows, err := t.tx.QueryContext(ctx, `SELECT DISTINCT a.id, a.layer, a.kind, a.target_key,
 		a.scope_key, a.topic, a.current_version, a.state, a.reason_code, a.updated_at
 		FROM artifacts a
-		JOIN artifact_memory_dependencies d
-			ON d.artifact_id = a.id`+versionFilter+`
-		WHERE d.memory_id = ? ORDER BY a.id ASC`, memoryID)
+		JOIN derived_dependencies d
+			ON d.derived_id = a.id AND d.input_type = 'memory'`+versionFilter+`
+		WHERE d.input_id = ? ORDER BY a.id ASC`, memoryID)
 	if err != nil {
 		return nil, fmt.Errorf("读取记忆 %s 的派生依赖: %w", memoryID, err)
 	}
 	defer rows.Close()
-	items := []artifact.Artifact{}
+	items := []artifact.DerivedMemory{}
 	for rows.Next() {
 		item, err := scanArtifact(rows)
 		if err != nil {
@@ -392,18 +351,19 @@ func (t *Tx) listArtifactsForMemory(ctx context.Context, memoryID string, curren
 
 // ListArtifactsForRun returns derived objects whose current version directly
 // depends on one application result.
-func (t *Tx) ListArtifactsForRun(ctx context.Context, experienceID string) ([]artifact.Artifact, error) {
-	rows, err := t.tx.QueryContext(ctx, `SELECT DISTINCT a.id, a.kind, a.target_key,
+func (t *Tx) ListArtifactsForRun(ctx context.Context, experienceID string) ([]artifact.DerivedMemory, error) {
+	rows, err := t.tx.QueryContext(ctx, `SELECT DISTINCT a.id, a.layer, a.kind, a.target_key,
 		a.scope_key, a.topic, a.current_version, a.state, a.reason_code, a.updated_at
 		FROM artifacts a
-		JOIN artifact_run_dependencies d
-			ON d.artifact_id = a.id AND d.artifact_version = a.current_version
-		WHERE d.experience_id = ? ORDER BY a.id ASC`, experienceID)
+		JOIN derived_dependencies d
+			ON d.derived_id = a.id AND d.input_type = 'experience'
+			AND d.derived_version = a.current_version
+		WHERE d.input_id = ? ORDER BY a.id ASC`, experienceID)
 	if err != nil {
 		return nil, fmt.Errorf("读取运行 %s 的派生依赖: %w", experienceID, err)
 	}
 	defer rows.Close()
-	items := []artifact.Artifact{}
+	items := []artifact.DerivedMemory{}
 	for rows.Next() {
 		item, err := scanArtifact(rows)
 		if err != nil {
@@ -419,14 +379,14 @@ func (t *Tx) ListArtifactsForRun(ctx context.Context, experienceID string) ([]ar
 
 // ListArtifactsByScope returns current objects of one kind in a scope. It is used
 // to invalidate the skills that can consume a changed experience case.
-func (t *Tx) ListArtifactsByScope(ctx context.Context, kind artifact.Kind, scopeKey string) ([]artifact.Artifact, error) {
+func (t *Tx) ListArtifactsByScope(ctx context.Context, kind artifact.Kind, scopeKey string) ([]artifact.DerivedMemory, error) {
 	rows, err := t.tx.QueryContext(ctx, `SELECT `+artifactColumns+` FROM artifacts
 		WHERE kind = ? AND scope_key = ? ORDER BY id ASC`, string(kind), scopeKey)
 	if err != nil {
 		return nil, fmt.Errorf("读取作用域 %s 的派生对象: %w", scopeKey, err)
 	}
 	defer rows.Close()
-	items := []artifact.Artifact{}
+	items := []artifact.DerivedMemory{}
 	for rows.Next() {
 		item, err := scanArtifact(rows)
 		if err != nil {
@@ -443,17 +403,18 @@ func (t *Tx) ListArtifactsByScope(ctx context.Context, kind artifact.Kind, scope
 // ListAllArtifactsForRun returns every derived object whose current or
 // historical revision directly depends on one application result. Permanent
 // deletion must enumerate the whole set before any cascade removes the edges.
-func (t *Tx) ListAllArtifactsForRun(ctx context.Context, experienceID string) ([]artifact.Artifact, error) {
-	rows, err := t.tx.QueryContext(ctx, `SELECT DISTINCT a.id, a.kind, a.target_key,
+func (t *Tx) ListAllArtifactsForRun(ctx context.Context, experienceID string) ([]artifact.DerivedMemory, error) {
+	rows, err := t.tx.QueryContext(ctx, `SELECT DISTINCT a.id, a.layer, a.kind, a.target_key,
 		a.scope_key, a.topic, a.current_version, a.state, a.reason_code, a.updated_at
 		FROM artifacts a
-		JOIN artifact_run_dependencies d ON d.artifact_id = a.id
-		WHERE d.experience_id = ? ORDER BY a.id ASC`, experienceID)
+		JOIN derived_dependencies d
+			ON d.derived_id = a.id AND d.input_type = 'experience'
+		WHERE d.input_id = ? ORDER BY a.id ASC`, experienceID)
 	if err != nil {
 		return nil, fmt.Errorf("读取运行 %s 的全部派生依赖: %w", experienceID, err)
 	}
 	defer rows.Close()
-	items := []artifact.Artifact{}
+	items := []artifact.DerivedMemory{}
 	for rows.Next() {
 		item, err := scanArtifact(rows)
 		if err != nil {
@@ -471,8 +432,8 @@ func (t *Tx) ListAllArtifactsForRun(ctx context.Context, experienceID string) ([
 // depended on the result. The affected set is selected before deletes so a
 // foreign-key cascade cannot hide a dependent object.
 func (t *Tx) DeleteArtifactsForRun(ctx context.Context, experienceID string) error {
-	rows, err := t.tx.QueryContext(ctx, `SELECT DISTINCT artifact_id
-		FROM artifact_run_dependencies WHERE experience_id = ?`, experienceID)
+	rows, err := t.tx.QueryContext(ctx, `SELECT DISTINCT derived_id
+		FROM derived_dependencies WHERE input_type = 'experience' AND input_id = ?`, experienceID)
 	if err != nil {
 		return fmt.Errorf("读取待清除派生对象 %s: %w", experienceID, err)
 	}
@@ -497,8 +458,8 @@ func (t *Tx) DeleteArtifactsForRun(ctx context.Context, experienceID string) err
 // depends on the memory. The affected set is selected before any delete so the
 // caller never relies on a foreign-key cascade to discover it.
 func (t *Tx) DeleteArtifactsForMemory(ctx context.Context, memoryID string) error {
-	rows, err := t.tx.QueryContext(ctx, `SELECT DISTINCT artifact_id
-		FROM artifact_memory_dependencies WHERE memory_id = ?`, memoryID)
+	rows, err := t.tx.QueryContext(ctx, `SELECT DISTINCT derived_id
+		FROM derived_dependencies WHERE input_type = 'memory' AND input_id = ?`, memoryID)
 	if err != nil {
 		return fmt.Errorf("读取待清除派生对象 %s: %w", memoryID, err)
 	}
@@ -527,6 +488,12 @@ func (t *Tx) deleteArtifactIDs(ctx context.Context, ids []string) error {
 		}
 	}
 	for _, id := range ids {
+		if _, err := t.tx.ExecContext(ctx,
+			`DELETE FROM derived_dependencies WHERE derived_id = ?`, id); err != nil {
+			return fmt.Errorf("清除派生依赖 %s: %w", id, err)
+		}
+	}
+	for _, id := range ids {
 		if _, err := t.tx.ExecContext(ctx, `DELETE FROM artifacts WHERE id = ?`, id); err != nil {
 			return fmt.Errorf("清除派生对象 %s: %w", id, err)
 		}
@@ -534,42 +501,135 @@ func (t *Tx) deleteArtifactIDs(ctx context.Context, ids []string) error {
 	return nil
 }
 
-// SearchArtifacts runs the derived FTS query and loads only active current
-// versions. It is used by the unified recall assembler.
+type artifactRankedHit struct {
+	id    string
+	score float64
+}
+
+// SearchArtifacts runs the derived FTS query and loads current versions whose
+// state is requested. Default recall requests only active rows; stale history is
+// returned only when explicitly selected. A stale artifact whose FTS document
+// was removed from the default index is still discoverable by the sanitized term
+// fallback, so an explicit historical query never silently loses its result.
 func (s *Store) SearchArtifacts(ctx context.Context, query artifact.SearchQuery) ([]artifact.SearchHit, error) {
-	if strings.TrimSpace(query.Expression) == "" || len(query.Kinds) == 0 {
+	if strings.TrimSpace(query.Expression) == "" {
 		return []artifact.SearchHit{}, nil
 	}
-	kinds := make([]artifact.Kind, 0, len(query.Kinds))
-	for _, kind := range query.Kinds {
-		if kind.Known() {
-			kinds = append(kinds, kind)
-		}
+	layers, layersOK := artifactSearchLayers(query.Layers)
+	if !layersOK {
+		return []artifact.SearchHit{}, nil
 	}
-	if len(kinds) == 0 {
+	kinds, kindsOK := artifactSearchKinds(query.Kinds)
+	if !kindsOK {
+		return []artifact.SearchHit{}, nil
+	}
+	states := artifactSearchStates(query.States)
+	if len(states) == 0 {
 		return []artifact.SearchHit{}, nil
 	}
 	limit := query.Limit
 	if limit <= 0 {
 		limit = 20
 	}
-	asOf := query.AsOf.UTC()
-	if asOf.IsZero() {
-		asOf = time.Now().UTC()
+
+	hits := []artifactRankedHit{}
+	seen := make(map[string]struct{})
+	appendHits := func(items []artifactRankedHit) {
+		for _, item := range items {
+			if _, duplicate := seen[item.id]; duplicate {
+				continue
+			}
+			seen[item.id] = struct{}{}
+			hits = append(hits, item)
+		}
 	}
+	activeHits, err := s.searchArtifactFTS(ctx, query, layers, kinds, states, limit)
+	if err != nil {
+		return nil, err
+	}
+	appendHits(activeHits)
+	if hasArtifactState(states, artifact.StateStale) && len(query.Terms) > 0 {
+		staleHits, err := s.searchArtifactText(ctx, query, layers, kinds,
+			[]artifact.State{artifact.StateStale}, limit)
+		if err != nil {
+			return nil, err
+		}
+		appendHits(staleHits)
+	}
+
+	result := make([]artifact.SearchHit, 0, len(hits))
+	for _, hit := range hits {
+		item, err := getArtifact(ctx, s.reader, hit.id)
+		if errors.Is(err, artifact.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !hasArtifactState(states, item.State) || item.CurrentVersion <= 0 {
+			continue
+		}
+		revision, err := getArtifactRevision(ctx, s.reader, item.ID, item.CurrentVersion)
+		if errors.Is(err, artifact.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		dependencies, err := listArtifactDependencies(ctx, s.reader, item.ID, item.CurrentVersion)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, artifact.SearchHit{
+			DerivedMemory: item,
+			Revision:      revision,
+			Dependencies:  dependencies,
+			Score:         hit.score,
+		})
+	}
+	return result, nil
+}
+
+func (s *Store) searchArtifactFTS(ctx context.Context, query artifact.SearchQuery,
+	layers []artifact.Layer, kinds []artifact.Kind, states []artifact.State,
+	limit int) ([]artifactRankedHit, error) {
 	args := []any{4.0, 1.0, query.Expression}
-	conditions := []string{"artifact_fts MATCH ?"}
-	conditions = append(conditions, "a.state = 'active'")
-	conditions = append(conditions, "a.current_version = d.artifact_version")
+	conditions := []string{"artifact_fts MATCH ?", "a.current_version = d.artifact_version"}
+	conditions = append(conditions, "a.state IN ("+placeholders(len(states))+")")
+	for _, state := range states {
+		args = append(args, string(state))
+	}
+	if len(layers) > 0 {
+		conditions = append(conditions, "a.layer IN ("+placeholders(len(layers))+")")
+		for _, layer := range layers {
+			args = append(args, string(layer))
+		}
+	}
+	if len(kinds) > 0 {
+		conditions = append(conditions, "a.kind IN ("+placeholders(len(kinds))+")")
+		for _, kind := range kinds {
+			args = append(args, string(kind))
+		}
+	}
+	if query.ScopeKey != "" {
+		conditions = append(conditions, "(a.scope_key = ? OR a.scope_key = 'user')")
+		args = append(args, query.ScopeKey)
+	}
 	// A derived version remains traceable, but it leaves default recall as soon
-	// as any of its known atomic dependencies is outside its validity interval.
+	// as any known lower-layer input is no longer eligible.
 	conditions = append(conditions, `NOT EXISTS (
-		SELECT 1 FROM artifact_memory_dependencies dep
-		JOIN memories m ON m.id = dep.memory_id
-		WHERE dep.artifact_id = a.id AND dep.artifact_version = a.current_version
+		SELECT 1 FROM derived_dependencies dep
+		JOIN observations o ON o.id = dep.input_id
+		WHERE dep.derived_id = a.id AND dep.derived_version = a.current_version
+			AND dep.input_type = 'observation'
+			AND o.status IN ('deleted', 'retracted')
+	)`)
+	conditions = append(conditions, `NOT EXISTS (
+		SELECT 1 FROM derived_dependencies dep
+		JOIN memories m ON m.id = dep.input_id
+		WHERE dep.derived_id = a.id AND dep.derived_version = a.current_version
+			AND dep.input_type = 'memory'
 			AND (m.state <> 'active' OR m.assertion_status <> 'accepted'
-				OR (m.valid_from IS NOT NULL AND m.valid_from > ?)
-				OR (m.valid_to IS NOT NULL AND m.valid_to <= ?)
 				OR EXISTS (
 					SELECT 1 FROM memory_conflict_members cm
 					JOIN memory_conflicts c ON c.id = cm.conflict_id
@@ -577,20 +637,19 @@ func (s *Store) SearchArtifacts(ctx context.Context, query artifact.SearchQuery)
 				))
 	)`)
 	conditions = append(conditions, `NOT EXISTS (
-		SELECT 1 FROM artifact_run_dependencies rd
-		JOIN experience_runs r ON r.id = rd.experience_id
-		WHERE rd.artifact_id = a.id AND rd.artifact_version = a.current_version
+		SELECT 1 FROM derived_dependencies rd
+		JOIN experience_runs r ON r.id = rd.input_id
+		WHERE rd.derived_id = a.id AND rd.derived_version = a.current_version
+			AND rd.input_type = 'experience'
 			AND r.state <> 'recorded'
 	)`)
-	args = append(args, formatTime(asOf), formatTime(asOf))
-	if query.ScopeKey != "" {
-		conditions = append(conditions, "(a.scope_key = ? OR a.scope_key = 'user')")
-		args = append(args, query.ScopeKey)
-	}
-	conditions = append(conditions, "a.kind IN ("+placeholders(len(kinds))+")")
-	for _, kind := range kinds {
-		args = append(args, string(kind))
-	}
+	conditions = append(conditions, `NOT EXISTS (
+		SELECT 1 FROM derived_dependencies dd
+		JOIN artifacts lower ON lower.id = dd.input_id
+		WHERE dd.derived_id = a.id AND dd.derived_version = a.current_version
+			AND dd.input_type = 'derived'
+			AND (lower.state <> 'active' OR lower.current_version <> dd.input_version)
+	)`)
 	args = append(args, limit)
 	statement := `SELECT a.id, bm25(artifact_fts, ?, ?) AS rank
 		FROM artifact_fts
@@ -603,13 +662,9 @@ func (s *Store) SearchArtifacts(ctx context.Context, query artifact.SearchQuery)
 		return nil, fmt.Errorf("派生关键词检索: %w", err)
 	}
 	defer rows.Close()
-	type ranked struct {
-		id    string
-		score float64
-	}
-	hits := []ranked{}
+	hits := []artifactRankedHit{}
 	for rows.Next() {
-		var item ranked
+		var item artifactRankedHit
 		var rank float64
 		if err := rows.Scan(&item.id, &rank); err != nil {
 			return nil, fmt.Errorf("读取派生检索结果: %w", err)
@@ -620,28 +675,160 @@ func (s *Store) SearchArtifacts(ctx context.Context, query artifact.SearchQuery)
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("读取派生检索结果: %w", err)
 	}
-	result := make([]artifact.SearchHit, 0, len(hits))
-	for _, hit := range hits {
-		item, err := getArtifact(ctx, s.reader, hit.id)
-		if errors.Is(err, artifact.ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		if item.State != artifact.StateActive || item.CurrentVersion <= 0 {
-			continue
-		}
-		revision, err := getArtifactRevision(ctx, s.reader, item.ID, item.CurrentVersion)
-		if errors.Is(err, artifact.ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, artifact.SearchHit{Artifact: item, Revision: revision, Score: hit.score})
+	return hits, nil
+}
+
+// searchArtifactText is the bounded stale-history fallback. It matches the same
+// sanitized query terms against the current revision text without using raw FTS
+// syntax and never feeds model output back into evidence or identity fields.
+func (s *Store) searchArtifactText(ctx context.Context, query artifact.SearchQuery,
+	layers []artifact.Layer, kinds []artifact.Kind, states []artifact.State,
+	limit int) ([]artifactRankedHit, error) {
+	conditions := []string{"a.current_version = r.version"}
+	args := []any{}
+	conditions = append(conditions, "a.state IN ("+placeholders(len(states))+")")
+	for _, state := range states {
+		args = append(args, string(state))
 	}
-	return result, nil
+	if len(layers) > 0 {
+		conditions = append(conditions, "a.layer IN ("+placeholders(len(layers))+")")
+		for _, layer := range layers {
+			args = append(args, string(layer))
+		}
+	}
+	if len(kinds) > 0 {
+		conditions = append(conditions, "a.kind IN ("+placeholders(len(kinds))+")")
+		for _, kind := range kinds {
+			args = append(args, string(kind))
+		}
+	}
+	if query.ScopeKey != "" {
+		conditions = append(conditions, "(a.scope_key = ? OR a.scope_key = 'user')")
+		args = append(args, query.ScopeKey)
+	}
+	terms := make([]string, 0, len(query.Terms))
+	for _, term := range query.Terms {
+		trimmed := strings.ToLower(strings.TrimSpace(term))
+		if trimmed == "" {
+			continue
+		}
+		terms = append(terms, trimmed)
+	}
+	if len(terms) == 0 {
+		return nil, nil
+	}
+	termConditions := make([]string, 0, len(terms))
+	for _, term := range terms {
+		termConditions = append(termConditions,
+			"(instr(lower(r.title), ?) > 0 OR instr(lower(r.content), ?) > 0)")
+		args = append(args, term, term)
+	}
+	conditions = append(conditions, "("+strings.Join(termConditions, " OR ")+")")
+	args = append(args, limit)
+	rows, err := s.reader.QueryContext(ctx, `SELECT a.id
+		FROM artifacts a
+		JOIN artifact_revisions r ON r.artifact_id = a.id AND r.version = a.current_version
+		WHERE `+strings.Join(conditions, " AND ")+`
+		ORDER BY a.updated_at DESC, a.id ASC LIMIT ?`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("派生历史检索: %w", err)
+	}
+	defer rows.Close()
+	hits := []artifactRankedHit{}
+	for rows.Next() {
+		var item artifactRankedHit
+		if err := rows.Scan(&item.id); err != nil {
+			return nil, fmt.Errorf("读取派生历史检索结果: %w", err)
+		}
+		hits = append(hits, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("读取派生历史检索结果: %w", err)
+	}
+	return hits, nil
+}
+
+func artifactSearchStates(input []artifact.State) []artifact.State {
+	if len(input) == 0 {
+		return []artifact.State{artifact.StateActive}
+	}
+	seen := make(map[artifact.State]struct{}, len(input))
+	result := make([]artifact.State, 0, len(input))
+	for _, state := range input {
+		if state != artifact.StateActive && state != artifact.StateStale {
+			continue
+		}
+		if _, duplicate := seen[state]; duplicate {
+			continue
+		}
+		seen[state] = struct{}{}
+		result = append(result, state)
+	}
+	return result
+}
+
+func hasArtifactState(states []artifact.State, target artifact.State) bool {
+	for _, state := range states {
+		if state == target {
+			return true
+		}
+	}
+	return false
+}
+
+func artifactSearchLayers(input []artifact.Layer) ([]artifact.Layer, bool) {
+	if len(input) == 0 {
+		return nil, true
+	}
+	result := make([]artifact.Layer, 0, len(input))
+	for _, layer := range input {
+		if layer.Known() {
+			result = append(result, layer)
+		}
+	}
+	return result, len(result) > 0
+}
+
+func artifactSearchKinds(input []artifact.Kind) ([]artifact.Kind, bool) {
+	if len(input) == 0 {
+		return nil, true
+	}
+	result := make([]artifact.Kind, 0, len(input))
+	for _, kind := range input {
+		if kind.Known() {
+			result = append(result, kind)
+		}
+	}
+	return result, len(result) > 0
+}
+
+func listArtifactDependencies(ctx context.Context, q artifactQueryer, artifactID string,
+	version int) ([]artifact.DependencyRef, error) {
+	rows, err := q.QueryContext(ctx, `SELECT input_type, input_id, input_version, required
+		FROM derived_dependencies
+		WHERE derived_id = ? AND derived_version = ?
+		ORDER BY input_type ASC, input_id ASC, input_version ASC`,
+		artifactID, version)
+	if err != nil {
+		return nil, fmt.Errorf("读取派生依赖 %s@%d: %w", artifactID, version, err)
+	}
+	defer rows.Close()
+	items := []artifact.DependencyRef{}
+	for rows.Next() {
+		var item artifact.DependencyRef
+		var inputType string
+		var required int
+		if err := rows.Scan(&inputType, &item.ID, &item.Version, &required); err != nil {
+			return nil, fmt.Errorf("读取派生依赖 %s@%d: %w", artifactID, version, err)
+		}
+		item.Type = artifact.DependencyType(inputType)
+		item.Required = required == 1
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("读取派生依赖 %s@%d: %w", artifactID, version, err)
+	}
+	return items, nil
 }
 
 // ListArtifacts returns one bounded keyset page of current artifacts. Cursor is
@@ -679,7 +866,7 @@ func (s *Store) ListArtifacts(ctx context.Context, query artifact.ListQuery) (ar
 		return artifact.ListPage{}, fmt.Errorf("列出派生对象: %w", err)
 	}
 	defer rows.Close()
-	items := []artifact.Artifact{}
+	items := []artifact.DerivedMemory{}
 	for rows.Next() {
 		item, err := scanArtifact(rows)
 		if err != nil {
@@ -801,7 +988,11 @@ func (s *Store) scanTargets(ctx context.Context, cursor string, limit int) ([]ar
 			a.target_key AS cursor
 		FROM artifacts a
 		LEFT JOIN governance_jobs j ON j.target_key = a.target_key
-			AND j.kind = CASE WHEN a.kind = 'skill' THEN 'build_skill' ELSE 'aggregate' END
+			AND j.kind = CASE
+				WHEN a.kind IN ('skill', 'experience_case', 'guidance') THEN 'build_guidance'
+				WHEN a.kind = 'local_summary' THEN 'aggregate_l1'
+				WHEN a.kind = 'scope_summary' THEN 'aggregate_l3'
+				ELSE 'aggregate_l2' END
 		UNION ALL
 		SELECT e.kind, e.target_key, e.scope_key, e.topic, '', 0, '', '',
 			'', e.status, e.reason_code, e.evaluated_at,
@@ -810,7 +1001,11 @@ func (s *Store) scanTargets(ctx context.Context, cursor string, limit int) ([]ar
 			e.target_key
 		FROM derived_target_evaluations e
 		LEFT JOIN governance_jobs j ON j.target_key = e.target_key
-			AND j.kind = CASE WHEN e.kind = 'skill' THEN 'build_skill' ELSE 'aggregate' END
+			AND j.kind = CASE
+				WHEN e.kind IN ('skill', 'experience_case', 'guidance') THEN 'build_guidance'
+				WHEN e.kind = 'local_summary' THEN 'aggregate_l1'
+				WHEN e.kind = 'scope_summary' THEN 'aggregate_l3'
+				ELSE 'aggregate_l2' END
 		WHERE NOT EXISTS (
 			SELECT 1 FROM artifacts a WHERE a.kind = e.kind AND a.target_key = e.target_key
 		)
@@ -819,7 +1014,7 @@ func (s *Store) scanTargets(ctx context.Context, cursor string, limit int) ([]ar
 			j.status, j.wait_reason, j.last_error_code, j.updated_at,
 			j.target_key
 		FROM governance_jobs j
-		WHERE j.kind IN ('aggregate', 'build_skill')
+		WHERE j.kind IN ('aggregate_l1', 'aggregate_l2', 'aggregate_l3', 'build_guidance')
 			AND NOT EXISTS (SELECT 1 FROM artifacts a WHERE a.target_key = j.target_key)
 			AND NOT EXISTS (SELECT 1 FROM derived_target_evaluations e WHERE e.target_key = j.target_key)
 	) WHERE ` + strings.Join(conditions, " AND ") + ` ORDER BY cursor ASC LIMIT ?`
@@ -852,8 +1047,9 @@ func (s *Store) scanTargets(ctx context.Context, cursor string, limit int) ([]ar
 			record.Kind, record.ScopeKey, record.Topic = parsed.Kind, parsed.ScopeKey, parsed.Topic
 		}
 		if artifactID != "" {
-			item := artifact.Artifact{
-				ID: artifactID, Kind: artifact.Kind(kind), TargetKey: targetKey,
+			item := artifact.DerivedMemory{
+				ID: artifactID, Layer: artifact.LayerForKind(artifact.Kind(kind)),
+				Kind: artifact.Kind(kind), TargetKey: targetKey,
 				ScopeKey: scopeKey, Topic: topic, CurrentVersion: currentVersion,
 				State: artifact.State(artifactState), ReasonCode: artifactReason,
 			}
@@ -863,7 +1059,7 @@ func (s *Store) scanTargets(ctx context.Context, cursor string, limit int) ([]ar
 					record.UpdatedAt = parsed
 				}
 			}
-			record.Artifact = &item
+			record.DerivedMemory = &item
 		}
 		if evaluatedAt != "" {
 			if parsed, err := parseTime(evaluatedAt); err == nil {
@@ -897,28 +1093,30 @@ func (s *Store) scanTargets(ctx context.Context, cursor string, limit int) ([]ar
 }
 
 func skillJobKind(kind artifact.Kind) task.Kind {
-	if kind == artifact.KindSkill {
-		return task.KindBuildSkill
+	switch kind {
+	case artifact.KindSkill, artifact.KindExperienceCase, artifact.KindGuidance:
+		return task.KindBuildGuidance
+	case artifact.KindLocalSummary:
+		return task.KindAggregateL1
+	case artifact.KindScopeSummary:
+		return task.KindAggregateL3
+	default:
+		return task.KindAggregateL2
 	}
-	return task.KindAggregate
 }
 
 func parseTargetRecordKey(targetKey string) (artifact.Target, bool) {
-	for _, kind := range []artifact.Kind{
-		artifact.KindSkill, artifact.KindScopeSummary, artifact.KindProfile,
-		artifact.KindExperienceCase, artifact.KindTopicSummary,
-	} {
-		if target, err := artifact.ParseTarget(kind, targetKey); err == nil {
-			return target, true
-		}
+	target, err := artifact.ParseTargetKey(targetKey)
+	if err != nil {
+		return artifact.Target{}, false
 	}
-	return artifact.Target{}, false
+	return target, true
 }
 
 func targetStatusFromRecord(record artifact.TargetRecord, evaluationStatus, evaluationReason string) (artifact.TargetStatus, string) {
 	reason := record.ReasonCode
-	if record.Artifact != nil && record.Artifact.ReasonCode != "" {
-		reason = record.Artifact.ReasonCode
+	if record.DerivedMemory != nil && record.DerivedMemory.ReasonCode != "" {
+		reason = record.DerivedMemory.ReasonCode
 	}
 	jobStatus := ""
 	if record.Job != nil {
@@ -932,8 +1130,8 @@ func targetStatusFromRecord(record artifact.TargetRecord, evaluationStatus, eval
 	case string(task.StatusWaiting):
 		return artifact.TargetStatusWaiting, reason
 	}
-	if record.Artifact != nil {
-		switch record.Artifact.State {
+	if record.DerivedMemory != nil {
+		switch record.DerivedMemory.State {
 		case artifact.StateActive:
 			return artifact.TargetStatusActive, reason
 		case artifact.StateStale:
@@ -966,7 +1164,7 @@ func targetStatusFromRecord(record artifact.TargetRecord, evaluationStatus, eval
 			return artifact.TargetStatusDisabled, record.Job.LastErrorCode
 		}
 	}
-	if record.Artifact != nil {
+	if record.DerivedMemory != nil {
 		return artifact.TargetStatusDisabled, reason
 	}
 	return artifact.TargetStatusDisabled, ""
@@ -974,7 +1172,9 @@ func targetStatusFromRecord(record artifact.TargetRecord, evaluationStatus, eval
 
 func reasonStatus(reason string) artifact.TargetStatus {
 	switch reason {
-	case "no_procedure_input", "no_eligible_input", "topic_mismatch":
+	case "no_procedure_input", "no_eligible_input", "topic_mismatch",
+		"source_redacted", "observation_deleted", "observation_retracted",
+		"input_invalidated":
 		return artifact.TargetStatusNoEligibleInput
 	case "model_unavailable":
 		return artifact.TargetStatusModelUnavailable
@@ -1058,28 +1258,24 @@ func (s *Store) ListExpiredTargets(ctx context.Context, asOf time.Time, after st
 		FROM artifacts a
 		WHERE a.state = 'active' AND a.target_key > ?
 			AND (EXISTS (
-				SELECT 1 FROM artifact_memory_dependencies dep
-				JOIN memories m ON m.id = dep.memory_id
-				WHERE dep.artifact_id = a.id AND dep.artifact_version = a.current_version
+				SELECT 1 FROM derived_dependencies dep
+				JOIN memories m ON m.id = dep.input_id
+				WHERE dep.derived_id = a.id AND dep.derived_version = a.current_version
+					AND dep.input_type = 'memory'
 					AND (m.state <> 'active' OR m.assertion_status <> 'accepted'
-						OR (m.valid_from IS NOT NULL AND m.valid_from > ?)
-						OR (m.valid_to IS NOT NULL AND m.valid_to <= ?)
 						OR EXISTS (
 							SELECT 1 FROM memory_conflict_members cm
 							JOIN memory_conflicts c ON c.id = cm.conflict_id
 							WHERE cm.memory_id = m.id AND c.status = 'open'
 						))
 			) OR EXISTS (
-				SELECT 1 FROM artifact_run_dependencies rd
-				JOIN experience_runs r ON r.id = rd.experience_id
-				WHERE rd.artifact_id = a.id AND rd.artifact_version = a.current_version
+				SELECT 1 FROM derived_dependencies rd
+				JOIN experience_runs r ON r.id = rd.input_id
+				WHERE rd.derived_id = a.id AND rd.derived_version = a.current_version
+					AND rd.input_type = 'experience'
 					AND r.state <> 'recorded'
-			) OR EXISTS (
-				SELECT 1 FROM artifact_revisions r
-				WHERE r.artifact_id = a.id AND r.version = a.current_version
-					AND r.taxonomy_version <> ?
 			))
-		ORDER BY a.target_key ASC LIMIT ?`, after, formatTime(asOf), formatTime(asOf), topic.Version, limit)
+		ORDER BY a.target_key ASC LIMIT ?`, after, limit)
 	if err != nil {
 		return nil, fmt.Errorf("扫描过期派生对象: %w", err)
 	}
@@ -1100,226 +1296,4 @@ func (s *Store) ListExpiredTargets(ctx context.Context, asOf time.Time, after st
 		return nil, fmt.Errorf("扫描过期派生对象: %w", err)
 	}
 	return result, nil
-}
-
-// ListAggregationGroups returns distinct non-empty scopes and topics from
-// active accepted atomic memories, using a stable unified keyset cursor. Every
-// scope also has one overview and one profile target; profiles are filtered
-// again by their durable-input gate when they run.
-func (s *Store) ListAggregationGroups(ctx context.Context, after string, limit int) ([]artifact.GroupTarget, error) {
-	if limit <= 0 {
-		limit = 100
-	}
-	rows, err := s.reader.QueryContext(ctx, `SELECT cursor, kind, scope_key, topic FROM (
-		SELECT 't:' || m.scope_key || char(0) || j.value AS cursor,
-			'topic_summary' AS kind, m.scope_key AS scope_key, j.value AS topic
-		FROM memories m, json_each(m.topics_json) j
-		WHERE m.scope_key <> '' AND m.state = 'active' AND m.assertion_status = 'accepted'
-			AND j.value <> ''
-		GROUP BY m.scope_key, j.value
-		UNION ALL
-		SELECT 'o:' || m.scope_key AS cursor, 'scope_summary' AS kind,
-			m.scope_key AS scope_key, '' AS topic
-		FROM memories m
-		WHERE m.scope_key <> '' AND m.state = 'active' AND m.assertion_status = 'accepted'
-		GROUP BY m.scope_key
-		UNION ALL
-		SELECT 'p:' || m.scope_key AS cursor, 'profile' AS kind,
-			m.scope_key AS scope_key, '' AS topic
-		FROM memories m
-		WHERE m.scope_key <> '' AND m.state = 'active' AND m.assertion_status = 'accepted'
-		GROUP BY m.scope_key
-	) WHERE cursor > ? ORDER BY cursor ASC LIMIT ?`, after, limit)
-	if err != nil {
-		return nil, fmt.Errorf("扫描待聚合分组: %w", err)
-	}
-	defer rows.Close()
-	result := []artifact.GroupTarget{}
-	for rows.Next() {
-		var cursor, kind, scopeKey, topic string
-		if err := rows.Scan(&cursor, &kind, &scopeKey, &topic); err != nil {
-			return nil, fmt.Errorf("扫描待聚合分组: %w", err)
-		}
-		result = append(result, artifact.GroupTarget{
-			Cursor: cursor,
-			Target: artifact.Target{Kind: artifact.Kind(kind), ScopeKey: scopeKey, Topic: topic},
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("扫描待聚合分组: %w", err)
-	}
-	return result, nil
-}
-
-// ListSkillGroups returns distinct scope/topic groups with at least one active,
-// accepted procedure. Procedures without topic labels produce one scope-level
-// skill target instead of an unscoped global skill.
-func (s *Store) ListSkillGroups(ctx context.Context, after string, limit int) ([]artifact.GroupTarget, error) {
-	if limit <= 0 {
-		limit = 100
-	}
-	rows, err := s.reader.QueryContext(ctx, `SELECT cursor, scope_key, topic FROM (
-		SELECT 's:' || m.scope_key || char(0) || j.value AS cursor,
-			m.scope_key AS scope_key, j.value AS topic
-		FROM memories m, json_each(m.topics_json) j
-		WHERE m.scope_key <> '' AND m.state = 'active' AND m.assertion_status = 'accepted'
-			AND m.kind = 'procedure' AND j.value <> ''
-		GROUP BY m.scope_key, j.value
-		UNION ALL
-		SELECT 's:' || m.scope_key || char(0) AS cursor,
-			m.scope_key AS scope_key, '' AS topic
-		FROM memories m
-		WHERE m.scope_key <> '' AND m.state = 'active' AND m.assertion_status = 'accepted'
-			AND m.kind = 'procedure' AND json_array_length(m.topics_json) = 0
-		GROUP BY m.scope_key
-	) WHERE cursor > ? ORDER BY cursor ASC LIMIT ?`, after, limit)
-	if err != nil {
-		return nil, fmt.Errorf("扫描待生成 Skill 分组: %w", err)
-	}
-	defer rows.Close()
-	result := []artifact.GroupTarget{}
-	for rows.Next() {
-		var cursor, scopeKey, topic string
-		if err := rows.Scan(&cursor, &scopeKey, &topic); err != nil {
-			return nil, fmt.Errorf("扫描待生成 Skill 分组: %w", err)
-		}
-		result = append(result, artifact.GroupTarget{
-			Cursor: cursor,
-			Target: artifact.Target{Kind: artifact.KindSkill, ScopeKey: scopeKey, Topic: topic},
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("扫描待生成 Skill 分组: %w", err)
-	}
-	return result, nil
-}
-
-// ListAggregationInputs selects at most limit accepted, active, time-applicable
-// memories for one derivation target with no open conflict. The final boolean
-// reports that additional eligible rows exist.
-func (t *Tx) ListAggregationInputs(ctx context.Context, target artifact.Target, asOf time.Time, limit int) ([]artifact.MemoryInput, bool, error) {
-	if limit <= 0 {
-		limit = 64
-	}
-	conditions, args, err := aggregationInputConditions(target, asOf)
-	if err != nil {
-		return nil, false, err
-	}
-	args = append(args, limit+1)
-	rows, err := t.tx.QueryContext(ctx, `SELECT m.id, m.version, m.kind, m.phase, m.durability, m.title, m.content,
-		m.scope_key, m.topics_json, m.procedure_json, m.qualifiers_json, m.observed_at, m.updated_at
-		FROM memories m
-		WHERE `+strings.Join(conditions, " AND ")+`
-		ORDER BY CASE m.kind WHEN 'preference' THEN 0 WHEN 'procedure' THEN 1
-			WHEN 'fact' THEN 2 ELSE 3 END, m.updated_at DESC, m.id ASC
-		LIMIT ?`, args...)
-	if err != nil {
-		return nil, false, fmt.Errorf("选择聚合输入: %w", err)
-	}
-	defer rows.Close()
-	items := []artifact.MemoryInput{}
-	for rows.Next() {
-		var item artifact.MemoryInput
-		var topicsJSON, procedureJSON, qualifiersJSON, observedAt, updatedAt string
-		if err := rows.Scan(&item.ID, &item.Version, &item.Kind, &item.Phase, &item.Durability,
-			&item.Title, &item.Content, &item.ScopeKey, &topicsJSON, &procedureJSON,
-			&qualifiersJSON, &observedAt, &updatedAt); err != nil {
-			return nil, false, fmt.Errorf("选择聚合输入: %w", err)
-		}
-		if item.Topics, err = decodeTopics(topicsJSON); err != nil {
-			return nil, false, fmt.Errorf("解析聚合输入主题: %w", err)
-		}
-		if strings.TrimSpace(procedureJSON) != "" && json.Valid([]byte(procedureJSON)) {
-			item.Procedure = json.RawMessage(procedureJSON)
-		}
-		if strings.TrimSpace(qualifiersJSON) != "" && json.Valid([]byte(qualifiersJSON)) {
-			item.Qualifiers = json.RawMessage(qualifiersJSON)
-		}
-		if item.ObservedAt, err = parseTime(observedAt); err != nil {
-			return nil, false, err
-		}
-		if item.UpdatedAt, err = parseTime(updatedAt); err != nil {
-			return nil, false, err
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, false, fmt.Errorf("选择聚合输入: %w", err)
-	}
-	if len(items) > limit {
-		return items[:limit], true, nil
-	}
-	return items, false, nil
-}
-
-// CountAggregationInputs reports how many eligible inputs exist. It is separate
-// from selection so payloads can record input-selection completeness instead of
-// inferring it from the returned page.
-func (t *Tx) CountAggregationInputs(ctx context.Context, target artifact.Target, asOf time.Time) (int, error) {
-	conditions, args, err := aggregationInputConditions(target, asOf)
-	if err != nil {
-		return 0, err
-	}
-	var total int
-	if err := t.tx.QueryRowContext(ctx, `SELECT count(*) FROM memories m WHERE `+
-		strings.Join(conditions, " AND "), args...).Scan(&total); err != nil {
-		return 0, fmt.Errorf("统计聚合输入: %w", err)
-	}
-	return total, nil
-}
-
-func aggregationInputConditions(target artifact.Target, asOf time.Time) ([]string, []any, error) {
-	conditions := []string{
-		"m.state = 'active'",
-		"m.assertion_status = 'accepted'",
-		"m.scope_key = ?",
-		"(m.valid_from IS NULL OR m.valid_from <= ?)",
-		"(m.valid_to IS NULL OR ? < m.valid_to)",
-		`NOT EXISTS (
-			SELECT 1 FROM memory_conflict_members cm
-			JOIN memory_conflicts c ON c.id = cm.conflict_id
-			WHERE cm.memory_id = m.id AND c.status = 'open'
-		)`,
-	}
-	args := []any{target.ScopeKey, formatTime(asOf), formatTime(asOf)}
-	switch target.Kind {
-	case artifact.KindTopicSummary:
-		conditions = append(conditions, "EXISTS (SELECT 1 FROM json_each(m.topics_json) WHERE json_each.value = ?)")
-		args = append(args, target.Topic)
-	case artifact.KindScopeSummary:
-		// The scope overview deliberately reads every eligible kind in the
-		// scope; it is not a profile and not a topic detail view.
-	case artifact.KindSkill:
-		conditions = append(conditions, "m.kind = 'procedure'")
-		if target.Topic != "" {
-			conditions = append(conditions, "EXISTS (SELECT 1 FROM json_each(m.topics_json) WHERE json_each.value = ?)")
-			args = append(args, target.Topic)
-		} else {
-			conditions = append(conditions, "json_array_length(m.topics_json) = 0")
-		}
-	case artifact.KindProfile:
-		conditions = append(conditions, "m.kind IN ('preference', 'procedure', 'fact')")
-		conditions = append(conditions, "m.durability = 'durable'", "m.phase = 'unknown'", "m.valid_to IS NULL")
-	case artifact.KindExperienceCase:
-		conditions = append(conditions, "m.kind IN ('procedure', 'event')")
-	default:
-		return nil, nil, fmt.Errorf("%w: kind %q", artifact.ErrInvalidInput, target.Kind)
-	}
-	return conditions, args, nil
-}
-
-// HasProcedureInputs distinguishes an upstream extraction gap from a topic
-// mismatch without relaxing the eligibility gate used for generation.
-func (t *Tx) HasProcedureInputs(ctx context.Context, scopeKey string, asOf time.Time) (bool, error) {
-	var found bool
-	err := t.tx.QueryRowContext(ctx, `SELECT EXISTS (
-		SELECT 1 FROM memories m WHERE m.scope_key = ? AND m.kind = 'procedure'
-		AND m.state = 'active' AND m.assertion_status = 'accepted'
-		AND (m.valid_from IS NULL OR m.valid_from <= ?)
-		AND (m.valid_to IS NULL OR ? < m.valid_to)
-		AND NOT EXISTS (SELECT 1 FROM memory_conflict_members cm
-			JOIN memory_conflicts c ON c.id = cm.conflict_id
-			WHERE cm.memory_id = m.id AND c.status = 'open'))`,
-		scopeKey, formatTime(asOf), formatTime(asOf)).Scan(&found)
-	return found, err
 }

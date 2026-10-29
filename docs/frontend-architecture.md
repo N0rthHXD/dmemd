@@ -2,7 +2,8 @@
 
 本文基于当前 HTTP 实现、`api/openapi.yaml` 和 `docs/contracts/api-decisions.md`，定义
 前端管理台的模块、部署、页面、状态和接口交互架构。功能范围以现有业务 API 为边界，不新增
-或修改后端业务接口；Go 侧仅增加管理台静态资源托管。
+或修改后端业务接口。管理台已实现，本文描述 v2 的 Source/L0/当前视图/L1–L4 展示边界，
+不将旧时间线、事实组或两阶段 Candidate/Decision 字段重新引入前端。
 
 ## 1. 定位与设计原则
 
@@ -11,35 +12,37 @@
 
 - 保持 Go 单进程、SQLite、本地回环监听的部署形态，不增加 Node 运行时服务、BFF 或第二套数据库。
 - 前端只调用 HTTP API，不直接访问 SQLite、配置文件、模型供应商或文件系统。
-- 原子记忆是事实来源，摘要、画像、经验与 Skill 是可失效的派生内容；两者不能混为一张可编辑表。
-- 新增和内容更正统一进入摄取流程；不新增前端直接写入 `title/content/kind/topics` 的捷径。
-- 已采纳不表示真实性已验证；任务成功不表示所有候选被采纳；经验结果不表示执行已验证。
+- Source 是原始依据，L0 Observation 是原始观察，Memory 是治理后的当前视图，L1–L4 是
+  可失效的派生内容；四者不能混为一张可编辑表。
+- 新增和内容更正统一进入摄取流程，不直接编辑 Source/Observation/Memory/派生正文。
+- 已采纳不表示真实性已验证；提取成功只表示 L0 形成，治理和聚合有独立任务；经验结果不表示执行已验证。
 - 无后端能力时明确收缩页面范围，不用本次返回条数冒充总量，不用浏览器缓存冒充全局任务列表。
 - 界面使用中文、桌面优先；保留键盘操作和窄屏阅读能力，不引入 SSR、PWA、实时推送或重型图谱。
 
 ## 2. 当前能力与约束
 
 实际路由集中在 `internal/transport/http/handler.go`，由 `internal/runtime/app.go` 装配。
-当前根路径返回 JSON 404，没有静态资源托管和独立前端。
+当前根路径仍返回 JSON 404；带 `webui` tag 的构建在 `/ui/` 托管内嵌 SPA，纯 Go 构建不带 UI。
 
 | 能力 | 当前状态 | 对页面的影响 |
 | --- | --- | --- |
 | 记忆列表、详情、证据、历史 | 已有；列表及历史仅支持 `limit`，没有游标或总量 | 显示“最近 N 条”，不提供完整翻页 |
-| 记忆列表过滤 | 类型、生命周期、断言状态、事实组、来源应用、更新时间 | 当前不支持按 scope/topic 服务端过滤，不发送无效参数 |
-| 分层召回 | 原子、摘要、经验、Skill；关键词/混合、时间过滤、解释、警告 | 独立检索工作台，不用列表接口模拟全文搜索 |
+| 记忆列表过滤 | 类型、生命周期、断言状态、更新时间 | 无事实组/内嵌 topics；不发送无效过滤参数 |
+| L0 观察 | 列表、详情、代码 Evidence 和 typed relations | 与当前 Memory 分开，正文只读，可下钻 Source |
+| 分层召回 | observations/memories/l1/l2/l3/l4；query_mode、关键词/混合、解释、警告 | 每层独立展示，不提供 as_of/event_at |
 | 状态管理与恢复 | 归档、激活、逻辑删除、历史恢复、永久清除 | 管理动作与内容更正分开 |
-| 冲突 | 列表、详情、四种裁决动作；版本变化返回 409 | 提交裁决必须带 revision 和全部成员当前版本 |
+| 冲突 | 列表、详情、choose/reject_all；版本变化返回 409 | 提交裁决必须带 revision 和全部成员当前版本 |
 | 派生对象与生成目标 | 已有列表、详情、指定历史版本；两类列表已有 `next_cursor` | 可真实分页；可发现尚未生成对象的目标 |
 | Skill 内容 | 已有当前/指定版本的 `SKILL.md` JSON 响应 | 只预览、复制和显式下载，不执行、不安装 |
-| 摄取 | 提交返回 202；可按 ID 查询任务 | 可跟踪本次提交；没有全局任务列表、重试或取消接口 |
+| 任务 | `/v1/jobs` 提取列表、`/v1/governance-jobs` 治理/聚合列表与详情 | 区分 category/stage/status，不提供重试或取消接口 |
 | 来源 | 仅按 ID 查询、清除原文 | 从证据链接进入详情页，不提供来源列表 |
 | 经验报告 | 可提交和撤销，没有报告列表或详情查询 | 案例从 artifacts 发现；报告与派生案例必须区分 |
 | 服务诊断 | healthz、readyz、Embedding 状态与显式探测 | 无模型配置编辑、治理开关或全局统计接口 |
 | 认证与隔离 | 无；配置只允许回环监听 | 不设计登录页、角色权限或基于 app_id 的授权 |
 
-部分文档概述与实现存在差异：OpenAPI 顶层仍概括为“无分页”，但 artifacts/targets
-已支持游标；当前分页边界见[技术与使用指南](technical-guide.md#功能与实现语义)。记忆列表时间过滤的文档仍写“非法值忽略”，实现已返回 400。前端分别按各列表
-的现有返回结构处理分页，并将非法时间过滤响应按 400 处理，不仅依据文档概述推断运行行为。
+普通列表没有总量或下一页，artifacts/targets 单独支持游标；分页边界见
+[API 契约](contracts/api-decisions.md)。记忆列表非法更新时间返回 400，不能统一假设所有
+列表或召回参数采用相同的容错规则。
 
 ## 3. 总体架构与部署
 
@@ -50,7 +53,7 @@ flowchart LR
     Q -->|同源 HTTP JSON| H[dmemd HTTP 路由]
     H --> B[现有业务服务]
     B --> DB[(SQLite)]
-    B --> W[摄取 / 治理 / Embedding Worker]
+    B --> W[Extraction / Governance / Aggregation / Embedding Worker]
     W --> M[模型适配器]
     M --> P[已配置的模型服务]
     E[Go 内嵌静态资源] --> UI
@@ -66,7 +69,7 @@ flowchart LR
 - `index.html` 不长缓存，带内容 hash 的静态资源可长期缓存；API 与敏感内容不做持久 HTTP 缓存。
 - UI 外壳不依赖数据库 readiness，数据库故障时仍能打开诊断页面。
 
-新增 `internal/webui` 只负责内嵌、静态响应和 SPA 路径处理，不能依赖业务服务。
+`internal/webui` 只负责内嵌、静态响应和 SPA 路径处理，不能依赖业务服务。
 由 runtime 将其作为可选 handler 注入 HTTP 层；不把前端产物混入 memory 等领域包。
 
 ### 3.2 开发与构建
@@ -76,7 +79,7 @@ flowchart LR
 
 Go-only 构建与带 UI 构建分离：
 
-| 命令（拟新增） | 职责 |
+| 命令 | 职责 |
 | --- | --- |
 | `make web-dev` | 启动前端开发服务，后端单独运行 |
 | `make web-check` | 生成类型校验、类型检查和 lint |
@@ -114,10 +117,10 @@ Go-only 构建与带 UI 构建分离：
 | 导航 | 前端路由（均位于 `/ui`） | 主要内容 |
 | --- | --- | --- |
 | 概览 | `/overview` | 存活/就绪、Embedding 覆盖、最近记忆和待关注状态，不展示全局统计 |
-| 记忆库 | `/memories`、`/memories/:id` | 原子列表、当前快照、证据、历史、关系与演化 |
-| 检索工作台 | `/recall` | 查询、范围、分层、关键词/混合、历史/事件时间、解释 |
+| 记忆库 | `/memories`、`/memories/:id`、`/observations/:id` | L0 观察与当前 Memory 分开浏览、证据、历史和 typed relations |
+| 检索工作台 | `/recall` | 查询、scope、query_mode、六层结果、关键词/混合、解释和 stale 回退 |
 | 内容提交 | `/ingestions/new` | 文本与 JSON 模式、显式 scope、接收回执和任务跟踪 |
-| 处理任务 | `/jobs`、`/jobs/:id` | 本会话提交任务与按 ID 查询，不提供全局任务列表或重试、取消操作 |
+| 处理任务 | `/jobs`、`/jobs/:id` | 最近提取/治理/聚合任务，独立状态与诊断；不提供重试、取消操作 |
 | 冲突中心 | `/conflicts`、`/conflicts/:id` | open/resolved、成员对比、证据、裁决与审计 |
 | 派生知识 | `/artifacts`、`/artifacts/:id` | 主题摘要、作用域概览、画像、经验案例与 Skill |
 | 生成目标 | `/artifact-targets` | 排队、运行、等待、无合格输入、失败、stale 等原因 |
@@ -126,8 +129,8 @@ Go-only 构建与带 UI 构建分离：
 辅助详情 `/sources/:id` 从证据进入。经验报告提交及已知 ID 的撤销可作为派生知识页的辅助
 交互；现有接口不支持报告查询，因此不提供完整报告详情，也不把 `experience_case` 当作报告记录。
 历史通过 `?version=N` 定位；派生对象暂无历史列表 API，按当前版本选择并惰性读取指定版本。
-任务页在内存中维护本会话提交返回的 job ID；刷新后可通过任务详情链接或手动输入 ID 查询，
-不将本会话集合标为全部任务。
+任务页使用服务端最近列表而非仅浏览器本会话集合；列表是有界结果，不称为全量历史。
+提取 succeeded/observations_saved 不表示 Memory 或派生生成完成，应继续查看独立治理/聚合任务。
 
 ### 5.1 范围与筛选
 
@@ -145,14 +148,12 @@ Go-only 构建与带 UI 构建分离：
 
 - 生命周期：活跃 / 已归档 / 已删除。
 - 断言状态：已采纳 / 待裁决 / 已否定。
-- 时间：观测时间、事件时间、有效区间、记录时间分别展示。
+- 观察状态：observed / pending / retracted / deleted，与 Memory 的采纳状态分开。
+- 时间：只展示服务记录时间，以及 Source span 原始 occurred_at 元数据；不渲染不存在的事实时间。
 - 派生状态：可用 / 已失效 / 已停用；生成状态另外展示，不压缩成一个“正常/异常”图标。
-- 耐久性和保留理由只是元数据，不暗示自动过期或删除。
 
-精确记录时间可按用户时区展示并提供 UTC 原值；事件/有效时间优先依据 `temporal.text`、
-`precision` 和 `timezone_known` 渲染。只有月份的信息不补日期，无时区的日历日期不做强制
-时区平移，空有效边界显示“未知”而不是“永久有效”。`observed_at_basis=recorded` 应标注
-为接收时间回填，不能作为事件发生时间或事实更新先后的依据。
+精确记录时间可按用户时区展示并提供 UTC 原值；原文时间表达保留为自然文本，不将接收时间
+当作事件发生时间。后续 annotation 能力未实现前不设计时间线、precision/basis 或 retention 控件。
 
 ## 6. 前端代码组织与状态
 
@@ -166,6 +167,7 @@ web/
     features/
       overview/
       memories/           # 页面、领域组件、query keys、API 调用及展示映射
+      observations/       # L0 列表面板、详情、证据与关系
       recall/
       ingestions/
       jobs/
@@ -177,7 +179,7 @@ web/
       api/                # generated schema、HTTP client、ApiError
       ui/                 # 空态、状态标签、危险操作确认、代码/Markdown 视图
       lib/                # 时间格式化、路由构造、固定原因码文案
-internal/webui/            # 拟新增：Go 静态资源托管与 build-tag 实现
+internal/webui/            # Go 静态资源托管与 build-tag 实现
   dist/                   # 生成产物，不入库
 docs/frontend-architecture.md
 ```
@@ -237,39 +239,39 @@ Query key 统一按领域、ID、版本或规范化过滤参数构造；集合�
 
 ### 8.1 查看与更正记忆
 
-列表 → 当前快照 → 历史/证据/原文/演化。正文默认只读。“提交更正”打开摄取表单，供用户
+列表 → 当前快照 → Observation refs / 历史 / Evidence / Source / typed relations。正文只读。“提交更正”打开摄取表单，供用户
 补充明确事实、上下文和 scope，再通过 `/v1/ingestions` 提交。
 
 当前接口不支持精确指定更正目标，不承诺提交后一定修改当前 ID；携带 ID 的说明也只是内容，
-不是强制定位协议。模型可能补证、新增或形成冲突，应以任务结果及生成 ID 展示实际处理结果。
+不是强制定位协议。提取先返回 Observation IDs，后续治理才可能补证、新增或保留 pending，
+应按各阶段实际结果展示，不在 Extraction 完成时宣称某个 Memory ID 已修改。
 
 ### 8.2 冲突裁决
 
 1. 读取冲突详情及全部成员当前快照；检测版本与当前版本分开展示。
-2. 展示不同陈述、时间、scope、证据和当前断言状态，成员请求有界并发。
-3. 基础动作提供 `choose`、`reject_all`；高级表单承载 `timeline`、`separate_scope`。
+2. 展示不同陈述、scope、Observation、证据和当前断言状态，成员请求有界并发。
+3. 只提供当前支持的 `choose`、`reject_all`，不提供 timeline/separate_scope。
 4. 提交携带冲突 `revision` 及全部成员已读取的当前 `member_versions`。
 5. 任一版本变化返回 409 后，原草稿仅可作为参考，重新加载并确认，不能自动替换版本重发。
 
-`separate_scope` 中的事实组场景 `separate_group.scope` 不等于原子记忆的平面 `scope_key`，
-表单文案必须区分；前端不自行将 pending 提升为 accepted。
+前端不自行将 pending 提升为 accepted，不把关系模型的 supersedes 当作裁决完成。
 
 ### 8.3 分层召回
 
-- 原子、摘要、经验、Skill 分区呈现，各层分数不混排或相加。
-- keyword/hybrid 只改变原子层；派生层仍是关键词检索。
+- L0、当前 Memory、L1、L2、L3、L4 六分区呈现，各层分数不混排或相加。
+- keyword/hybrid 只改变当前 Memory；L0/派生层仍是关键词检索。
 - `top_k` 是每个所选层的上限，不显示为全部结果总上限。
-- `as_of` 是事实有效时点，不是“当时数据库知道什么”；显式历史查询的派生层不受支持。
-- `event_at` 是事件发生时间，与有效时点分别输入；未知时间不能变成确定事件。
-- `related` 显示关联原因；`cluster` 保留成员 ID 和证据，不把合并展示误当作数据已合并。
+- query_mode 选择概览/细节/关系历史/冲突/指导，显式 layers 优先；history 不是 as_of。
+- stale 默认不显示为当前结论；显式 stale 结果与 derived_stale_fallback 必须保留文字说明。
+- dependencies 提供下钻引用，不假设不同层内容已语义去重，也不把展示聚合当作数据合并。
 - `explain` 按需开启，BM25/余弦/RRF 不展示为“真实性置信度”。语义降级保留关键词结果及警告。
 
 ### 8.4 派生知识审计
 
-正文旁显示当前状态、失效原因、生成版本和直接引用。点击 memory 引用进入准确历史版本，
-而不是默认跳到可能已变化的当前正文；run 引用仅显示 ID，不提供报告详情跳转。
-payload/provenance 按已知字段展示，未知结构作为只读 JSON；区分输入选择、截断、引用完整性
-和语义覆盖，不能只显示一个“质量通过”。
+正文旁显示 layer、当前状态、失效原因、生成版本和 typed dependencies。memory/derived 引用
+进入准确版本，observation 引用进入 L0，experience 引用仅显示 ID；不伪造报告详情 API。
+payload 按已知字段展示，未知结构作为只读 JSON；区分输入预算、truncated 和依赖存在，不能
+将引用合法解释为语义完整，也不沿用旧模型 citations/provenance 作为来源事实。
 
 stale/disabled 仍可审计，但明确不参与默认召回。暂无手动重新生成、启停、编辑派生正文的接口，
 不提供这些按钮。Skill 下载必须由用户点击触发，所有经验/Skill 页面保留“应用报告/指导文本”说明。
@@ -280,11 +282,12 @@ stale/disabled 仍可审计，但明确不参与默认召回。暂无手动重�
 | --- | --- | --- |
 | 归档 | 保留数据，退出默认召回 | 普通确认，显示对派生内容的影响 |
 | 逻辑删除 | 保留墓碑、历史与证据 | 明确可通过历史恢复，不称为永久遗忘 |
-| 历史恢复 | 复制为新的 active 版本，不覆盖历史 | 展示版本差异；可能返回 restore_conflict |
-| 清除来源原文 | 清除原文和证据副本、取消未完成任务；已形成正文保留 | 详情页危险区，不与永久遗忘合并命名 |
+| 历史恢复 | 复制为新的 active 版本，不覆盖历史或提升断言 | 展示版本差异，不宣称自动裁决冲突 |
+| 清除来源原文 | 清除原文/证据并撤回关联 L0、传播失效；无其他支持的 Memory 逻辑删除 | 显示实际 retracted_observations/invalidated_derived_ids，不与永久遗忘合并 |
 | 单条 purge | 永久清除该记忆及专属数据，共享来源保留 | 高风险确认；不是按来源或重复事实闭包遗忘 |
-| 永久遗忘 | 按 memory/source/experience 及后端闭包原子清除 | 独立危险对话框，明确不可恢复和范围扩展 |
+| 永久遗忘 | 按显式 ID、来源/历史引用与依赖传播，不猜测事实组副本 | 区分物理清理与间接 stale/disabled；不承诺擦除所有外部/历史副本 |
 
 永久操作需再次确认目标类型与 ID，并输入确认文字；默认不开放批量永久清除。
 当前无服务端 dry-run，前端只能展示所选目标与已知规则，不能给出精确影响预览或承诺仅删除
-页面可见项。完成后以服务端实际删除 ID 和 `retained_related_memory_ids` 为准。
+页面可见项。完成后以服务端返回的 memory_ids/source_ids/experience_ids 为准；没有旧版
+retained_related_memory_ids。仅被递归失效的间接派生历史仍可审计，不能宣称正文已物理擦除。

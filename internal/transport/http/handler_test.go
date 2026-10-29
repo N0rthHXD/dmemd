@@ -204,11 +204,11 @@ func TestListOptionsAndInvalidFilter(t *testing.T) {
 		return []memory.Memory{}, nil
 	}}}
 	response := serve(t, services, nil, httptest.NewRequest(http.MethodGet,
-		"/v1/memories?kinds=fact,preference&states=active,archived&created_by_app=desktop&updated_after=2026-01-01T00:00:00Z&limit=10", nil))
+		"/v1/memories?kinds=fact,preference&states=active,archived&updated_after=2026-01-01T00:00:00Z&limit=10", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d", response.Code)
 	}
-	if calls != 1 || len(captured.Kinds) != 2 || len(captured.States) != 2 || captured.Limit != 10 || captured.CreatedByApp != "desktop" {
+	if calls != 1 || len(captured.Kinds) != 2 || len(captured.States) != 2 || captured.Limit != 10 {
 		t.Fatalf("options = %+v calls=%d", captured, calls)
 	}
 	if captured.UpdatedAfter == nil || !captured.UpdatedAfter.Equal(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)) {

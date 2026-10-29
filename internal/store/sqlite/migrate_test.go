@@ -9,6 +9,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/N0rthHXD/dmemd/internal/governance/task"
 	"github.com/N0rthHXD/dmemd/internal/idgen"
 	"github.com/N0rthHXD/dmemd/internal/memory"
 	"github.com/N0rthHXD/dmemd/internal/source"
@@ -19,13 +20,15 @@ func TestMigrationsCreateCoreAndSearchSchema(t *testing.T) {
 	ctx := context.Background()
 
 	for _, table := range []string{
-		"memories", "memory_revisions", "sources", "evidence", "revision_evidence",
+		"memories", "memory_revisions", "memory_observation_refs", "sources", "observations",
+		"evidence", "observation_evidence", "revision_evidence",
 		"ingest_jobs", "schema_migrations", "memory_search_docs", "memory_fts",
+		"observation_search_docs", "observation_fts",
 		"memory_embeddings", "memory_embedding_jobs", "memory_index_meta",
-		"memory_fact_groups", "memory_relations", "memory_evolution_events", "memory_conflicts",
+		"memory_relations", "memory_conflicts",
 		"memory_conflict_members", "memory_conflict_events", "memory_catalog",
 		"schema_meta", "governance_jobs", "artifacts", "artifact_revisions",
-		"artifact_memory_dependencies", "artifact_search_docs", "artifact_fts",
+		"derived_dependencies", "artifact_search_docs", "artifact_fts",
 		"derived_target_evaluations",
 	} {
 		var name string
@@ -177,7 +180,6 @@ func TestRevisionVersionIsUnique(t *testing.T) {
 		Content:        "content",
 		State:          memory.StateActive,
 		Version:        1,
-		ObservedAt:     testTime(0),
 		CreatedAt:      testTime(0),
 		UpdatedAt:      testTime(0),
 		OriginSourceID: src.ID,
@@ -208,6 +210,131 @@ func TestRevisionVersionIsUnique(t *testing.T) {
 	if count != 0 {
 		t.Fatalf("revision rows after rollback = %d, want 0", count)
 	}
+}
+
+func TestPreReleaseSchemaUsesCurrentStructure(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	for table, removed := range map[string][]string{
+		"memories": {
+			"phase", "durability", "observed_at", "observed_at_basis", "event_time",
+			"event_time_basis", "event_time_precision", "valid_from", "valid_to",
+			"valid_from_basis", "valid_to_basis", "temporal_json", "procedure_json",
+			"qualifiers_json", "fact_group_id", "created_by_app", "topics_json",
+			"raw_topics_json",
+		},
+		"memory_revisions": {
+			"phase", "durability", "observed_at", "observed_at_basis", "event_time",
+			"event_time_basis", "event_time_precision", "valid_from", "valid_to",
+			"valid_from_basis", "valid_to_basis", "temporal_json", "procedure_json",
+			"qualifiers_json", "fact_group_id", "created_by_app", "topics_json",
+			"raw_topics_json", "updated_at",
+		},
+		"evidence": {"location_present", "model_name"},
+	} {
+		columns := tableColumns(t, store, table)
+		for _, name := range removed {
+			if _, exists := columns[name]; exists {
+				t.Fatalf("%s still contains obsolete column %s", table, name)
+			}
+		}
+	}
+	for _, column := range []string{"segment_id", "quote", "location_field", "location_start", "location_end"} {
+		if _, exists := tableColumns(t, store, "evidence")[column]; !exists {
+			t.Fatalf("evidence is missing %s", column)
+		}
+	}
+
+	for _, table := range []string{
+		"artifact_memory_dependencies", "artifact_run_dependencies",
+		"memory_fact_groups", "memory_evolution_events",
+	} {
+		if tableExists(t, store.writer, table) {
+			t.Fatalf("legacy table %s still exists", table)
+		}
+	}
+	if _, exists := tableColumns(t, store, "memory_conflicts")["fact_group_id"]; exists {
+		t.Fatal("memory_conflicts still contains fact_group_id")
+	}
+
+	if err := store.WithTx(ctx, func(ctx context.Context, tx *Tx) error {
+		if err := tx.InsertSource(ctx, source.Source{
+			ID: "source-t02", Content: []byte(`{"text":"项目使用 SQLite。"}`), CreatedAt: testTime(0),
+		}); err != nil {
+			return err
+		}
+		if _, err := tx.tx.ExecContext(ctx, `INSERT INTO observations(
+			id, source_id, scope_key, kind, content, content_mode, origin_role,
+			status, extraction_version, created_at, updated_at)
+			VALUES ('observation-1', 'source-t02', 'project:dmemd', 'fact',
+			'项目使用 SQLite。', 'extractive', 'user', 'observed', 'extraction-v6', ?, ?)`,
+			formatTime(testTime(0)), formatTime(testTime(0))); err != nil {
+			return err
+		}
+		if _, err := tx.tx.ExecContext(ctx, `INSERT INTO evidence(
+			id, source_id, segment_id, message_id, quote, location_field,
+			location_start, location_end, redacted, created_at)
+			VALUES ('evidence-1', 'source-t02', 'seg-0001', '', '项目使用 SQLite。',
+			'text', 0, 9, 0, ?)`, formatTime(testTime(0))); err != nil {
+			return err
+		}
+		if _, err := tx.tx.ExecContext(ctx, `INSERT INTO observation_evidence(observation_id, evidence_id)
+			VALUES ('observation-1', 'evidence-1')`); err != nil {
+			return err
+		}
+		if _, err := tx.tx.ExecContext(ctx, `INSERT INTO memory_relations(
+			id, kind, from_type, from_id, from_version, to_type, to_id, to_version, created_at)
+			VALUES ('relation-1', 'supports', 'observation', 'observation-1', 0,
+			'memory', 'memory-1', 1, ?)`, formatTime(testTime(0))); err != nil {
+			return err
+		}
+		if _, err := tx.tx.ExecContext(ctx, `INSERT INTO derived_dependencies(
+			derived_id, derived_version, input_type, input_id, input_version, required)
+			VALUES ('derived-1', 1, 'observation', 'observation-1', 0, 1)`); err != nil {
+			return err
+		}
+		if _, _, err := tx.UpsertJob(ctx, task.UpsertInput{
+			Kind: task.KindAggregateL2, TargetKey: task.L2TargetKey("project:dmemd", "storage"),
+			InputHash: "t02", Now: testTime(0),
+		}); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.writer.ExecContext(ctx, `INSERT INTO governance_jobs(
+		id, kind, target_key, revision, status, attempts, consecutive_failures,
+		last_error_code, wait_reason, input_hash, created_at, updated_at)
+		VALUES ('legacy-kind', 'aggregate', 't', 1, 'queued', 0, 0, '', '', '', ?, ?)`,
+		formatTime(testTime(0)), formatTime(testTime(0))); err == nil {
+		t.Fatal("governance_jobs accepted the old aggregate kind")
+	}
+}
+
+func tableColumns(t *testing.T, store *Store, table string) map[string]struct{} {
+	t.Helper()
+	rows, err := store.writer.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	columns := map[string]struct{}{}
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, kind string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		columns[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return columns
 }
 
 func TestSourceIdentifiersAreNotUnique(t *testing.T) {

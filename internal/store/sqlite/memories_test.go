@@ -20,13 +20,13 @@ func TestMemoryRevisionAndEvidenceRoundTrip(t *testing.T) {
 
 	v1 := memory.Memory{
 		ID: memoryID, Kind: memory.KindFact, Title: "First title", Content: "first content",
-		State: memory.StateActive, Version: 1, ObservedAt: base, CreatedAt: base, UpdatedAt: base,
-		CreatedByApp: "app-one", OriginSourceID: sourceID,
+		State: memory.StateActive, Version: 1, CreatedAt: base, UpdatedAt: base,
+		OriginSourceID: sourceID,
 	}
 	evidence1 := source.Evidence{
 		ID: "evidence-1", SourceID: sourceID, MessageID: "msg-1", Quote: "first content",
 		Location:  &source.Location{Field: "messages.0.content", Start: 0, End: 5},
-		ModelName: "test-model", CreatedAt: base,
+		CreatedAt: base,
 	}
 	revision1 := memory.Revision{
 		MemoryID: memoryID, Version: 1, Operation: memory.OperationCreate,
@@ -76,7 +76,7 @@ func TestMemoryRevisionAndEvidenceRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.Version != 2 || current.Content != "second content" || current.CreatedByApp != "app-one" {
+	if current.Version != 2 || current.Content != "second content" {
 		t.Fatalf("current = %+v", current)
 	}
 
@@ -93,7 +93,7 @@ func TestMemoryRevisionAndEvidenceRoundTrip(t *testing.T) {
 	if first.Evidence[0].Location == nil || first.Evidence[0].Location.Start != 0 || first.Evidence[0].Location.End != 5 {
 		t.Fatalf("location = %+v", first.Evidence[0].Location)
 	}
-	if first.Evidence[0].MessageID != "msg-1" || first.Evidence[0].ModelName != "test-model" {
+	if first.Evidence[0].MessageID != "msg-1" {
 		t.Fatalf("evidence metadata = %+v", first.Evidence[0])
 	}
 
@@ -137,16 +137,14 @@ func TestListMemoriesDefaultsFiltersAndOrdering(t *testing.T) {
 
 	for i := 0; i < 55; i++ {
 		seedMemory(t, store, sourceID, memory.Memory{
-			ID:           "bulk-" + twoDigits(i),
-			Kind:         memory.KindFact,
-			Title:        "bulk",
-			Content:      "bulk",
-			State:        memory.StateActive,
-			Version:      1,
-			ObservedAt:   base,
-			CreatedAt:    base,
-			UpdatedAt:    base.Add(time.Duration(i) * time.Millisecond),
-			CreatedByApp: "bulk-app",
+			ID:        "bulk-" + twoDigits(i),
+			Kind:      memory.KindFact,
+			Title:     "bulk",
+			Content:   "bulk",
+			State:     memory.StateActive,
+			Version:   1,
+			CreatedAt: base,
+			UpdatedAt: base.Add(time.Duration(i) * time.Millisecond),
 		})
 	}
 	items, err := store.ListMemories(ctx, memory.ListOptions{})
@@ -171,18 +169,15 @@ func TestListMemoriesDefaultsFiltersAndOrdering(t *testing.T) {
 	// Tie on updated_at must fall back to id ascending.
 	seedMemory(t, store, sourceID, memory.Memory{
 		ID: "tie-bbb", Kind: memory.KindPreference, Title: "tie", Content: "tie",
-		State: memory.StateArchived, Version: 1, ObservedAt: base, CreatedAt: base,
-		UpdatedAt: base.Add(time.Hour), CreatedByApp: "other-app",
+		State: memory.StateArchived, Version: 1, CreatedAt: base, UpdatedAt: base.Add(time.Hour),
 	})
 	seedMemory(t, store, sourceID, memory.Memory{
 		ID: "tie-aaa", Kind: memory.KindPreference, Title: "tie", Content: "tie",
-		State: memory.StateActive, Version: 1, ObservedAt: base, CreatedAt: base,
-		UpdatedAt: base.Add(time.Hour), CreatedByApp: "other-app",
+		State: memory.StateActive, Version: 1, CreatedAt: base, UpdatedAt: base.Add(time.Hour),
 	})
 	seedMemory(t, store, sourceID, memory.Memory{
 		ID: "tombstone", Kind: memory.KindEvent, Title: "tombstone", Content: "tombstone",
-		State: memory.StateDeleted, Version: 2, ObservedAt: base, CreatedAt: base,
-		UpdatedAt: base.Add(2 * time.Hour), CreatedByApp: "other-app",
+		State: memory.StateDeleted, Version: 2, CreatedAt: base, UpdatedAt: base.Add(2 * time.Hour),
 	})
 
 	ties, err := store.ListMemories(ctx, memory.ListOptions{Kinds: []memory.Kind{memory.KindPreference}})
@@ -193,7 +188,7 @@ func TestListMemoriesDefaultsFiltersAndOrdering(t *testing.T) {
 		t.Fatalf("tie order = %+v", ties)
 	}
 
-	active, err := store.ListMemories(ctx, memory.ListOptions{States: []memory.State{memory.StateActive}, CreatedByApp: "other-app"})
+	active, err := store.ListMemories(ctx, memory.ListOptions{States: []memory.State{memory.StateActive}, Kinds: []memory.Kind{memory.KindPreference}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +222,7 @@ func TestListMemoriesDefaultsFiltersAndOrdering(t *testing.T) {
 		t.Fatalf("tombstone state = %s", tombstone.State)
 	}
 
-	none, err := store.ListMemories(ctx, memory.ListOptions{Kinds: []memory.Kind{memory.KindProcedure}, CreatedByApp: "missing"})
+	none, err := store.ListMemories(ctx, memory.ListOptions{Kinds: []memory.Kind{memory.KindProcedure}})
 	if err != nil {
 		t.Fatal(err)
 	}

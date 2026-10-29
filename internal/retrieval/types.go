@@ -1,5 +1,10 @@
 // Package retrieval owns keyword normalization, query compilation, filtering,
 // hybrid ranking, snippets and explanations. It never changes memory facts.
+//
+// Recall is layer-aware: L0 observations, canonical memories and the L1-L4
+// derived hierarchy are selected by query target instead of being concatenated
+// into one ranked list. High-level derived results that are stale or missing can
+// fall back to the next lower layer without blocking an HTTP request on a model.
 package retrieval
 
 import (
@@ -8,13 +13,15 @@ import (
 	"time"
 
 	"github.com/N0rthHXD/dmemd/internal/artifact"
+	"github.com/N0rthHXD/dmemd/internal/governance"
 	"github.com/N0rthHXD/dmemd/internal/memory"
+	"github.com/N0rthHXD/dmemd/internal/observation"
 	"github.com/N0rthHXD/dmemd/internal/source"
 )
 
 const (
-	// DefaultTopK is the contracted result count when top_k is missing or
-	// non-positive.
+	// DefaultTopK is the contracted per-layer result count when top_k is
+	// missing or non-positive.
 	DefaultTopK = 20
 	// MaxTopK is the contracted upper bound. Larger values are a request error.
 	MaxTopK = 100
@@ -24,18 +31,9 @@ const (
 	CandidateLimitMax = 500
 	// RRFConstant is the Cormack et al. rank-fusion constant.
 	RRFConstant = 60
-	// DefaultRelatedLimit is the fixed maximum number of related active
-	// memories supplied to background extraction.
-	DefaultRelatedLimit = 10
-	// MaxRelatedQueryGroups bounds the keyword groups derived from one source
-	// when building extraction context. The full user submission is still
-	// accepted; only this derived query is bounded.
-	MaxRelatedQueryGroups = 32
 	// DefaultSnippetRunes bounds a readable snippet taken from original content.
 	DefaultSnippetRunes = 160
 	// FieldWeightTitle and FieldWeightContent are the FTS5 BM25 column weights.
-	// Candidate settings 4/1, 2/1 and 1/1 remain possible; 4/1 stays the
-	// default and is defined only here, never per request.
 	FieldWeightTitle   = 4
 	FieldWeightContent = 1
 
@@ -62,57 +60,149 @@ const (
 	WarningSemanticIndexNotReady    = "semantic_index_not_ready"
 	WarningFactConflict             = "fact_conflict"
 	WarningConflictResultsTruncated = "conflict_results_truncated"
-	WarningDerivedAsOfUnsupported   = "derived_as_of_unsupported"
 	WarningDerivedUnavailable       = "derived_unavailable"
+	WarningDerivedStaleFallback     = "derived_stale_fallback"
+	WarningStaleIncluded            = "stale_included"
+	WarningObservationsUnavailable  = "observations_unavailable"
+	WarningRelationsUnavailable     = "relations_unavailable"
 	WarningContextBudgetTruncated   = "context_budget_truncated"
-	WarningTemporalUncertain        = "temporal_uncertain"
-)
-
-// Association reason codes explain why a bounded related item was attached to
-// a primary hit. They are fixed service-owned values, never model text.
-const (
-	RelatedFactGroupMember = "fact_group_member"
-	RelatedConflictMember  = "conflict_member"
 )
 
 // Layer selects one knowledge level in the unified recall entry point. Layers
-// are independent from filters.kinds, which only narrows atomic memories.
+// are independent from filters.kinds, which only narrows the selected content
+// vocabulary.
 type Layer string
 
 const (
-	LayerAtomic     Layer = "atomic"
-	LayerSummary    Layer = "summary"
-	LayerExperience Layer = "experience"
-	LayerSkill      Layer = "skill"
+	LayerObservations Layer = "observations"
+	LayerMemories     Layer = "memories"
+	LayerL1           Layer = "l1"
+	LayerL2           Layer = "l2"
+	LayerL3           Layer = "l3"
+	LayerL4           Layer = "l4"
 )
 
-// Known reports whether layer is part of the first-release vocabulary.
+// Known reports whether layer is part of the fixed recall vocabulary.
 func (l Layer) Known() bool {
 	switch l {
-	case LayerAtomic, LayerSummary, LayerExperience, LayerSkill:
+	case LayerObservations, LayerMemories, LayerL1, LayerL2, LayerL3, LayerL4:
 		return true
 	default:
 		return false
 	}
 }
 
-// Filters narrow a search. Zero values mean no filter. Search defaults to
-// active memories only; archived must be requested explicitly and deleted is
-// never returned by keyword or semantic retrieval.
-type Filters struct {
-	Kinds           []memory.Kind
-	States          []memory.State
-	AssertionStatus []memory.AssertionStatus
-	AsOf            *time.Time
-	EventAt         *time.Time
-	ScopeKey        string
-	CreatedByApp    string
-	UpdatedAfter    *time.Time
-	UpdatedBefore   *time.Time
+// Derived reports whether layer belongs to the L1-L4 aggregation hierarchy.
+func (l Layer) Derived() bool {
+	switch l {
+	case LayerL1, LayerL2, LayerL3, LayerL4:
+		return true
+	default:
+		return false
+	}
 }
 
-// Request is one Top-K search. Mode defaults to keyword and only controls
-// retrieval strategy; it never changes the response shape.
+// ArtifactLayer maps one recall layer onto the persisted derived hierarchy.
+func (l Layer) ArtifactLayer() artifact.Layer {
+	switch l {
+	case LayerL1:
+		return artifact.LayerL1
+	case LayerL2:
+		return artifact.LayerL2
+	case LayerL3:
+		return artifact.LayerL3
+	case LayerL4:
+		return artifact.LayerL4
+	default:
+		return ""
+	}
+}
+
+// Lower returns the next lower recall layer used when a stale derived result
+// cannot be shown as a current conclusion.
+func (l Layer) Lower() (Layer, bool) {
+	switch l {
+	case LayerL4:
+		return LayerL3, true
+	case LayerL3:
+		return LayerL2, true
+	case LayerL2:
+		return LayerL1, true
+	case LayerL1:
+		return LayerObservations, true
+	case LayerMemories:
+		return LayerObservations, true
+	default:
+		return "", false
+	}
+}
+
+// QueryMode selects the layer combination for one recall request. It is a
+// semantic target, not a retrieval strategy; Mode still selects keyword or
+// hybrid ranking inside the selected layers.
+type QueryMode string
+
+const (
+	QueryModeUnspecified QueryMode = ""
+	QueryModeOverview    QueryMode = "overview"
+	QueryModeDetail      QueryMode = "detail"
+	QueryModeHistory     QueryMode = "history"
+	QueryModeConflict    QueryMode = "conflict"
+	QueryModeGuidance    QueryMode = "guidance"
+)
+
+// Known reports whether mode is part of the fixed query-target vocabulary.
+func (m QueryMode) Known() bool {
+	switch m {
+	case QueryModeUnspecified, QueryModeOverview, QueryModeDetail,
+		QueryModeHistory, QueryModeConflict, QueryModeGuidance:
+		return true
+	default:
+		return false
+	}
+}
+
+// Layers returns the fixed default layer selection for one query target.
+func (m QueryMode) Layers() map[Layer]bool {
+	layers := map[Layer]bool{}
+	switch m {
+	case QueryModeOverview:
+		layers[LayerL2] = true
+		layers[LayerL3] = true
+		layers[LayerL1] = true
+	case QueryModeDetail:
+		layers[LayerObservations] = true
+		layers[LayerMemories] = true
+	case QueryModeHistory, QueryModeConflict:
+		layers[LayerObservations] = true
+		layers[LayerMemories] = true
+	case QueryModeGuidance:
+		layers[LayerL4] = true
+	default:
+		for _, layer := range []Layer{LayerObservations, LayerMemories,
+			LayerL1, LayerL2, LayerL3, LayerL4} {
+			layers[layer] = true
+		}
+	}
+	return layers
+}
+
+// Filters narrow a search. Zero values mean no filter. Search defaults to
+// active memories only; archived must be requested explicitly and deleted is
+// never returned by keyword or semantic retrieval. Temporally scoped queries
+// belong to a future annotation capability and are not part of this contract.
+type Filters struct {
+	Kinds               []memory.Kind
+	States              []memory.State
+	AssertionStatus     []memory.AssertionStatus
+	ObservationStatuses []observation.Status
+	ScopeKey            string
+	UpdatedAfter        *time.Time
+	UpdatedBefore       *time.Time
+}
+
+// Request is one Top-K canonical-memory search. Mode defaults to keyword and
+// only controls retrieval strategy; it never changes the response shape.
 type Request struct {
 	Query   string
 	Mode    Mode
@@ -139,10 +229,26 @@ type Query struct {
 	TopK       int
 }
 
+// ObservationQuery is the normalized keyword plan for the L0 observation index.
+type ObservationQuery struct {
+	Groups     []Group
+	Expression string
+	Filters    Filters
+	TopK       int
+}
+
 // Hit is a keyword-storage match before snippet and evidence assembly.
 type Hit struct {
 	MemoryID string
 	BM25     float64
+}
+
+// ObservationHit is one L0 keyword match with its code-generated evidence
+// references already loaded.
+type ObservationHit struct {
+	Observation  observation.Observation
+	Score        float64
+	EvidenceRefs []EvidenceRef
 }
 
 // VectorQuery is one exact cosine scan over filtered, current vectors.
@@ -235,42 +341,26 @@ func (e Explanation) MarshalJSON() ([]byte, error) {
 	return json.Marshal(output)
 }
 
-// RelatedInfo marks a bounded association that was expanded from a primary
-// hit. Anchors list the query-matching memories that justified the expansion.
-type RelatedInfo struct {
-	ReasonCodes     []string `json:"reason_codes"`
-	AnchorMemoryIDs []string `json:"anchor_memory_ids"`
-}
-
-// DisplayCluster records duplicate expressions of the same fact that were
-// folded into one display item. Every member keeps its full evidence in the
-// representative item, so folding never drops a source.
-type DisplayCluster struct {
-	FactGroupID   string   `json:"fact_group_id,omitempty"`
-	MemberIDs     []string `json:"member_ids"`
-	EvidenceCount int      `json:"evidence_count"`
-}
-
 // SearchDiagnostics reports bounded stage counts when explain=true. Counts are
 // candidate counts, not proof of semantic correctness; a relaxed count never
 // changes the returned result set.
 type SearchDiagnostics struct {
 	KeywordCandidates      int    `json:"keyword_candidates"`
+	ObservationCandidates  int    `json:"observation_candidates"`
+	MemoryCandidates       int    `json:"memory_candidates"`
+	DerivedCandidates      int    `json:"derived_candidates"`
 	SemanticCandidates     int    `json:"semantic_candidates"`
 	SemanticExcluded       int    `json:"semantic_excluded"`
 	TermCandidates         int    `json:"term_candidates"`
 	KindFilterExcluded     int    `json:"kind_filter_excluded"`
 	StateFilterExcluded    int    `json:"state_filter_excluded"`
-	TimeFilterExcluded     int    `json:"time_filter_excluded"`
 	RankingCandidates      int    `json:"ranking_candidates"`
-	RelatedExpanded        int    `json:"related_expanded"`
-	RelatedExcluded        int    `json:"related_excluded"`
 	ReturnedItems          int    `json:"returned_items"`
 	ContextBudgetTruncated int    `json:"context_budget_truncated"`
 	SemanticDegradation    string `json:"semantic_degradation,omitempty"`
 }
 
-// Item is one search result.
+// Item is one canonical-memory search result.
 type Item struct {
 	Memory       memory.Memory        `json:"memory"`
 	Score        float64              `json:"score"`
@@ -279,8 +369,29 @@ type Item struct {
 	EvidenceRefs []EvidenceRef        `json:"evidence_refs"`
 	Explanation  *Explanation         `json:"explanation,omitempty"`
 	ConflictRefs []memory.ConflictRef `json:"conflict_refs"`
-	Related      *RelatedInfo         `json:"related,omitempty"`
-	Cluster      *DisplayCluster      `json:"cluster,omitempty"`
+}
+
+// ObservationItem is one L0 recall result. The observation content is raw
+// extracted text; EvidenceRefs are generated by code from source spans.
+type ObservationItem struct {
+	Observation  observation.Observation `json:"observation"`
+	Score        float64                 `json:"score"`
+	Snippet      string                  `json:"snippet"`
+	MatchedTerms []string                `json:"matched_terms"`
+	EvidenceRefs []EvidenceRef           `json:"evidence_refs"`
+	Explanation  *Explanation            `json:"explanation,omitempty"`
+}
+
+// DerivedItem is one L1-L4 recall result. Dependencies are the drill-down
+// references of the exact current revision; they never come from model output.
+type DerivedItem struct {
+	DerivedMemory artifact.DerivedMemory   `json:"artifact"`
+	Revision      artifact.Revision        `json:"revision"`
+	Score         float64                  `json:"score"`
+	Snippet       string                   `json:"snippet"`
+	MatchedTerms  []string                 `json:"matched_terms"`
+	Dependencies  []artifact.DependencyRef `json:"dependencies"`
+	Explanation   *Explanation             `json:"explanation,omitempty"`
 }
 
 // Retrieval reports the strategy actually executed, independent of whether a
@@ -298,32 +409,74 @@ type Result struct {
 	Diagnostics *SearchDiagnostics       `json:"diagnostics,omitempty"`
 }
 
-// RecallRequest is the single unified recall entry. Layers default to every
-// layer when omitted; filters.kinds only narrows the atomic partition.
+// RecallRequest is the single unified recall entry. QueryMode selects a fixed
+// target layer set; an explicit Layers list takes precedence. Each selected
+// layer receives its own TopK bound.
 type RecallRequest struct {
-	Query    string
-	ScopeKey string
-	Layers   []Layer
-	// LayersSpecified distinguishes an omitted layers field (all layers) from
-	// an explicit empty list (no layers).
-	LayersSpecified  bool
-	Mode             Mode
-	Filters          Filters
+	Query     string
+	ScopeKey  string
+	QueryMode QueryMode
+	Layers    []Layer
+	// LayersSpecified distinguishes an omitted layers field (query-mode/default
+	// selection) from an explicit empty list (no layers).
+	LayersSpecified bool
+	Mode            Mode
+	Filters         Filters
+	// DerivedStates defaults to active. Requesting stale explicitly returns the
+	// marked historical result instead of treating it as a current conclusion.
+	DerivedStates    []artifact.State
 	TopK             int
 	Explain          bool
 	MaxContextTokens int
 }
 
-// RecallResult preserves the knowledge partitions instead of forcing atomic
-// memories and derived artifacts into one item shape.
+// RecallResult preserves the knowledge partitions instead of forcing raw,
+// canonical and derived memories into one item shape.
 type RecallResult struct {
-	Memories    []Item
-	Summaries   []artifact.SearchHit
-	Experiences []artifact.SearchHit
-	Skills      []artifact.SearchHit
-	Conflicts   []memory.ConflictSummary
-	Warnings    []string
-	Diagnostics *SearchDiagnostics
+	QueryMode    QueryMode                `json:"query_mode,omitempty"`
+	Observations []ObservationItem        `json:"observations"`
+	Memories     []Item                   `json:"memories"`
+	L1           []DerivedItem            `json:"l1"`
+	L2           []DerivedItem            `json:"l2"`
+	L3           []DerivedItem            `json:"l3"`
+	L4           []DerivedItem            `json:"l4"`
+	Relations    []governance.Relation    `json:"relations,omitempty"`
+	Conflicts    []memory.ConflictSummary `json:"conflicts"`
+	Warnings     []string                 `json:"warnings,omitempty"`
+	Diagnostics  *SearchDiagnostics       `json:"diagnostics,omitempty"`
+}
+
+// Derived returns the result partition of one L1-L4 layer.
+func (r RecallResult) Derived(layer Layer) []DerivedItem {
+	switch layer {
+	case LayerL1:
+		return r.L1
+	case LayerL2:
+		return r.L2
+	case LayerL3:
+		return r.L3
+	case LayerL4:
+		return r.L4
+	default:
+		return nil
+	}
+}
+
+// SetDerived replaces one L1-L4 result partition.
+func (r *RecallResult) SetDerived(layer Layer, items []DerivedItem) {
+	if items == nil {
+		items = []DerivedItem{}
+	}
+	switch layer {
+	case LayerL1:
+		r.L1 = items
+	case LayerL2:
+		r.L2 = items
+	case LayerL3:
+		r.L3 = items
+	case LayerL4:
+		r.L4 = items
+	}
 }
 
 // RebuildResult reports a successful, committed index rebuild.
@@ -332,7 +485,7 @@ type RebuildResult struct {
 	Duration time.Duration `json:"duration"`
 }
 
-// SearchService is the internal atomic search capability.
+// SearchService is the internal canonical-memory search capability.
 type SearchService interface {
 	Search(ctx context.Context, request Request) (Result, error)
 }
@@ -340,24 +493,6 @@ type SearchService interface {
 // RecallService is the single public recall capability.
 type RecallService interface {
 	Recall(ctx context.Context, request RecallRequest) (RecallResult, error)
-}
-
-// RelatedService exposes keyword-based context selection to ingest without
-// changing the public search request/response contract.
-type RelatedService interface {
-	RelatedContext(ctx context.Context, scopeKey, text string, limit int) (ContextResult, error)
-	FactTimeline(ctx context.Context, groupID string, limit int) (ContextResult, error)
-	OpenConflictsForMemories(ctx context.Context, memoryIDs []string) ([]memory.Conflict, error)
-	MemoriesByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
-	CatalogGeneration(ctx context.Context) (int64, error)
-}
-
-// ContextResult is a bounded consistency-context load. Complete is false when
-// the fixed cap was reached; callers must then avoid destructive rewrites.
-type ContextResult struct {
-	Memories []memory.Memory
-	Complete bool
-	Warnings []string
 }
 
 // IndexMaintainer rebuilds derived search documents and FTS from current

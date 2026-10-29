@@ -94,26 +94,24 @@ func (t *Tx) RedactSource(ctx context.Context, id string, at time.Time) error {
 	return nil
 }
 
-const evidenceColumns = `id, source_id, message_id, quote, location_present,
-	location_field, location_start, location_end, model_name, redacted, redacted_at, created_at`
+const evidenceColumns = `id, source_id, segment_id, message_id, quote,
+	location_field, location_start, location_end, redacted, redacted_at, created_at`
 
 func (t *Tx) InsertEvidence(ctx context.Context, item source.Evidence) error {
 	quote := any(nil)
 	if !item.Redacted {
 		quote = item.Quote
 	}
-	locationPresent := 0
 	var field, start, end any
 	if !item.Redacted && item.Location != nil {
-		locationPresent = 1
 		field = nullableString(item.Location.Field)
 		start = item.Location.Start
 		end = item.Location.End
 	}
 	_, err := t.tx.ExecContext(ctx, `INSERT INTO evidence(`+evidenceColumns+`) VALUES
-		(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		item.ID, item.SourceID, item.MessageID, quote, locationPresent, field, start, end,
-		item.ModelName, boolInt(item.Redacted), timeValue(item.RedactedAt), formatTime(item.CreatedAt),
+		(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		item.ID, item.SourceID, item.SegmentID, item.MessageID, quote, field, start, end,
+		boolInt(item.Redacted), timeValue(item.RedactedAt), formatTime(item.CreatedAt),
 	)
 	if err != nil {
 		return fmt.Errorf("写入证据 %s: %w", item.ID, err)
@@ -145,7 +143,6 @@ func (t *Tx) ListEvidenceBySource(ctx context.Context, sourceID string) ([]sourc
 func (t *Tx) RedactEvidenceBySource(ctx context.Context, sourceID string, at time.Time) error {
 	if _, err := t.tx.ExecContext(ctx, `UPDATE evidence SET
 		quote = NULL,
-		location_present = 0,
 		location_field = NULL,
 		location_start = NULL,
 		location_end = NULL,
@@ -160,22 +157,21 @@ func (t *Tx) RedactEvidenceBySource(ctx context.Context, sourceID string, at tim
 func scanEvidence(row rowScanner) (source.Evidence, error) {
 	var item source.Evidence
 	var quote sql.NullString
-	var locationPresent int
 	var field sql.NullString
 	var start, end sql.NullInt64
 	var redacted int
 	var redactedAt sql.NullString
 	var createdAt string
 	if err := row.Scan(
-		&item.ID, &item.SourceID, &item.MessageID, &quote, &locationPresent,
-		&field, &start, &end, &item.ModelName, &redacted, &redactedAt, &createdAt,
+		&item.ID, &item.SourceID, &item.SegmentID, &item.MessageID, &quote,
+		&field, &start, &end, &redacted, &redactedAt, &createdAt,
 	); err != nil {
 		return source.Evidence{}, err
 	}
 	if quote.Valid {
 		item.Quote = quote.String
 	}
-	if locationPresent != 0 {
+	if field.Valid || start.Valid || end.Valid {
 		location := &source.Location{}
 		if field.Valid {
 			location.Field = field.String

@@ -146,8 +146,6 @@ export function ReportActions({ skillContext }: { skillContext?: SkillContext })
           `删除报告 ${data.experience_ids.length} 项`,
           `删除来源 ${data.source_ids.length} 项`,
           `删除记忆 ${data.memory_ids.length} 项`,
-          `补充提示 ${data.warnings?.length || 0} 项，详见删除结果`,
-          `保留相关记忆 ${data.retained_related_memory_ids?.length || 0} 项`,
         ].join('；'),
         duration: 0,
       });
@@ -231,14 +229,6 @@ export function ReportActions({ skillContext }: { skillContext?: SkillContext })
             </Descriptions.Item>
             <Descriptions.Item label="实际删除报告 ID">
               {forgetResult.experience_ids.length ? forgetResult.experience_ids.join('、') : '无'}
-            </Descriptions.Item>
-            <Descriptions.Item label="警告">
-              {forgetResult.warnings?.length ? forgetResult.warnings.join('、') : '无'}
-            </Descriptions.Item>
-            <Descriptions.Item label="保留的相关记忆">
-              {forgetResult.retained_related_memory_ids?.length
-                ? forgetResult.retained_related_memory_ids.join('、')
-                : '无'}
             </Descriptions.Item>
           </Descriptions></TechnicalDetails>
         </Card>

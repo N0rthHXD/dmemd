@@ -10,12 +10,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/N0rthHXD/dmemd/internal/aggregation"
 	"github.com/N0rthHXD/dmemd/internal/artifact"
 	"github.com/N0rthHXD/dmemd/internal/embedding"
 	"github.com/N0rthHXD/dmemd/internal/governance"
 	"github.com/N0rthHXD/dmemd/internal/governance/task"
 	"github.com/N0rthHXD/dmemd/internal/ingest"
 	"github.com/N0rthHXD/dmemd/internal/memory"
+	"github.com/N0rthHXD/dmemd/internal/observation"
 	"github.com/N0rthHXD/dmemd/internal/retrieval"
 	"github.com/N0rthHXD/dmemd/internal/store/sqlite"
 	"github.com/N0rthHXD/dmemd/internal/testutil"
@@ -26,14 +28,12 @@ func TestProductionServicesUseSharedNormalization(t *testing.T) {
 	memories := NewMemoryService(store)
 	search := NewSearchService(store, discardLogger())
 	ctx := context.Background()
-	now := time.Date(2026, 10, 20, 2, 0, 0, 0, time.UTC)
 
 	var created memory.Memory
 	if err := store.WithTx(ctx, func(ctx context.Context, tx *sqlite.Tx) error {
 		var err error
 		created, err = memories.Create(ctx, tx, memory.CreateInput{
 			Kind: memory.KindFact, Title: "AI记忆", Content: "记忆服务保留上下文。",
-			ObservedAt: now,
 		})
 		return err
 	}); err != nil {
@@ -52,16 +52,16 @@ func TestProductionServicesUseSharedNormalization(t *testing.T) {
 func TestProductionIngestAssembly(t *testing.T) {
 	store := testutil.NewStore(t)
 	fake := testutil.NewFakeModel(t)
-	fake.EnqueueContent(`{"candidates":[{"content":"生产组装形成的记忆。"}]}`)
+	fake.EnqueueContent(`{"items":[{"span_ids":["seg-0001"],"content":"生产组装形成的记忆。"}]}`)
 	ingestService := NewIngestService(store)
-	memories := NewMemoryService(store)
-	search := NewSearchService(store, discardLogger())
-	provider, err := NewModelProvider(ModelConfig{Name: "test-model", BaseURL: fake.URL(), Timeout: Duration(time.Second)})
+	observations := observation.NewService(store)
+	workerCfg := DefaultConfig().Worker
+	provider, err := NewExtractionProvider(ModelConfig{Name: "test-model", BaseURL: fake.URL(), Timeout: Duration(time.Second)}, workerCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	processor := NewIngestProcessor(store, memories, search, provider, "test-model", discardLogger())
-	worker, err := NewIngestWorker(store, processor, DefaultConfig().Worker, discardLogger())
+	processor := NewExtractionService(store, provider, "test-model", workerCfg, discardLogger())
+	worker, err := NewExtractionWorker(store, processor, workerCfg, discardLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,23 +77,30 @@ func TestProductionIngestAssembly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if job.Status != ingest.JobSucceeded || job.Attempts != 1 || len(job.MemoryIDs) != 1 {
+	if job.Status != ingest.JobSucceeded || job.Attempts != 1 || len(job.ObservationIDs) != 1 {
 		t.Fatalf("job = %+v", job)
 	}
-	result, err := search.Search(context.Background(), retrieval.Request{Query: "生产组装"})
+	item, err := observations.Get(context.Background(), job.ObservationIDs[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Items) != 1 || result.Items[0].Memory.ID != job.MemoryIDs[0] {
-		t.Fatalf("search = %+v", result)
+	if item.Content != "生产组装形成的记忆。" || item.ContentMode != observation.ContentNormalized ||
+		item.Status != observation.StatusObserved || item.SourceID != receipt.SourceID {
+		t.Fatalf("observation = %+v", item)
+	}
+	evidence, err := observations.Evidence(context.Background(), item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evidence) != 1 || evidence[0].Quote != "生产组装形成的记忆。" || evidence[0].SourceID != receipt.SourceID {
+		t.Fatalf("evidence = %+v", evidence)
 	}
 }
 
-func TestProductionIngestAndGovernanceClassifyAssembly(t *testing.T) {
+func TestProductionIngestAndGovernanceAssembly(t *testing.T) {
 	store := testutil.NewStore(t)
 	fake := testutil.NewFakeModel(t)
-	fake.EnqueueCandidates([]any{map[string]any{"content": "项目使用 SQLite 保存记忆。"}})
-	fake.EnqueueContent(`{"topics":["Go","sqlite"]}`)
+	fake.EnqueueContent(`{"items":[{"span_ids":["seg-0001"],"content":"项目使用 SQLite 保存记忆。"}]}`)
 	cfg := DefaultConfig()
 	cfg.DataDir = t.TempDir()
 	cfg.Database.Path = store.Path()
@@ -107,8 +114,9 @@ func TestProductionIngestAndGovernanceClassifyAssembly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stack.GovernanceWorker == nil {
-		t.Fatal("governance worker missing from stack")
+	if stack.ExtractionWorker == nil || stack.GovernanceWorker == nil || stack.AggregationWorker == nil {
+		t.Fatalf("stage workers missing: extraction=%v governance=%v aggregation=%v",
+			stack.ExtractionWorker, stack.GovernanceWorker, stack.AggregationWorker)
 	}
 	receipt, err := stack.Services.Ingest.Submit(context.Background(), ingest.Submission{
 		ScopeKey: "project:dmemd",
@@ -117,41 +125,135 @@ func TestProductionIngestAndGovernanceClassifyAssembly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if processed, err := stack.Worker.ProcessOne(context.Background()); err != nil || !processed {
+	if processed, err := stack.ExtractionWorker.ProcessOne(context.Background()); err != nil || !processed {
 		t.Fatalf("ingest processed=%v err=%v", processed, err)
 	}
 	job, err := stack.Services.Ingest.GetJob(context.Background(), receipt.JobID)
-	if err != nil || job.Status != ingest.JobSucceeded || len(job.MemoryIDs) != 1 {
+	if err != nil || job.Status != ingest.JobSucceeded || len(job.ObservationIDs) != 1 {
+		t.Fatalf("ingest job = %+v err=%v", job, err)
+	}
+	governanceJob, err := store.GetGovernanceJobByTarget(context.Background(),
+		task.KindGovernObservation, task.ObservationKey(job.ObservationIDs[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if governanceJob.Status != task.StatusQueued {
+		t.Fatalf("governance job = %+v", governanceJob)
+	}
+}
+
+func TestObservationGovernanceAssemblyMaterializesCurrentMemory(t *testing.T) {
+	store := testutil.NewStore(t)
+	fake := testutil.NewFakeModel(t)
+	fake.EnqueueContent(`{"items":[{"span_ids":["seg-0001"],"content":"项目使用 SQLite 保存记忆。"}]}`)
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Database.Path = store.Path()
+	cfg.Listen = "127.0.0.1:0"
+	cfg.Model.Name = "test-model"
+	cfg.Model.BaseURL = fake.URL()
+	cfg.Model.Timeout = Duration(5 * time.Second)
+	cfg.Governance.Debounce = 0
+	cfg.Governance.MinCallInterval = 0
+	stack, err := NewStack(cfg, discardLogger(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := stack.Services.Ingest.Submit(context.Background(), ingest.Submission{
+		ScopeKey: "project:dmemd",
+		Content:  []byte(`"项目使用 SQLite 保存记忆。"`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := stack.ExtractionWorker.ProcessOne(context.Background()); err != nil || !processed {
+		t.Fatalf("ingest processed=%v err=%v", processed, err)
+	}
+	job, err := stack.Services.Ingest.GetJob(context.Background(), receipt.JobID)
+	if err != nil || len(job.ObservationIDs) != 1 {
 		t.Fatalf("ingest job = %+v err=%v", job, err)
 	}
 	if processed, err := stack.GovernanceWorker.ProcessOne(context.Background()); err != nil || !processed {
 		t.Fatalf("governance processed=%v err=%v", processed, err)
 	}
-	item, err := stack.Services.Memories.Get(context.Background(), job.MemoryIDs[0])
+	items, err := stack.Services.Memories.List(context.Background(), memory.ListOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if item.ScopeKey != "project:dmemd" || len(item.Topics) != 2 || item.Topics[0] != "go" || item.Topics[1] != "sqlite" {
-		t.Fatalf("classified item = %+v", item)
+	if len(items) != 1 || items[0].Content != "项目使用 SQLite 保存记忆。" ||
+		items[0].AssertionStatus != memory.AssertionAccepted {
+		t.Fatalf("materialized memories = %+v", items)
 	}
-	if item.Version != 2 {
-		t.Fatalf("classified version = %d, want 2", item.Version)
+	refs, err := store.ListMemoryObservationRefs(context.Background(), items[0].ID, items[0].Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 1 || refs[0] != job.ObservationIDs[0] {
+		t.Fatalf("observation refs = %+v", refs)
 	}
 }
 
 func TestIngestWorkerRejectsMultipleWorkers(t *testing.T) {
 	store := testutil.NewStore(t)
-	processor := NewIngestProcessor(store, NewMemoryService(store), NewSearchService(store, discardLogger()), nil, "test", discardLogger())
 	cfg := DefaultConfig().Worker
+	processor := NewExtractionService(store, nil, "test", cfg, discardLogger())
 	cfg.Workers = 2
-	if _, err := NewIngestWorker(store, processor, cfg, discardLogger()); err == nil {
+	if _, err := NewExtractionWorker(store, processor, cfg, discardLogger()); err == nil {
 		t.Fatal("multiple workers accepted")
 	}
 }
 
+func TestStageWorkersClaimOnlyTheirOwnTaskKinds(t *testing.T) {
+	store := testutil.NewStore(t)
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Database.Path = store.Path()
+	cfg.Listen = "127.0.0.1:0"
+	stack, err := NewStack(cfg, discardLogger(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	now := time.Now().UTC()
+	target := aggregation.L1TargetForTime("project:dmemd", now, 24*time.Hour)
+	if err := store.WithTx(ctx, func(ctx context.Context, tx *sqlite.Tx) error {
+		_, _, err := tx.UpsertJob(ctx, task.UpsertInput{
+			Kind:      task.KindAggregateL1,
+			TargetKey: target.TargetKey(),
+			InputHash: "stage-isolation-aggregation",
+			Now:       now,
+		})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := stack.GovernanceWorker.ProcessOne(ctx); err != nil || processed {
+		t.Fatalf("governance worker claimed aggregation job: processed=%v err=%v", processed, err)
+	}
+	if processed, err := stack.AggregationWorker.ProcessOne(ctx); err != nil || !processed {
+		t.Fatalf("aggregation worker did not claim its job: processed=%v err=%v", processed, err)
+	}
+
+	if err := store.WithTx(ctx, func(ctx context.Context, tx *sqlite.Tx) error {
+		_, _, err := tx.UpsertJob(ctx, task.UpsertInput{
+			Kind:      task.KindClassifyObservation,
+			TargetKey: task.MemoryKey("missing-memory"),
+			InputHash: "stage-isolation-governance",
+			Now:       now,
+		})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := stack.AggregationWorker.ProcessOne(ctx); err != nil || processed {
+		t.Fatalf("aggregation worker claimed governance job: processed=%v err=%v", processed, err)
+	}
+	if processed, err := stack.GovernanceWorker.ProcessOne(ctx); err != nil || !processed {
+		t.Fatalf("governance worker did not claim its job: processed=%v err=%v", processed, err)
+	}
+}
+
 func TestEmbeddingAssemblyIndexesAndSearchesSemantically(t *testing.T) {
-	chat := testutil.NewFakeModel(t)
-	chat.EnqueueContent(`{"candidates":[{"content":"用户偏好清淡饮食。"}]}`)
 	embeddingServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"data":[{"index":0,"embedding":[1,0,0]}]}`)
@@ -164,7 +266,7 @@ func TestEmbeddingAssemblyIndexesAndSearchesSemantically(t *testing.T) {
 	cfg.Database.Path = store.Path()
 	cfg.Listen = "127.0.0.1:0"
 	cfg.Model.Name = "extract"
-	cfg.Model.BaseURL = chat.URL()
+	cfg.Model.BaseURL = "http://127.0.0.1:1"
 	cfg.Model.Timeout = Duration(time.Second)
 	cfg.Embedding.Enabled = true
 	cfg.Embedding.BaseURL = embeddingServer.URL
@@ -179,19 +281,19 @@ func TestEmbeddingAssemblyIndexesAndSearchesSemantically(t *testing.T) {
 	if stack.EmbeddingWorker == nil {
 		t.Fatal("embedding worker missing from stack")
 	}
-	receipt, err := stack.Services.Ingest.Submit(context.Background(), ingest.Submission{Content: []byte(`"用户偏好清淡饮食。"`)})
-	if err != nil {
+	ctx := context.Background()
+	memories := NewMemoryService(store)
+	var created memory.Memory
+	if err := store.WithTx(ctx, func(ctx context.Context, tx *sqlite.Tx) error {
+		var err error
+		created, err = memories.Create(ctx, tx, memory.CreateInput{
+			Kind: memory.KindPreference, Title: "饮食偏好", Content: "用户偏好清淡饮食。",
+		})
+		return err
+	}); err != nil {
 		t.Fatal(err)
 	}
-	processed, err := stack.Worker.ProcessOne(context.Background())
-	if err != nil || !processed {
-		t.Fatalf("ingest processed = %v, err = %v", processed, err)
-	}
-	job, err := stack.Services.Ingest.GetJob(context.Background(), receipt.JobID)
-	if err != nil || job.Status != ingest.JobSucceeded || len(job.MemoryIDs) != 1 {
-		t.Fatalf("job = %+v, err = %v", job, err)
-	}
-	processed, err = stack.EmbeddingWorker.ProcessOne(context.Background())
+	processed, err := stack.EmbeddingWorker.ProcessOne(ctx)
 	if err != nil || !processed {
 		t.Fatalf("embedding processed = %v, err = %v", processed, err)
 	}
@@ -200,7 +302,7 @@ func TestEmbeddingAssemblyIndexesAndSearchesSemantically(t *testing.T) {
 	if !ok {
 		t.Fatalf("search service type = %T", stack.Services.Search)
 	}
-	result, err := searchService.Search(context.Background(), retrieval.Request{
+	result, err := searchService.Search(ctx, retrieval.Request{
 		Query: "吃饭有什么忌口", Mode: retrieval.ModeHybrid, TopK: 5,
 	})
 	if err != nil {
@@ -209,7 +311,7 @@ func TestEmbeddingAssemblyIndexesAndSearchesSemantically(t *testing.T) {
 	if result.Retrieval.Mode != retrieval.ModeHybrid || len(result.Warnings) != 0 {
 		t.Fatalf("retrieval = %+v", result)
 	}
-	if len(result.Items) != 1 || result.Items[0].Memory.ID != job.MemoryIDs[0] {
+	if len(result.Items) != 1 || result.Items[0].Memory.ID != created.ID {
 		t.Fatalf("items = %+v", result.Items)
 	}
 	if result.Items[0].MatchedTerms == nil || len(result.Items[0].MatchedTerms) != 0 {
@@ -223,7 +325,7 @@ func TestEmbeddingAssemblyIndexesAndSearchesSemantically(t *testing.T) {
 	if documents != 1 {
 		t.Fatalf("embedding rows = %d", documents)
 	}
-	status, err := stack.Services.Embedding.Status(context.Background())
+	status, err := stack.Services.Embedding.Status(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +333,7 @@ func TestEmbeddingAssemblyIndexesAndSearchesSemantically(t *testing.T) {
 		status.Documents != 1 || status.CurrentVectors != 1 || !status.ConfigFingerprintMatch {
 		t.Fatalf("embedding status = %+v", status)
 	}
-	probe := stack.Services.Embedding.Probe(context.Background())
+	probe := stack.Services.Embedding.Probe(ctx)
 	if !probe.Attempted || !probe.Success || probe.Code != "ok" || probe.Dimensions != 3 {
 		t.Fatalf("embedding probe = %+v", probe)
 	}
@@ -255,15 +357,7 @@ func TestProductionExperienceAndSkillAssembly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 10; i++ {
-		processed, err := stack.GovernanceWorker.ProcessOne(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !processed {
-			break
-		}
-	}
+	drainStackWorkers(t, stack, 20)
 
 	receipt, err := stack.Services.Experiences.Submit(context.Background(), governance.ExperienceSubmission{
 		RunID:    "run-1",
@@ -275,15 +369,7 @@ func TestProductionExperienceAndSkillAssembly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 10; i++ {
-		processed, err := stack.GovernanceWorker.ProcessOne(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !processed {
-			break
-		}
-	}
+	drainStackWorkers(t, stack, 20)
 	caseArtifact, err := store.GetArtifactByTarget(context.Background(), artifact.KindExperienceCase,
 		task.ExperienceKey(receipt.ID))
 	if err != nil {
@@ -297,7 +383,7 @@ func TestProductionExperienceAndSkillAssembly(t *testing.T) {
 	if !errors.Is(err, artifact.ErrNotFound) {
 		t.Fatalf("skill artifact should not exist without a procedure: %+v err=%v", skillArtifact, err)
 	}
-	targets, err := stack.Services.Artifacts.ListTargets(context.Background(), artifact.TargetQuery{
+	targets, err := stack.Services.Derived.ListTargets(context.Background(), artifact.TargetQuery{
 		ScopeKey: "project:dmemd", Kind: artifact.KindSkill,
 		Status: artifact.TargetStatusNoEligibleInput,
 	})
@@ -321,7 +407,8 @@ func TestProductionExperienceAndSkillAssembly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(recall.Experiences) != 1 || len(recall.Skills) != 0 {
+	if !hasDerivedKind(recall.L4, artifact.KindExperienceCase) ||
+		hasDerivedKind(recall.L4, artifact.KindSkill) {
 		t.Fatalf("recall = %+v", recall)
 	}
 	if _, err := stack.Services.Experiences.Retract(context.Background(), receipt.ID); err != nil {
@@ -331,22 +418,14 @@ func TestProductionExperienceAndSkillAssembly(t *testing.T) {
 		task.SkillKey("project:dmemd", "")); !errors.Is(err, artifact.ErrNotFound) {
 		t.Fatalf("retract created an empty skill artifact: %+v err=%v", skill, err)
 	}
-	for i := 0; i < 10; i++ {
-		processed, err := stack.GovernanceWorker.ProcessOne(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !processed {
-			break
-		}
-	}
+	drainStackWorkers(t, stack, 20)
 	after, err := stack.Services.Search.Recall(context.Background(), retrieval.RecallRequest{
 		Query: "验证", ScopeKey: "project:dmemd",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after.Experiences) != 0 || len(after.Skills) != 0 {
+	if len(after.L4) != 0 {
 		t.Fatalf("revoked experience remained recallable: %+v", after)
 	}
 }
@@ -366,6 +445,9 @@ func TestGovernanceDisabledKeepsAtomicServicesAvailable(t *testing.T) {
 	if stack.GovernanceWorker != nil {
 		t.Fatal("governance worker started while disabled")
 	}
+	if stack.AggregationWorker == nil {
+		t.Fatal("aggregation worker missing while governance is disabled")
+	}
 	if stack.Services.Search == nil || stack.Services.Memories == nil || stack.Services.Forget == nil ||
 		stack.Services.Embedding == nil {
 		t.Fatal("atomic, management or embedding diagnostics services missing while governance is disabled")
@@ -378,9 +460,71 @@ func TestGovernanceDisabledKeepsAtomicServicesAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Memories) != 0 || len(result.Summaries) != 0 || len(result.Skills) != 0 {
+	if len(result.Observations) != 0 || len(result.Memories) != 0 ||
+		len(result.L1)+len(result.L2)+len(result.L3)+len(result.L4) != 0 {
 		t.Fatalf("empty recall = %+v", result)
 	}
+}
+
+// drainStackWorkers alternates the governance and aggregation executors until
+// both are idle. The stores are shared, but each worker only claims its own task
+// kinds.
+func drainStackWorkers(t *testing.T, stack *Stack, iterations int) {
+	t.Helper()
+	for i := 0; i < iterations; i++ {
+		governanceProcessed := false
+		if stack.GovernanceWorker != nil {
+			processed, err := stack.GovernanceWorker.ProcessOne(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			governanceProcessed = processed
+		}
+		aggregationProcessed := false
+		if stack.AggregationWorker != nil {
+			processed, err := stack.AggregationWorker.ProcessOne(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			aggregationProcessed = processed
+		}
+		if !governanceProcessed && !aggregationProcessed {
+			return
+		}
+	}
+	t.Fatalf("background workers did not become idle after %d iterations", iterations)
+}
+
+func TestAggregationDisabledKeepsOtherStagesAvailable(t *testing.T) {
+	store := testutil.NewStore(t)
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Database.Path = store.Path()
+	cfg.Listen = "127.0.0.1:0"
+	cfg.Aggregation.Enabled = false
+	stack, err := NewStack(cfg, discardLogger(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stack.AggregationWorker != nil {
+		t.Fatal("aggregation worker started while disabled")
+	}
+	if stack.ExtractionWorker == nil || stack.GovernanceWorker == nil {
+		t.Fatal("disabling aggregation stopped extraction or governance")
+	}
+	if stack.Services.Search == nil || stack.Services.Memories == nil || stack.Services.Derived == nil ||
+		stack.Services.Observations == nil || stack.Services.Relations == nil || stack.Services.Jobs == nil {
+		t.Fatal("disabling aggregation removed read services")
+	}
+}
+
+func hasDerivedKind(items []retrieval.DerivedItem, kind artifact.Kind) bool {
+	for _, item := range items {
+		if item.DerivedMemory.Kind == kind {
+			return true
+		}
+	}
+	return false
 }
 
 func TestNewStackRejectsIncompleteEmbeddingConfig(t *testing.T) {

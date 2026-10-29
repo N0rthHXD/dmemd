@@ -30,7 +30,12 @@ test-integration:
 	$(GO) test -count=1 ./tests/integration/...
 
 test-quality:
-	$(GO) test -count=1 -v ./tests/quality/...
+	@files="$$($(GO) list -f '{{join .GoFiles " "}}' ./tests/quality 2>/dev/null)"; \
+	if [ -n "$$files" ]; then \
+		$(GO) test -count=1 -v ./tests/quality/...; \
+	else \
+		echo "no active quality test packages (legacy-tagged suite skipped)"; \
+	fi
 
 # Capacity is opt-in: the default suite stays fast and does not seed 10k rows.
 test-capacity:

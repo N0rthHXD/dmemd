@@ -5,11 +5,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/N0rthHXD/dmemd/internal/governance"
 	"github.com/N0rthHXD/dmemd/internal/governance/task"
 	"github.com/N0rthHXD/dmemd/internal/idgen"
+	"github.com/N0rthHXD/dmemd/internal/jobs"
 )
 
 const governanceJobColumns = `id, kind, target_key, revision, status, attempts,
@@ -70,6 +72,64 @@ func getGovernanceJob(ctx context.Context, q interface {
 		return task.Job{}, fmt.Errorf("读取治理任务 %s: %w", id, err)
 	}
 	return item, nil
+}
+
+// ListGovernanceJobs returns governance and aggregation tasks in newest-first
+// order. It is a bounded local operations view; the input hash and revision stay
+// available for diagnostics but are never used to fake stage progress.
+func (s *Store) ListGovernanceJobs(ctx context.Context, options jobs.TaskListOptions) ([]task.Job, error) {
+	limit := options.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	conditions := []string{}
+	args := []any{}
+	if options.Category != "" {
+		switch options.Category {
+		case jobs.CategoryAggregation:
+			conditions = append(conditions, "kind IN ('aggregate_l1', 'aggregate_l2', 'aggregate_l3', 'build_guidance')")
+		case jobs.CategoryGovernance:
+			conditions = append(conditions, "kind NOT IN ('aggregate_l1', 'aggregate_l2', 'aggregate_l3', 'build_guidance')")
+		}
+	}
+	if options.Status != "" {
+		conditions = append(conditions, "status = ?")
+		args = append(args, string(options.Status))
+	}
+	if options.Kind != "" {
+		conditions = append(conditions, "kind = ?")
+		args = append(args, string(options.Kind))
+	}
+	if options.TargetKey != "" {
+		conditions = append(conditions, "target_key = ?")
+		args = append(args, options.TargetKey)
+	}
+	query := `SELECT ` + governanceJobColumns + ` FROM governance_jobs`
+	if len(conditions) > 0 {
+		query += ` WHERE ` + strings.Join(conditions, " AND ")
+	}
+	query += ` ORDER BY updated_at DESC, id DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.reader.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("列出治理任务: %w", err)
+	}
+	defer rows.Close()
+	items := []task.Job{}
+	for rows.Next() {
+		item, err := scanGovernanceJob(rows)
+		if err != nil {
+			return nil, fmt.Errorf("列出治理任务: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("列出治理任务: %w", err)
+	}
+	return items, nil
 }
 
 func scanGovernanceJob(row rowScanner) (task.Job, error) {
@@ -193,6 +253,17 @@ func (t *Tx) CancelJob(ctx context.Context, kind task.Kind, targetKey string, no
 }
 
 func (t *Tx) ClaimNextGovernanceJob(ctx context.Context, now time.Time) (task.Job, bool, error) {
+	return t.claimNextGovernanceJob(ctx, now, nil)
+}
+
+// ClaimNextGovernanceJobForKinds claims only task types owned by one worker.
+// An empty kind list keeps the original all-types behavior.
+func (t *Tx) ClaimNextGovernanceJobForKinds(ctx context.Context, now time.Time, kinds []task.Kind) (task.Job, bool, error) {
+	return t.claimNextGovernanceJob(ctx, now, kinds)
+}
+
+func (t *Tx) claimNextGovernanceJob(ctx context.Context, now time.Time, kinds []task.Kind) (task.Job, bool, error) {
+	kindClause, kindArgs := kindFilter(kinds)
 	// Check in the same write transaction as the claim. Configuration-blocked
 	// and future-backoff ingestion must not starve governance. Already executing
 	// governance calls are not interrupted, but no new task starts ahead of ingest.
@@ -209,14 +280,18 @@ func (t *Tx) ClaimNextGovernanceJob(ctx context.Context, now time.Time) (task.Jo
 		// ingest keeps arriving. This is a bounded anti-starvation guard, not a
 		// change to ordinary ingest priority.
 		threshold := formatTime(now.UTC().Add(-t.store.governanceFairnessLimit()))
+		args := []any{
+			string(task.StatusQueued), string(task.StatusWaiting), task.WaitConfiguration,
+			formatTime(now),
+		}
+		args = append(args, kindArgs...)
+		args = append(args, threshold)
 		var starved bool
 		if err := t.tx.QueryRowContext(ctx, `SELECT EXISTS(
 			SELECT 1 FROM governance_jobs
 			WHERE (status = ? OR (status = ? AND wait_reason <> ?))
-			AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-			AND created_at <= ?)`,
-			string(task.StatusQueued), string(task.StatusWaiting), task.WaitConfiguration,
-			formatTime(now), threshold).Scan(&starved); err != nil {
+			AND (next_attempt_at IS NULL OR next_attempt_at <= ?)`+kindClause+`
+			AND created_at <= ?)`, args...).Scan(&starved); err != nil {
 			return task.Job{}, false, fmt.Errorf("检查治理任务饥饿保护: %w", err)
 		}
 		if !starved {
@@ -224,13 +299,19 @@ func (t *Tx) ClaimNextGovernanceJob(ctx context.Context, now time.Time) (task.Jo
 		}
 		bypassPriority = 1
 	}
+	args := []any{
+		string(task.StatusQueued), string(task.StatusWaiting), task.WaitConfiguration,
+		formatTime(now),
+	}
+	args = append(args, kindArgs...)
+	args = append(args, bypassPriority)
 	row := t.tx.QueryRowContext(ctx, `SELECT `+governanceJobColumns+` FROM governance_jobs
 		WHERE (status = ? OR (status = ? AND wait_reason <> ?))
-		AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-		ORDER BY CASE WHEN ? = 1 THEN 0 WHEN kind IN ('aggregate', 'build_skill') THEN 1 ELSE 0 END,
-			created_at ASC, id ASC LIMIT 1`,
-		string(task.StatusQueued), string(task.StatusWaiting), task.WaitConfiguration,
-		formatTime(now), bypassPriority)
+		AND (next_attempt_at IS NULL OR next_attempt_at <= ?)`+kindClause+`
+		ORDER BY CASE WHEN ? = 1 THEN 0
+			WHEN kind IN ('aggregate_l1', 'aggregate_l2', 'aggregate_l3', 'build_guidance') THEN 1
+			ELSE 0 END,
+			created_at ASC, id ASC LIMIT 1`, args...)
 	item, err := scanGovernanceJob(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return task.Job{}, false, nil
@@ -262,8 +343,27 @@ func (t *Tx) ClaimNextGovernanceJob(ctx context.Context, now time.Time) (task.Jo
 	return claimed, true, nil
 }
 
+// kindFilter returns a SQL fragment that restricts a query to the supplied task
+// kinds. Empty kinds mean no restriction.
+func kindFilter(kinds []task.Kind) (string, []any) {
+	if len(kinds) == 0 {
+		return "", nil
+	}
+	placeholders := make([]string, 0, len(kinds))
+	args := make([]any, 0, len(kinds))
+	for _, kind := range kinds {
+		placeholders = append(placeholders, "?")
+		args = append(args, string(kind))
+	}
+	return " AND kind IN (" + strings.Join(placeholders, ", ") + ")", args
+}
+
 func (t *Tx) RequeueRunningGovernanceJobs(ctx context.Context, now time.Time) (int64, error) {
 	return t.requeueJobs(ctx, `status = ?`, []any{string(task.StatusRunning)}, now)
+}
+
+func (t *Tx) RequeueRunningGovernanceJobsForKinds(ctx context.Context, now time.Time, kinds []task.Kind) (int64, error) {
+	return t.requeueJobsForKinds(ctx, `status = ?`, []any{string(task.StatusRunning)}, now, kinds)
 }
 
 func (t *Tx) RequeueWaitingConfigurationGovernanceJobs(ctx context.Context, now time.Time) (int64, error) {
@@ -271,15 +371,35 @@ func (t *Tx) RequeueWaitingConfigurationGovernanceJobs(ctx context.Context, now 
 		[]any{string(task.StatusWaiting), task.WaitConfiguration}, now)
 }
 
+func (t *Tx) RequeueWaitingConfigurationGovernanceJobsForKinds(ctx context.Context, now time.Time, kinds []task.Kind) (int64, error) {
+	return t.requeueJobsForKinds(ctx, `status = ? AND wait_reason = ?`,
+		[]any{string(task.StatusWaiting), task.WaitConfiguration}, now, kinds)
+}
+
 // RequeueProtocolFailedGovernanceJobs gives tasks isolated after repeated
 // protocol errors one fresh evaluation after a restart, when the model or
 // protocol version may have changed.
 func (t *Tx) RequeueProtocolFailedGovernanceJobs(ctx context.Context, now time.Time) (int64, error) {
+	return t.requeueProtocolFailed(ctx, now, nil)
+}
+
+func (t *Tx) RequeueProtocolFailedGovernanceJobsForKinds(ctx context.Context, now time.Time, kinds []task.Kind) (int64, error) {
+	return t.requeueProtocolFailed(ctx, now, kinds)
+}
+
+func (t *Tx) requeueProtocolFailed(ctx context.Context, now time.Time, kinds []task.Kind) (int64, error) {
+	kindClause, kindArgs := kindFilter(kinds)
+	condition := `status = ?`
+	args := []any{string(task.StatusFailed)}
+	if kindClause != "" {
+		condition = strings.TrimPrefix(kindClause, " AND ") + " AND " + condition
+		args = append(kindArgs, args...)
+	}
 	result, err := t.tx.ExecContext(ctx, `UPDATE governance_jobs SET
 		status = ?, next_attempt_at = ?, last_error_code = '', wait_reason = '',
 		consecutive_failures = 0, updated_at = ?, finished_at = NULL
-		WHERE status = ?`,
-		string(task.StatusQueued), formatTime(now), formatTime(now), string(task.StatusFailed),
+		WHERE `+condition,
+		append([]any{string(task.StatusQueued), formatTime(now), formatTime(now)}, args...)...,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("恢复协议失败治理任务: %w", err)
@@ -294,6 +414,15 @@ func (t *Tx) RequeueProtocolFailedGovernanceJobs(ctx context.Context, now time.T
 func (t *Tx) RequeueStaleRunningGovernanceJobs(ctx context.Context, olderThan, now time.Time) (int64, error) {
 	return t.requeueJobs(ctx, `status = ? AND updated_at < ?`,
 		[]any{string(task.StatusRunning), formatTime(olderThan)}, now)
+}
+
+func (t *Tx) requeueJobsForKinds(ctx context.Context, condition string, args []any, now time.Time, kinds []task.Kind) (int64, error) {
+	kindClause, kindArgs := kindFilter(kinds)
+	if kindClause != "" {
+		condition = strings.TrimPrefix(kindClause, " AND ") + " AND " + condition
+		args = append(kindArgs, args...)
+	}
+	return t.requeueJobs(ctx, condition, args, now)
 }
 
 func (t *Tx) requeueJobs(ctx context.Context, condition string, args []any, now time.Time) (int64, error) {
@@ -323,7 +452,7 @@ func (t *Tx) BumpSkillJobsForScope(ctx context.Context, scopeKey string, now tim
 		WHERE kind = ? AND substr(target_key, 1, length(?)) = ?
 			AND status IN (?, ?, ?)`,
 		string(task.StatusQueued), formatTime(now), formatTime(now),
-		string(task.KindBuildSkill), prefix, prefix,
+		string(task.KindBuildGuidance), prefix, prefix,
 		string(task.StatusQueued), string(task.StatusWaiting), string(task.StatusRunning),
 	)
 	if err != nil {

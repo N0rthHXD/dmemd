@@ -20,10 +20,13 @@ const (
 
 var defaultRetryDelays = []time.Duration{5 * time.Second, 30 * time.Second, 2 * time.Minute}
 
-// Worker is the single sequential governance executor.
+// Worker is the single sequential executor for one stage. The kind filter keeps
+// the governance and aggregation workers from claiming each other's tasks while
+// they share the durable task table.
 type Worker struct {
 	store             Store
 	handlers          map[task.Kind]Handler
+	kinds             []task.Kind
 	poll              time.Duration
 	retryDelays       []time.Duration
 	maxProtocol       int
@@ -88,6 +91,15 @@ func WithReconcileInterval(interval time.Duration) WorkerOption {
 	}
 }
 
+// WithKinds scopes the worker to the task types it owns. Empty means all types.
+// The filter applies to startup recovery and claiming so two workers can safely
+// share one SQLite database.
+func WithKinds(kinds ...task.Kind) WorkerOption {
+	return func(worker *Worker) {
+		worker.kinds = append([]task.Kind(nil), kinds...)
+	}
+}
+
 // NewWorker assembles one sequential executor over the fixed handler map.
 func NewWorker(store Store, handlers map[task.Kind]Handler, options ...WorkerOption) *Worker {
 	worker := &Worker{
@@ -117,6 +129,19 @@ func (w *Worker) Recover(ctx context.Context) error {
 	var running, configuration, protocolFailed int64
 	err := w.store.WithTx(ctx, func(ctx context.Context, tx Tx) error {
 		var err error
+		scoped := len(w.kinds) > 0
+		if scoped {
+			running, err = tx.RequeueRunningGovernanceJobsForKinds(ctx, now, w.kinds)
+			if err != nil {
+				return err
+			}
+			configuration, err = tx.RequeueWaitingConfigurationGovernanceJobsForKinds(ctx, now, w.kinds)
+			if err != nil {
+				return err
+			}
+			protocolFailed, err = tx.RequeueProtocolFailedGovernanceJobsForKinds(ctx, now, w.kinds)
+			return err
+		}
 		running, err = tx.RequeueRunningGovernanceJobs(ctx, now)
 		if err != nil {
 			return err
@@ -204,6 +229,10 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 	var found bool
 	if err := w.store.WithTx(ctx, func(ctx context.Context, tx Tx) error {
 		var err error
+		if len(w.kinds) > 0 {
+			claimed, found, err = tx.ClaimNextGovernanceJobForKinds(ctx, now, w.kinds)
+			return err
+		}
 		claimed, found, err = tx.ClaimNextGovernanceJob(ctx, now)
 		return err
 	}); err != nil {

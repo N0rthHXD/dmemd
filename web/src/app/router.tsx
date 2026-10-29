@@ -10,6 +10,9 @@ import NotFoundPage from './NotFoundPage';
 const OverviewPage = lazy(() => import('../features/overview/OverviewPage'));
 const MemoriesPage = lazy(() => import('../features/memories/MemoriesPage'));
 const MemoryDetailPage = lazy(() => import('../features/memories/MemoryDetailPage'));
+const ObservationDetailPage = lazy(
+  () => import('../features/observations/ObservationDetailPage'),
+);
 const RecallPage = lazy(() => import('../features/recall/RecallPage'));
 const IngestionPage = lazy(() => import('../features/ingestions/IngestionPage'));
 const JobsPage = lazy(() => import('../features/jobs/JobsPage'));
@@ -41,6 +44,8 @@ export const router = createBrowserRouter(
         { path: 'overview', element: page(<OverviewPage />) },
         { path: 'memories', element: page(<MemoriesPage />) },
         { path: 'memories/:id', element: page(<MemoryDetailPage />) },
+        { path: 'observations', element: <Navigate to={routes.memories} replace /> },
+        { path: 'observations/:id', element: page(<ObservationDetailPage />) },
         { path: 'recall', element: page(<RecallPage />) },
         { path: 'ingestions/new', element: page(<IngestionPage />) },
         { path: 'jobs', element: page(<JobsPage />) },

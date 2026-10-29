@@ -89,7 +89,7 @@ func (s *Service) Get(ctx context.Context, id string) (Detail, error) {
 	if err != nil {
 		return Detail{}, err
 	}
-	detail := Detail{Artifact: item}
+	detail := Detail{DerivedMemory: item}
 	if item.CurrentVersion <= 0 {
 		return detail, nil
 	}
@@ -97,7 +97,12 @@ func (s *Service) Get(ctx context.Context, id string) (Detail, error) {
 	if err != nil {
 		return Detail{}, err
 	}
+	dependencies, err := s.backend.ListArtifactDependencies(ctx, id, item.CurrentVersion)
+	if err != nil {
+		return Detail{}, err
+	}
 	detail.Revision = &revision
+	detail.Dependencies = dependencies
 	return detail, nil
 }
 
@@ -114,7 +119,11 @@ func (s *Service) GetVersion(ctx context.Context, id string, version int) (Detai
 	if err != nil {
 		return Detail{}, err
 	}
-	return Detail{Artifact: item, Revision: &revision}, nil
+	dependencies, err := s.backend.ListArtifactDependencies(ctx, id, version)
+	if err != nil {
+		return Detail{}, err
+	}
+	return Detail{DerivedMemory: item, Revision: &revision, Dependencies: dependencies}, nil
 }
 
 // ListVersions returns newest-first immutable history.
@@ -130,7 +139,7 @@ func (s *Service) ListVersions(ctx context.Context, id string, limit int) (Detai
 	if err != nil {
 		return Detail{}, nil, err
 	}
-	return Detail{Artifact: item}, revisions, nil
+	return Detail{DerivedMemory: item}, revisions, nil
 }
 
 // Search returns active current derived versions ordered by the derived FTS
@@ -176,59 +185,44 @@ func (s *Service) ListExpiredTargets(ctx context.Context, asOf time.Time, after 
 	return s.backend.ListExpiredTargets(ctx, asOf.UTC(), after, limit)
 }
 
-// ListAggregationGroups returns distinct scope/topic groups for missing-work
-// reconciliation.
-func (s *Service) ListAggregationGroups(ctx context.Context, after string, limit int) ([]GroupTarget, error) {
-	if limit <= 0 {
-		limit = 100
+// Commit saves one usable generated revision, its exact typed inputs, the
+// current pointer and the derived FTS row in the caller's transaction.
+func (s *Service) Commit(ctx context.Context, tx Tx, input CommitInput) (DerivedMemory, error) {
+	target := input.Target
+	if !target.Kind.Known() {
+		return DerivedMemory{}, fmt.Errorf("%w: kind %q", ErrInvalidInput, target.Kind)
 	}
-	return s.backend.ListAggregationGroups(ctx, after, limit)
-}
-
-// ListSkillGroups returns distinct scope/topic groups that have an eligible
-// procedure input. It feeds the bounded reconciliation of missing skills.
-func (s *Service) ListSkillGroups(ctx context.Context, after string, limit int) ([]GroupTarget, error) {
-	if limit <= 0 {
-		limit = 100
-	}
-	return s.backend.ListSkillGroups(ctx, after, limit)
-}
-
-// Commit saves one usable generated revision, its direct sources, the current
-// pointer and the derived FTS row in the caller's transaction.
-func (s *Service) Commit(ctx context.Context, tx Tx, input CommitInput) (Artifact, error) {
-	if !input.Kind.Known() {
-		return Artifact{}, fmt.Errorf("%w: kind %q", ErrInvalidInput, input.Kind)
-	}
-	if err := validateCommitTarget(input); err != nil {
-		return Artifact{}, err
+	if err := validateCommitTarget(target); err != nil {
+		return DerivedMemory{}, err
 	}
 	content := strings.TrimSpace(input.Content)
 	if content == "" {
-		return Artifact{}, fmt.Errorf("%w: empty content", ErrInvalidInput)
+		return DerivedMemory{}, fmt.Errorf("%w: empty content", ErrInvalidInput)
 	}
 	title := strings.TrimSpace(input.Title)
 	if title == "" {
-		title = defaultTitle(input)
+		title = defaultTitle(target)
 	}
 	now := s.now().UTC()
-	item, err := tx.GetArtifactByTarget(ctx, input.Kind, input.TargetKey)
+	targetKey := target.TargetKey()
+	item, err := tx.GetArtifactByTarget(ctx, target.Kind, targetKey)
 	switch {
 	case errors.Is(err, ErrNotFound):
-		item = Artifact{
+		item = DerivedMemory{
 			ID:        idgen.NewUUID(),
-			Kind:      input.Kind,
-			TargetKey: input.TargetKey,
-			ScopeKey:  normalizeScope(input.ScopeKey),
-			Topic:     input.Topic,
+			Layer:     target.LayerOrDefault(),
+			Kind:      target.Kind,
+			TargetKey: targetKey,
+			ScopeKey:  normalizeScope(target.ScopeKey),
+			Topic:     target.Topic,
 			State:     StateDisabled,
 			UpdatedAt: now,
 		}
 		if err := tx.CreateArtifact(ctx, item); err != nil {
-			return Artifact{}, err
+			return DerivedMemory{}, err
 		}
 	case err != nil:
-		return Artifact{}, err
+		return DerivedMemory{}, err
 	}
 
 	next := item.CurrentVersion + 1
@@ -236,58 +230,32 @@ func (s *Service) Commit(ctx context.Context, tx Tx, input CommitInput) (Artifac
 	if len(payload) == 0 {
 		payload = []byte("{}")
 	}
-	refs := uniqueRefs(input.Memories)
-	runRefs := uniqueRunRefs(input.Runs)
-	if input.TaxonomyVersion == "" {
-		input.TaxonomyVersion = topic.Version
-	}
-	if input.GeneratorVersion == "" {
-		input.GeneratorVersion = "generator-v2"
-	}
 	if input.Generator == "" {
 		input.Generator = "artifact:service"
 	}
 	if input.ProtocolVersion == "" {
-		input.ProtocolVersion = string(input.Kind) + "-v2"
+		input.ProtocolVersion = string(target.Kind) + "-v2"
 	}
-	if input.RunID == "" {
-		input.RunID = idgen.NewUUID()
-	}
-	provenance, err := json.Marshal(Provenance{
-		MemoryRefs: refs, RunRefs: runRefs, RunID: input.RunID,
-		TaxonomyVersion: input.TaxonomyVersion, GeneratorVersion: input.GeneratorVersion,
-		ProtocolVersion: input.ProtocolVersion, Truncated: input.Truncated,
-	})
-	if err != nil || !json.Valid(payload) {
-		return Artifact{}, fmt.Errorf("%w: invalid serialized payload", ErrInvalidInput)
+	if !json.Valid(payload) {
+		return DerivedMemory{}, fmt.Errorf("%w: invalid serialized payload", ErrInvalidInput)
 	}
 	revision := Revision{
-		ArtifactID:       item.ID,
-		Version:          next,
-		Title:            title,
-		Content:          content,
-		Payload:          payload,
-		ContentHash:      ContentHash(title, content, payload, provenance),
-		Generator:        input.Generator,
-		ProtocolVersion:  input.ProtocolVersion,
-		TaxonomyVersion:  input.TaxonomyVersion,
-		GeneratorVersion: input.GeneratorVersion,
-		RunID:            input.RunID,
-		Provenance:       provenance,
-		ReasonCode:       input.ReasonCode,
-		Truncated:        input.Truncated,
-		MemoryRefs:       refs,
-		RunRefs:          runRefs,
-		CreatedAt:        now,
+		ArtifactID:      item.ID,
+		Version:         next,
+		Title:           title,
+		Content:         content,
+		Payload:         payload,
+		ContentHash:     ContentHash(title, content, payload),
+		Generator:       input.Generator,
+		ProtocolVersion: input.ProtocolVersion,
+		Truncated:       input.Truncated,
+		CreatedAt:       now,
 	}
 	if err := tx.InsertArtifactRevision(ctx, revision); err != nil {
-		return Artifact{}, err
+		return DerivedMemory{}, err
 	}
-	if err := tx.LinkArtifactMemoryDependencies(ctx, item.ID, next, refs); err != nil {
-		return Artifact{}, err
-	}
-	if err := tx.LinkArtifactRunDependencies(ctx, item.ID, next, runRefs); err != nil {
-		return Artifact{}, err
+	if err := tx.LinkDerivedDependencies(ctx, item.ID, next, input.Dependencies); err != nil {
+		return DerivedMemory{}, err
 	}
 	document, err := s.buildDocument(DocumentInput{
 		ArtifactID: item.ID,
@@ -296,39 +264,43 @@ func (s *Service) Commit(ctx context.Context, tx Tx, input CommitInput) (Artifac
 		Content:    content,
 	})
 	if err != nil {
-		return Artifact{}, err
+		return DerivedMemory{}, err
 	}
 	if err := tx.UpsertArtifactSearchDocument(ctx, document); err != nil {
-		return Artifact{}, err
+		return DerivedMemory{}, err
 	}
 
+	item.Layer = target.LayerOrDefault()
 	item.CurrentVersion = next
 	item.State = StateActive
 	item.ReasonCode = input.ReasonCode
+	item.ScopeKey = normalizeScope(target.ScopeKey)
+	item.Topic = target.Topic
 	item.UpdatedAt = now
 	if err := tx.UpdateArtifact(ctx, item); err != nil {
-		return Artifact{}, err
+		return DerivedMemory{}, err
 	}
-	if err := tx.DeleteTargetEvaluation(ctx, input.Kind, input.TargetKey); err != nil {
-		return Artifact{}, err
+	if err := tx.DeleteTargetEvaluation(ctx, target.Kind, targetKey); err != nil {
+		return DerivedMemory{}, err
 	}
 	return item, nil
 }
 
 // Disable records that no usable input currently exists. The historical
 // revisions remain readable, but the current object leaves default recall.
-func (s *Service) Disable(ctx context.Context, tx Tx, target Target) (Artifact, error) {
+func (s *Service) Disable(ctx context.Context, tx Tx, target Target) (DerivedMemory, error) {
 	return s.DisableWithReason(ctx, tx, target, "no_eligible_input")
 }
 
 // DisableWithReason exposes diagnostic state even before a first revision exists.
-func (s *Service) DisableWithReason(ctx context.Context, tx Tx, target Target, reason string) (Artifact, error) {
+func (s *Service) DisableWithReason(ctx context.Context, tx Tx, target Target, reason string) (DerivedMemory, error) {
 	now := s.now().UTC()
 	item, err := tx.GetArtifactByTarget(ctx, target.Kind, target.TargetKey())
 	switch {
 	case errors.Is(err, ErrNotFound):
-		item = Artifact{
+		item = DerivedMemory{
 			ID:         idgen.NewUUID(),
+			Layer:      target.LayerOrDefault(),
 			Kind:       target.Kind,
 			TargetKey:  target.TargetKey(),
 			ScopeKey:   normalizeScope(target.ScopeKey),
@@ -338,22 +310,22 @@ func (s *Service) DisableWithReason(ctx context.Context, tx Tx, target Target, r
 			UpdatedAt:  now,
 		}
 		if err := tx.CreateArtifact(ctx, item); err != nil {
-			return Artifact{}, err
+			return DerivedMemory{}, err
 		}
 		return item, nil
 	case err != nil:
-		return Artifact{}, err
+		return DerivedMemory{}, err
 	}
 	if item.State != StateDisabled || item.ReasonCode != reason {
 		item.State = StateDisabled
 		item.ReasonCode = reason
 		item.UpdatedAt = now
 		if err := tx.UpdateArtifact(ctx, item); err != nil {
-			return Artifact{}, err
+			return DerivedMemory{}, err
 		}
 	}
 	if err := tx.DeleteArtifactSearchDocument(ctx, item.ID); err != nil {
-		return Artifact{}, err
+		return DerivedMemory{}, err
 	}
 	return item, nil
 }
@@ -361,79 +333,84 @@ func (s *Service) DisableWithReason(ctx context.Context, tx Tx, target Target, r
 // DisableExisting updates an existing content object to disabled without
 // manufacturing an empty artifact for a target that never had a usable
 // revision. The boolean reports whether the object existed.
-func (s *Service) DisableExisting(ctx context.Context, tx Tx, target Target, reason string) (Artifact, bool, error) {
+func (s *Service) DisableExisting(ctx context.Context, tx Tx, target Target, reason string) (DerivedMemory, bool, error) {
 	now := s.now().UTC()
 	item, err := tx.GetArtifactByTarget(ctx, target.Kind, target.TargetKey())
 	if errors.Is(err, ErrNotFound) {
-		return Artifact{}, false, nil
+		return DerivedMemory{}, false, nil
 	}
 	if err != nil {
-		return Artifact{}, false, err
+		return DerivedMemory{}, false, err
 	}
 	if item.State != StateDisabled || item.ReasonCode != reason {
 		item.State = StateDisabled
 		item.ReasonCode = reason
 		item.UpdatedAt = now
 		if err := tx.UpdateArtifact(ctx, item); err != nil {
-			return Artifact{}, false, err
+			return DerivedMemory{}, false, err
 		}
 	}
 	if err := tx.DeleteArtifactSearchDocument(ctx, item.ID); err != nil {
-		return Artifact{}, false, err
+		return DerivedMemory{}, false, err
 	}
 	return item, true, nil
 }
 
 // MemoryChanged applies synchronous invalidation and registers derived work in
-// the same transaction as the atomic write. Only direct dependencies are
-// consulted because the first release has no artifact-to-artifact edges.
+// the same transaction as the atomic write. Exact dependency edges are
+// supplemented by procedure-derived L4 guidance targets.
 func (s *Service) MemoryChanged(ctx context.Context, tx Tx, change MemoryChange) error {
 	if !change.Semantic {
 		return nil
 	}
 	now := s.now().UTC()
-	affected, err := tx.ListArtifactsForMemory(ctx, change.MemoryID)
+	dependents, err := tx.ListDependents(ctx, DependencyRef{
+		Type: DependencyMemory, ID: change.MemoryID,
+	})
 	if err != nil {
 		return err
 	}
 	targets := make(map[string]Target)
-	for _, item := range affected {
-		target, err := TargetForArtifact(item)
+	for _, dependent := range dependents {
+		if dependent.TargetKey == "" {
+			continue
+		}
+		target, err := ParseTarget(dependent.Kind, dependent.TargetKey)
 		if err != nil {
 			continue
 		}
-		targets[item.TargetKey] = target
-		if item.State != StateActive {
+		if target.Layer == "" {
+			target.Layer = dependent.Layer
+		}
+		if target.ScopeKey == "" {
+			target.ScopeKey = dependent.ScopeKey
+		}
+		if target.Topic == "" {
+			target.Topic = dependent.Topic
+		}
+		targets[dependent.TargetKey] = target
+		if dependent.State != StateActive {
 			continue
 		}
-		item.State = StateStale
-		item.UpdatedAt = now
-		if err := tx.UpdateArtifact(ctx, item); err != nil {
-			return err
-		}
-		if err := tx.DeleteArtifactSearchDocument(ctx, item.ID); err != nil {
+		if err := tx.MarkDerivedStale(ctx, dependent.ID, change.Reason); err != nil {
 			return err
 		}
 	}
 	for _, snapshot := range []*MemorySnapshot{change.Old, change.New} {
-		if snapshot == nil {
+		if snapshot == nil || snapshot.Kind != "procedure" {
 			continue
 		}
-		for _, target := range AggregateTargets(snapshot.ScopeKey, snapshot.Topics) {
+		// Stable procedure memories feed L4 guidance. L2/L3 are rebuilt from
+		// their own lower derived layers, never directly from canonical memory.
+		for _, target := range SkillTargets(snapshot.ScopeKey, nil) {
 			targets[target.TargetKey()] = target
-		}
-		if snapshot.Kind == "procedure" {
-			for _, target := range SkillTargets(snapshot.ScopeKey, snapshot.Topics) {
-				targets[target.TargetKey()] = target
-			}
 		}
 	}
 	if len(targets) == 0 {
 		return nil
 	}
 	// A new eligible memory may not have been a dependency of an existing
-	// summary (especially a truncated one). Target membership still invalidates
-	// it immediately, including old and new parent topics.
+	// derived object. Target membership still invalidates it immediately.
 	for _, target := range targets {
 		item, err := tx.GetArtifactByTarget(ctx, target.Kind, target.TargetKey())
 		if errors.Is(err, ErrNotFound) {
@@ -479,7 +456,7 @@ func (s *Service) ExperienceChanged(ctx context.Context, tx Tx, scopeKey string,
 	if err != nil {
 		return err
 	}
-	existingByTarget := make(map[string]Artifact, len(existing))
+	existingByTarget := make(map[string]DerivedMemory, len(existing))
 	for _, item := range existing {
 		existingByTarget[item.TargetKey] = item
 	}
@@ -545,20 +522,27 @@ func (s *Service) ExperienceChanged(ctx context.Context, tx Tx, scopeKey string,
 	return enqueueTargets(ctx, tx, change, targets, nextAttempt, now)
 }
 
-func artifactHasRun(ctx context.Context, tx Tx, item Artifact, experienceID string) bool {
-	if item.CurrentVersion <= 0 {
+func artifactHasRun(ctx context.Context, tx Tx, item DerivedMemory, experienceID string) bool {
+	if item.CurrentVersion <= 0 || experienceID == "" {
 		return false
 	}
-	revision, err := tx.GetArtifactRevision(ctx, item.ID, item.CurrentVersion)
+	items, err := tx.ListArtifactsForRun(ctx, experienceID)
 	if err != nil {
 		return false
 	}
-	for _, ref := range revision.RunRefs {
-		if ref.ExperienceID == experienceID {
+	for _, dependent := range items {
+		if dependent.ID == item.ID {
 			return true
 		}
 	}
 	return false
+}
+
+func aggregationJobKind(target Target) (task.Kind, bool) {
+	if target.LayerOrDefault() == LayerL4 {
+		return task.KindBuildGuidance, true
+	}
+	return task.AggregateKindForTargetKey(target.TargetKey())
 }
 
 func enqueueTargets(ctx context.Context, tx Tx, change MemoryChange, targets map[string]Target,
@@ -570,9 +554,9 @@ func enqueueTargets(ctx context.Context, tx Tx, change MemoryChange, targets map
 	sort.Strings(keys)
 	for _, key := range keys {
 		target := targets[key]
-		kind := task.KindAggregate
-		if target.Kind == KindSkill {
-			kind = task.KindBuildSkill
+		kind, ok := aggregationJobKind(target)
+		if !ok {
+			continue
 		}
 		if _, _, err := tx.UpsertJob(ctx, task.UpsertInput{
 			Kind:          kind,
@@ -638,74 +622,54 @@ func (s *Service) buildDocument(input DocumentInput) (SearchDocument, error) {
 	}, nil
 }
 
-func validateCommitTarget(input CommitInput) error {
-	if strings.TrimSpace(input.TargetKey) == "" {
-		return fmt.Errorf("%w: missing target", ErrInvalidInput)
+func validateCommitTarget(target Target) error {
+	if !target.Kind.Known() {
+		return fmt.Errorf("%w: kind %q", ErrInvalidInput, target.Kind)
 	}
-	switch input.Kind {
-	case KindTopicSummary, KindScopeSummary, KindProfile:
-		if strings.TrimSpace(input.ScopeKey) == "" {
-			return fmt.Errorf("%w: missing scope", ErrInvalidInput)
+	layer := target.LayerOrDefault()
+	if !layer.Known() {
+		return fmt.Errorf("%w: layer %q", ErrInvalidInput, target.Layer)
+	}
+	if kindLayer := LayerForKind(target.Kind); kindLayer != "" && target.Layer.Known() && kindLayer != layer {
+		return fmt.Errorf("%w: kind %q does not belong to layer %q", ErrInvalidInput, target.Kind, layer)
+	}
+	if strings.TrimSpace(target.ScopeKey) == "" && !(layer == LayerL4 && target.Kind == KindExperienceCase) {
+		return fmt.Errorf("%w: missing scope", ErrInvalidInput)
+	}
+	switch layer {
+	case LayerL1:
+		bucket := strings.TrimSpace(target.Bucket)
+		if bucket == "" {
+			bucket = strings.TrimSpace(target.Key)
 		}
-	case KindSkill:
-		if strings.TrimSpace(input.ScopeKey) == "" {
-			return fmt.Errorf("%w: missing scope", ErrInvalidInput)
+		if bucket == "" {
+			return fmt.Errorf("%w: missing L1 bucket", ErrInvalidInput)
 		}
-	case KindExperienceCase:
-		if input.ExperienceID == "" {
-			experienceID, ok := task.ParseExperienceKey(input.TargetKey)
-			if !ok {
-				return fmt.Errorf("%w: invalid experience target", ErrInvalidInput)
+	case LayerL2:
+		domain := strings.TrimSpace(target.Topic)
+		if domain == "" {
+			domain = strings.TrimSpace(target.Key)
+		}
+		if domain == "" && target.Kind != KindProfile {
+			return fmt.Errorf("%w: missing L2 domain", ErrInvalidInput)
+		}
+	case LayerL3:
+	case LayerL4:
+		switch target.Kind {
+		case KindExperienceCase:
+			if target.ExperienceID == "" {
+				return fmt.Errorf("%w: missing experience identifier", ErrInvalidInput)
 			}
-			input.ExperienceID = experienceID
+		case KindSkill:
+		default:
+			if strings.TrimSpace(target.Key) == "" && strings.TrimSpace(target.Topic) == "" {
+				return fmt.Errorf("%w: missing L4 guidance key", ErrInvalidInput)
+			}
 		}
 	default:
-		return fmt.Errorf("%w: kind %q", ErrInvalidInput, input.Kind)
-	}
-	expected := Target{
-		Kind:         input.Kind,
-		ScopeKey:     input.ScopeKey,
-		Topic:        input.Topic,
-		ExperienceID: input.ExperienceID,
-	}.TargetKey()
-	if input.TargetKey != expected {
-		return fmt.Errorf("%w: target key does not match scope/topic", ErrInvalidInput)
+		return fmt.Errorf("%w: layer %q", ErrInvalidInput, layer)
 	}
 	return nil
-}
-
-func uniqueRefs(inputs []MemoryInput) []MemoryRef {
-	seen := make(map[string]struct{}, len(inputs))
-	result := make([]MemoryRef, 0, len(inputs))
-	for _, item := range inputs {
-		if item.ID == "" || item.Version <= 0 {
-			continue
-		}
-		if _, duplicate := seen[item.ID]; duplicate {
-			continue
-		}
-		seen[item.ID] = struct{}{}
-		result = append(result, MemoryRef{MemoryID: item.ID, Version: item.Version})
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].MemoryID < result[j].MemoryID })
-	return result
-}
-
-func uniqueRunRefs(inputs []RunRef) []RunRef {
-	seen := make(map[string]struct{}, len(inputs))
-	result := make([]RunRef, 0, len(inputs))
-	for _, item := range inputs {
-		if item.ExperienceID == "" {
-			continue
-		}
-		if _, duplicate := seen[item.ExperienceID]; duplicate {
-			continue
-		}
-		seen[item.ExperienceID] = struct{}{}
-		result = append(result, RunRef{ExperienceID: item.ExperienceID})
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].ExperienceID < result[j].ExperienceID })
-	return result
 }
 
 func memoryChangeHash(change MemoryChange, target Target) string {
@@ -721,7 +685,6 @@ func memoryChangeHash(change MemoryChange, target Target) string {
 			snapshot.Kind,
 			snapshot.ScopeKey,
 			snapshot.State,
-			strings.Join(normalizeTopics(snapshot.Topics), "\x00"),
 		)
 	}
 	appendSnapshot(change.Old)
@@ -729,34 +692,40 @@ func memoryChangeHash(change MemoryChange, target Target) string {
 	return task.InputHash(parts...)
 }
 
-// ContentHash covers readable and structured content, including source audit.
-func ContentHash(title, content string, payload, provenance json.RawMessage) string {
+// ContentHash covers readable and structured content.
+func ContentHash(title, content string, payload json.RawMessage) string {
 	hash := sha256.New()
 	_, _ = hash.Write([]byte(title))
 	_, _ = hash.Write([]byte{0})
 	_, _ = hash.Write([]byte(content))
 	_, _ = hash.Write([]byte{0})
 	_, _ = hash.Write(payload)
-	_, _ = hash.Write([]byte{0})
-	_, _ = hash.Write(provenance)
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
-func defaultTitle(input CommitInput) string {
-	switch input.Kind {
-	case KindScopeSummary:
-		return input.ScopeKey + " 概览"
-	case KindProfile:
-		return input.ScopeKey + " 画像"
-	case KindExperienceCase:
-		return "经验 " + input.ExperienceID
-	case KindSkill:
-		if input.Topic == "" {
-			return input.ScopeKey + " 工作流"
+func defaultTitle(target Target) string {
+	switch target.Kind {
+	case KindLocalSummary:
+		if target.Bucket != "" {
+			return target.ScopeKey + " " + target.Bucket + " 局部聚合"
 		}
-		return input.Topic + " 工作流"
+		return target.ScopeKey + " 局部聚合"
+	case KindScopeSummary:
+		return target.ScopeKey + " 概览"
+	case KindProfile:
+		return target.ScopeKey + " 画像"
+	case KindExperienceCase:
+		return "经验 " + target.ExperienceID
+	case KindSkill:
+		if target.Topic == "" {
+			return target.ScopeKey + " 工作流"
+		}
+		return target.Topic + " 工作流"
 	default:
-		return input.Topic + " 摘要"
+		if target.Topic != "" {
+			return target.Topic + " 摘要"
+		}
+		return target.ScopeKey + " 摘要"
 	}
 }
 

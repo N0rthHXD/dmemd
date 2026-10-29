@@ -20,17 +20,24 @@ import (
 type Kind string
 
 const (
-	KindClassify       Kind = "classify"
-	KindReviewConflict Kind = "review_conflict"
-	KindAggregate      Kind = "aggregate"
-	KindBuildSkill     Kind = "build_skill"
-	KindReconcile      Kind = "reconcile"
+	KindGovernObservation    Kind = "govern_observation"
+	KindClassifyObservation  Kind = "classify_observation"
+	KindAggregateL1          Kind = "aggregate_l1"
+	KindAggregateL2          Kind = "aggregate_l2"
+	KindAggregateL3          Kind = "aggregate_l3"
+	KindBuildGuidance        Kind = "build_guidance"
+	KindReviewConflict       Kind = "review_conflict"
+	KindInvalidateDependency Kind = "invalidate_dependency"
+	KindReconcile            Kind = "reconcile"
 )
 
-// Known reports whether kind is part of the fixed first-release set.
+// Known reports whether kind is part of the fixed governance-task set.
 func (k Kind) Known() bool {
 	switch k {
-	case KindClassify, KindReviewConflict, KindAggregate, KindBuildSkill, KindReconcile:
+	case KindGovernObservation, KindClassifyObservation,
+		KindAggregateL1, KindAggregateL2, KindAggregateL3,
+		KindBuildGuidance, KindReviewConflict, KindInvalidateDependency,
+		KindReconcile:
 		return true
 	default:
 		return false
@@ -114,6 +121,11 @@ type RescheduleInput struct {
 // ErrNotFound is returned for an unknown task identifier.
 var ErrNotFound = errors.New("governance task not found")
 
+// ErrRevisionChanged means another transaction changed the task target after it
+// was claimed. Handlers return it so the worker discards their result instead of
+// overwriting newer state.
+var ErrRevisionChanged = errors.New("governance task revision changed")
+
 // Tx is the transaction-scoped task capability used by business writers.
 type Tx interface {
 	UpsertJob(ctx context.Context, input UpsertInput) (Job, bool, error)
@@ -121,14 +133,20 @@ type Tx interface {
 	GetGovernanceJobByTarget(ctx context.Context, kind Kind, targetKey string) (Job, error)
 }
 
-// QueueTx is the complete task capability used by the governance worker.
+// QueueTx is the complete task capability used by the governance and
+// aggregation workers. The *ForKinds variants scope every operation to the
+// task types owned by one worker; an empty kind list means all task types.
 type QueueTx interface {
 	Tx
 	GetGovernanceJob(ctx context.Context, id string) (Job, error)
 	ClaimNextGovernanceJob(ctx context.Context, now time.Time) (Job, bool, error)
+	ClaimNextGovernanceJobForKinds(ctx context.Context, now time.Time, kinds []Kind) (Job, bool, error)
 	RequeueRunningGovernanceJobs(ctx context.Context, now time.Time) (int64, error)
+	RequeueRunningGovernanceJobsForKinds(ctx context.Context, now time.Time, kinds []Kind) (int64, error)
 	RequeueWaitingConfigurationGovernanceJobs(ctx context.Context, now time.Time) (int64, error)
+	RequeueWaitingConfigurationGovernanceJobsForKinds(ctx context.Context, now time.Time, kinds []Kind) (int64, error)
 	RequeueProtocolFailedGovernanceJobs(ctx context.Context, now time.Time) (int64, error)
+	RequeueProtocolFailedGovernanceJobsForKinds(ctx context.Context, now time.Time, kinds []Kind) (int64, error)
 	RequeueStaleRunningGovernanceJobs(ctx context.Context, olderThan, now time.Time) (int64, error)
 	BumpSkillJobsForScope(ctx context.Context, scopeKey string, now time.Time) (int64, error)
 	ListMemoryIDsMissingJob(ctx context.Context, kind Kind, afterID string, limit int) ([]string, error)
@@ -143,16 +161,165 @@ func MemoryKey(memoryID string) string {
 	return memoryID
 }
 
+const (
+	observationPrefix = "observation:"
+	l1Prefix          = "l1:"
+	l2Prefix          = "l2:"
+	l3Prefix          = "l3:"
+)
+
+// ObservationKey is the canonical target key for one observation governance
+// task. Observation identifiers are service-generated UUIDs.
+func ObservationKey(id string) string {
+	return observationPrefix + encodeKeyPart(id)
+}
+
+// ParseObservationKey extracts the observation identifier from a governance
+// target key.
+func ParseObservationKey(targetKey string) (observationID string, ok bool) {
+	if !strings.HasPrefix(targetKey, observationPrefix) {
+		return "", false
+	}
+	observationID, err := decodeKeyPart(strings.TrimPrefix(targetKey, observationPrefix))
+	if err != nil || observationID == "" {
+		return "", false
+	}
+	return observationID, true
+}
+
+// L1TargetKey addresses one local aggregate bucket inside a scope.
+func L1TargetKey(scopeKey, bucket string) string {
+	return l1Prefix + encodeKeyPart(scopeKey) + ":" + encodeKeyPart(bucket)
+}
+
+// L2TargetKey addresses one domain aggregate inside a scope.
+func L2TargetKey(scopeKey, domain string) string {
+	return l2Prefix + encodeKeyPart(scopeKey) + ":" + encodeKeyPart(domain)
+}
+
+// L3TargetKey addresses one scope-level aggregate.
+func L3TargetKey(scopeKey string) string {
+	return l3Prefix + encodeKeyPart(scopeKey)
+}
+
+// ParseL1TargetKey extracts the scope and bucket from a local aggregate key.
+func ParseL1TargetKey(targetKey string) (scopeKey, bucket string, ok bool) {
+	return parseScopedKey(l1Prefix, targetKey)
+}
+
+// ParseL2TargetKey extracts the scope and domain from a domain aggregate key.
+func ParseL2TargetKey(targetKey string) (scopeKey, domain string, ok bool) {
+	return parseScopedKey(l2Prefix, targetKey)
+}
+
+// ParseL3TargetKey extracts the scope from a scope-level aggregate key.
+func ParseL3TargetKey(targetKey string) (scopeKey string, ok bool) {
+	if !strings.HasPrefix(targetKey, l3Prefix) {
+		return "", false
+	}
+	scopeKey, err := decodeKeyPart(strings.TrimPrefix(targetKey, l3Prefix))
+	if err != nil || scopeKey == "" {
+		return "", false
+	}
+	return scopeKey, true
+}
+
+func parseScopedKey(prefix, targetKey string) (scopeKey, value string, ok bool) {
+	if !strings.HasPrefix(targetKey, prefix) {
+		return "", "", false
+	}
+	parts := strings.Split(strings.TrimPrefix(targetKey, prefix), ":")
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	scopeKey, err := decodeKeyPart(parts[0])
+	if err != nil || scopeKey == "" {
+		return "", "", false
+	}
+	value, err = decodeKeyPart(parts[1])
+	if err != nil || value == "" {
+		return "", "", false
+	}
+	return scopeKey, value, true
+}
+
+// AggregateKindForTargetKey reports the layer-specific aggregation task kind for
+// a canonical L1/L2/L3 target key.
+func AggregateKindForTargetKey(targetKey string) (Kind, bool) {
+	switch {
+	case strings.HasPrefix(targetKey, l1Prefix):
+		return KindAggregateL1, true
+	case strings.HasPrefix(targetKey, l2Prefix):
+		return KindAggregateL2, true
+	case strings.HasPrefix(targetKey, l3Prefix):
+		return KindAggregateL3, true
+	default:
+		return "", false
+	}
+}
+
+// DerivedKey addresses one derived-memory target inside a scope. The layer is
+// kept as a string-like value so this package does not import artifact (which
+// imports this package for its own target keys).
+func DerivedKey[L ~string](layer L, scopeKey, key string) string {
+	switch string(layer) {
+	case "l1":
+		return L1TargetKey(scopeKey, key)
+	case "l2":
+		return L2TargetKey(scopeKey, key)
+	case "l3":
+		return L3TargetKey(scopeKey)
+	default:
+		prefix := strings.TrimSpace(string(layer))
+		if prefix == "" {
+			prefix = "derived"
+		}
+		return prefix + ":" + encodeKeyPart(scopeKey) + ":" + encodeKeyPart(key)
+	}
+}
+
+// ParseDerivedKey extracts the scope and key of a derived target that uses the
+// generic layer-prefixed encoding. L1/L2 delegate to their scoped parsers; L3
+// has no second key part.
+func ParseDerivedKey[L ~string](layer L, targetKey string) (scopeKey, key string, ok bool) {
+	switch string(layer) {
+	case "l1":
+		scopeKey, key, ok = ParseL1TargetKey(targetKey)
+		return scopeKey, key, ok
+	case "l2":
+		scopeKey, key, ok = ParseL2TargetKey(targetKey)
+		return scopeKey, key, ok
+	case "l3":
+		scopeKey, ok = ParseL3TargetKey(targetKey)
+		return scopeKey, "", ok
+	default:
+		prefix := strings.TrimSpace(string(layer))
+		if prefix == "" || !strings.HasPrefix(targetKey, prefix+":") {
+			return "", "", false
+		}
+		parts := strings.Split(strings.TrimPrefix(targetKey, prefix+":"), ":")
+		if len(parts) != 2 {
+			return "", "", false
+		}
+		scopeKey, err := decodeKeyPart(parts[0])
+		if err != nil || scopeKey == "" {
+			return "", "", false
+		}
+		key, err = decodeKeyPart(parts[1])
+		if err != nil || key == "" {
+			return "", "", false
+		}
+		return scopeKey, key, true
+	}
+}
+
 // ReconcileKey is the single global reconcile target.
 const ReconcileKey = "global"
 
 const (
-	aggregateSummaryPrefix = "summary:"
-	scopeSummaryPrefix     = "scope_summary:"
-	aggregateProfilePrefix = "profile:"
-	skillPrefix            = "skill:"
-	experiencePrefix       = "experience:"
-	conflictPrefix         = "conflict:"
+	skillPrefix      = "skill:"
+	experiencePrefix = "experience:"
+	conflictPrefix   = "conflict:"
 )
 
 // ConflictKey is the canonical target key for one open-conflict review. Conflict
@@ -172,72 +339,6 @@ func ParseConflictKey(targetKey string) (conflictID string, ok bool) {
 		return "", false
 	}
 	return conflictID, true
-}
-
-// AggregateKey is the canonical target key for one (scope, topic) summary. Both
-// parts are length-delimiting base64url values, so no concatenation ambiguity
-// can merge two groups.
-func AggregateKey(scopeKey, topic string) string {
-	return aggregateSummaryPrefix + encodeKeyPart(scopeKey) + ":" + encodeKeyPart(topic)
-}
-
-// ProfileKey is the canonical target key for one scope profile.
-func ProfileKey(scopeKey string) string {
-	return aggregateProfilePrefix + encodeKeyPart(scopeKey)
-}
-
-// ScopeSummaryKey is the canonical target key for one scope overview. The
-// overview is selected by scope and derived type only; it never requires a
-// model-supplied project name or topic.
-func ScopeSummaryKey(scopeKey string) string {
-	return scopeSummaryPrefix + encodeKeyPart(scopeKey)
-}
-
-// ParseScopeSummaryKey extracts the scope from a canonical scope overview key.
-func ParseScopeSummaryKey(targetKey string) (scopeKey string, ok bool) {
-	if !strings.HasPrefix(targetKey, scopeSummaryPrefix) {
-		return "", false
-	}
-	scopeKey, err := decodeKeyPart(strings.TrimPrefix(targetKey, scopeSummaryPrefix))
-	if err != nil || scopeKey == "" {
-		return "", false
-	}
-	return scopeKey, true
-}
-
-// ParseAggregateKey extracts the scope and topic from a canonical summary key.
-func ParseAggregateKey(targetKey string) (scopeKey, topic string, ok bool) {
-	if !strings.HasPrefix(targetKey, aggregateSummaryPrefix) {
-		return "", "", false
-	}
-	parts := strings.Split(strings.TrimPrefix(targetKey, aggregateSummaryPrefix), ":")
-	if len(parts) != 2 {
-		return "", "", false
-	}
-	scopeKey, err := decodeKeyPart(parts[0])
-	if err != nil {
-		return "", "", false
-	}
-	topic, err = decodeKeyPart(parts[1])
-	if err != nil {
-		return "", "", false
-	}
-	if scopeKey == "" || topic == "" {
-		return "", "", false
-	}
-	return scopeKey, topic, true
-}
-
-// ParseProfileKey extracts the scope from a canonical profile key.
-func ParseProfileKey(targetKey string) (scopeKey string, ok bool) {
-	if !strings.HasPrefix(targetKey, aggregateProfilePrefix) {
-		return "", false
-	}
-	scopeKey, err := decodeKeyPart(strings.TrimPrefix(targetKey, aggregateProfilePrefix))
-	if err != nil || scopeKey == "" {
-		return "", false
-	}
-	return scopeKey, true
 }
 
 // SkillTargetPrefix returns the canonical target-key prefix shared by every

@@ -83,8 +83,7 @@ func parseResolveInput(object map[string]json.RawMessage) (memory.ResolveInput, 
 	input.Revision = revision
 	input.MemberIDs = rawStringSlice(object, "member_ids")
 	switch input.Action {
-	case memory.ResolutionChoose, memory.ResolutionTimeline,
-		memory.ResolutionSeparateScope, memory.ResolutionRejectAll:
+	case memory.ResolutionChoose, memory.ResolutionRejectAll:
 	default:
 		return memory.ResolveInput{}, false
 	}
@@ -111,37 +110,5 @@ func parseResolveInput(object map[string]json.RawMessage) (memory.ResolveInput, 
 		}
 	}
 
-	if group, ok := rawObject(object, "separate_group"); ok {
-		input.SeparateGroup = &memory.FactGroupInput{
-			Subject:     rawString(group, "subject"),
-			Predicate:   rawString(group, "predicate"),
-			Scope:       rawString(group, "scope"),
-			Cardinality: memory.Cardinality(rawString(group, "cardinality")),
-		}
-	}
-
-	if raw, exists := object["timeline"]; exists {
-		var items []json.RawMessage
-		if err := json.Unmarshal(raw, &items); err != nil {
-			return memory.ResolveInput{}, false
-		}
-		for _, item := range items {
-			var fields map[string]json.RawMessage
-			if err := json.Unmarshal(item, &fields); err != nil || fields == nil {
-				return memory.ResolveInput{}, false
-			}
-			from, validFrom := rawTimeStrict(fields, "valid_from")
-			to, validTo := rawTimeStrict(fields, "valid_to")
-			if !validFrom || !validTo {
-				return memory.ResolveInput{}, false
-			}
-			input.Timeline = append(input.Timeline, memory.TimelineSegment{
-				MemoryID:  rawString(fields, "memory_id"),
-				Content:   rawString(fields, "content"),
-				ValidFrom: from,
-				ValidTo:   to,
-			})
-		}
-	}
 	return input, true
 }

@@ -3,7 +3,6 @@ import {
   App,
   Button,
   Card,
-  Collapse,
   Descriptions,
   Empty,
   Result,
@@ -24,26 +23,15 @@ import {
   invalidateAfterMemoryChange,
 } from '../../shared/api/cache-effects';
 import { errorMessage, isApiError, knownCodeMessage } from '../../shared/api/errors';
-import type {
-  Evidence,
-  ForgetResponse,
-  Memory,
-  Revision,
-  Relation,
-  EvolutionEvent,
-} from '../../shared/api/types';
-import {
-  evolutionActionLabels,
-  reasonText,
-  revisionOperationLabels,
-} from '../../shared/lib/codes';
+import type { ForgetResponse, Memory, Revision } from '../../shared/api/types';
+import { revisionOperationLabels } from '../../shared/lib/codes';
 import { routes, versionParam } from '../../shared/lib/routes';
 import { formatTimestamp, timestampTitle } from '../../shared/lib/time';
 import { DangerActionDialog } from '../../shared/ui/DangerActionDialog';
 import { IdText } from '../../shared/ui/IdText';
 import { QueryState } from '../../shared/ui/QueryState';
+import { RelationTable } from '../../shared/ui/RelationTable';
 import { TechnicalDetails } from '../../shared/ui/TechnicalDetails';
-import { shortId } from '../../shared/lib/display';
 import { RemovalSummary } from '../../shared/ui/RemovalSummary';
 import {
   deleteMemory,
@@ -82,9 +70,7 @@ function historyColumns(
       title: '操作',
       dataIndex: 'operation',
       width: 130,
-      render: (value: string) => (
-        <Tag>{revisionOperationLabels[value]?.label ?? value}</Tag>
-      ),
+      render: (value: string) => <Tag>{revisionOperationLabels[value]?.label ?? value}</Tag>,
     },
     {
       title: '原因',
@@ -118,89 +104,6 @@ function historyColumns(
     },
   ];
 }
-
-const relationColumns: ColumnsType<Relation> = [
-  {
-    title: '起点',
-    dataIndex: 'from_memory_id',
-    render: (_, item) => (
-      <Space direction="vertical" size={0}>
-        <Link to={routes.memoryVersion(item.from_memory_id, item.from_version)}>
-          相关记忆 {shortId(item.from_memory_id)}
-        </Link>
-        <Typography.Text type="secondary">
-          v{item.from_version} {item.from_version_changed ? <Tag color="warning">已变化</Tag> : null}
-        </Typography.Text>
-      </Space>
-    ),
-  },
-  {
-    title: '关系',
-    dataIndex: 'kind',
-    width: 120,
-    render: (value: string) => <Tag>{value}</Tag>,
-  },
-  {
-    title: '终点',
-    dataIndex: 'to_memory_id',
-    render: (_, item) => (
-      <Space direction="vertical" size={0}>
-        <Link to={routes.memoryVersion(item.to_memory_id, item.to_version)}>
-          相关记忆 {shortId(item.to_memory_id)}
-        </Link>
-        <Typography.Text type="secondary">
-          v{item.to_version} {item.to_version_changed ? <Tag color="warning">已变化</Tag> : null}
-        </Typography.Text>
-      </Space>
-    ),
-  },
-  {
-    title: '创建时间',
-    dataIndex: 'created_at',
-    width: 180,
-    render: (value: string) => formatTimestamp(value),
-  },
-];
-
-const evolutionColumns: ColumnsType<EvolutionEvent> = [
-  {
-    title: '动作',
-    dataIndex: 'action',
-    width: 110,
-    render: (value: string) => (
-      <Tag>{evolutionActionLabels[value]?.label ?? value}</Tag>
-    ),
-  },
-  {
-    title: '从',
-    dataIndex: 'from_memory_id',
-    render: (_, item) => (
-      <Link to={routes.memoryVersion(item.from_memory_id, item.from_version)}>
-        原记忆 · 第 {item.from_version} 版
-      </Link>
-    ),
-  },
-  {
-    title: '到',
-    dataIndex: 'to_memory_id',
-    render: (_, item) => (
-      <Link to={routes.memoryVersion(item.to_memory_id, item.to_version)}>
-        更新后的记忆 · 第 {item.to_version} 版
-      </Link>
-    ),
-  },
-  {
-    title: '原因码',
-    dataIndex: 'reason_code',
-    render: (value: string | undefined) => reasonText(value) ?? '—',
-  },
-  {
-    title: '时间',
-    dataIndex: 'created_at',
-    width: 180,
-    render: (value: string) => formatTimestamp(value),
-  },
-];
 
 export default function MemoryDetailPage() {
   const { id = '' } = useParams();
@@ -280,7 +183,7 @@ export default function MemoryDetailPage() {
       title: state === 'archived' ? '归档这条记忆？' : '激活这条记忆？',
       content:
         state === 'archived'
-          ? '归档会保留内容与历史，但不再用于默认搜索；以它为依据的整理内容可能需要更新。'
+          ? '归档会保留内容与历史，但不再用于默认搜索；派生内容可能需要更新。'
           : '重新启用后，该记忆可以再次用于默认搜索。',
       okText: state === 'archived' ? '归档' : '激活',
       cancelText: '取消',
@@ -318,14 +221,14 @@ export default function MemoryDetailPage() {
     modal.confirm({
       title: `从历史版本 v${targetVersion} 恢复？`,
       content:
-        '恢复会建立一个新的使用中版本，不覆盖历史，也不会自动采纳之前未采纳的内容。如果与现有记忆不一致，会暂停恢复并提示核对。',
+        '恢复会建立一个新的使用中版本，不覆盖历史，也不会自动采纳之前未采纳的内容。',
       okText: '确认恢复',
       cancelText: '取消',
       onOk: async () => {
         try {
           await restoreMutation.mutateAsync(targetVersion);
         } catch {
-          // The page shows the explicit 409/400 guidance after the modal closes.
+          // The page shows the explicit guidance after the modal closes.
         }
       },
     });
@@ -343,7 +246,7 @@ export default function MemoryDetailPage() {
     return [
       {
         key: 'snapshot',
-        label: version !== null ? `历史内容 · 第 ${version} 版` : '记忆内容',
+        label: version !== null ? `历史内容 · 第 ${version} 版` : '当前视图',
         children: (
           <Space direction="vertical" size={16} style={{ width: '100%' }}>
             {version !== null && selected ? (
@@ -351,7 +254,7 @@ export default function MemoryDetailPage() {
                 <Alert
                   type="warning"
                   showIcon
-                  message={`正在查看历史版本 v${selected.version}，它不是当前正文`}
+                  message={`正在查看历史版本 v${selected.version}，它不是当前视图`}
                   description={
                     <Space direction="vertical" size={2}>
                       <span>
@@ -359,9 +262,7 @@ export default function MemoryDetailPage() {
                         {selected.reason ? ` · 原因：${selected.reason}` : ''}
                       </span>
                       <span>记录时间：{formatTimestamp(selected.created_at)}</span>
-                      <span>
-                        当前版本为 v{current?.version ?? '未知'}；历史版本只读，恢复会生成新版本。
-                      </span>
+                      <span>当前版本为 v{current?.version ?? '未知'}；历史版本只读。</span>
                     </Space>
                   }
                   action={
@@ -424,51 +325,19 @@ export default function MemoryDetailPage() {
                         })
                       }
                     >
-                      提交更正
+                      提交新内容
                     </Button>
                   </Space>
-                  <TechnicalDetails label="永久删除（不可恢复）"><Space wrap>
-                    <Button danger onClick={() => setPurgeOpen(true)}>永久清除这条记忆</Button>
-                    <Button danger onClick={() => setForgetOpen(true)}>永久遗忘及相关内容</Button>
-                  </Space><Typography.Paragraph type="secondary" style={{ marginTop: 12 }}>单条清除会保留共享来源；永久遗忘可能连同来源、重复事实和自动整理内容一起删除。无法提前精确预览全部影响，请仔细阅读确认说明。</Typography.Paragraph></TechnicalDetails>
+                  <TechnicalDetails label="永久删除（不可恢复）">
+                    <Space wrap>
+                      <Button danger onClick={() => setPurgeOpen(true)}>永久清除这条记忆</Button>
+                      <Button danger onClick={() => setForgetOpen(true)}>永久遗忘及相关内容</Button>
+                    </Space>
+                    <Typography.Paragraph type="secondary" style={{ marginTop: 12 }}>
+                      单条清除会保留共享来源；永久遗忘可能连同来源和相关系列内容一起删除。无法提前精确预览全部影响。
+                    </Typography.Paragraph>
+                  </TechnicalDetails>
                 </Card>
-
-                <TechnicalDetails label="关联内容与变化记录"><Card size="small" title="关联记录">
-                  <Collapse
-                    items={[
-                      {
-                        key: 'relations',
-                        label: `关系（${current?.relations.length ?? 0}）`,
-                        children: (
-                          <Table
-                            rowKey="id"
-                            size="small"
-                            columns={relationColumns}
-                            dataSource={current?.relations ?? []}
-                            pagination={false}
-                            scroll={{ x: 900 }}
-                            locale={{ emptyText: '无关系' }}
-                          />
-                        ),
-                      },
-                      {
-                        key: 'evolution',
-                        label: `演化（${current?.evolution.length ?? 0}）`,
-                        children: (
-                          <Table
-                            rowKey="id"
-                            size="small"
-                            columns={evolutionColumns}
-                            dataSource={current?.evolution ?? []}
-                            pagination={false}
-                            scroll={{ x: 900 }}
-                            locale={{ emptyText: '无演化事件' }}
-                          />
-                        ),
-                      },
-                    ]}
-                  />
-                </Card></TechnicalDetails>
               </>
             ) : null}
           </Space>
@@ -490,24 +359,13 @@ export default function MemoryDetailPage() {
                 }))}
                 onChange={setHistoryLimit}
               />
-              <Typography.Text type="secondary">
-                最多显示最近 {historyLimit} 次修改；历史链接可以单独保存和打开。
-              </Typography.Text>
             </Space>
-            <QueryState
-              query={history}
-              empty="没有历史版本"
-              isEmpty={(data) => data.length === 0}
-            >
+            <QueryState query={history} empty="没有历史版本" isEmpty={(data) => data.length === 0}>
               {(items) => (
                 <Table<Revision>
                   rowKey="version"
                   size="small"
-                  columns={historyColumns(
-                    current?.version ?? 0,
-                    viewVersion,
-                    openRestoreConfirm,
-                  )}
+                  columns={historyColumns(current?.version ?? 0, viewVersion, openRestoreConfirm)}
                   dataSource={items}
                   pagination={false}
                   scroll={{ x: 900 }}
@@ -528,41 +386,61 @@ export default function MemoryDetailPage() {
               <Spin tip="正在读取历史版本证据…" />
             )
           ) : (
-            <QueryState
-              query={evidence}
-              empty="该记忆当前没有证据"
-              isEmpty={(data) => data.length === 0}
-            >
-              {(items) => <EvidenceTable items={items as Evidence[]} />}
+            <QueryState query={evidence} empty="该记忆当前没有证据" isEmpty={(data) => data.length === 0}>
+              {(items) => <EvidenceTable items={items} />}
             </QueryState>
           ),
       },
       {
-        key: 'relations',
-        label: '关联与变化',
+        key: 'references',
+        label: '观察来源与派生',
         children: current ? (
           <Space direction="vertical" size={16} style={{ width: '100%' }}>
-            <Card size="small" title={`关系（${current.relations.length}）`}>
-              <Table
-                rowKey="id"
-                size="small"
-                columns={relationColumns}
-                dataSource={current.relations}
-                pagination={false}
-                scroll={{ x: 900 }}
-                locale={{ emptyText: '无关系' }}
-              />
+            <Card size="small" title={`观察来源（${current.observation_ids.length}）`}>
+              {current.observation_ids.length > 0 ? (
+                <Space direction="vertical">
+                  {current.observation_ids.map((observationID) => (
+                    <Link key={observationID} to={routes.observation(observationID)}>
+                      <Typography.Text code>{observationID}</Typography.Text>
+                    </Link>
+                  ))}
+                </Space>
+              ) : (
+                <Empty description="当前版本没有观察来源引用" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+              )}
             </Card>
-            <Card size="small" title={`演化（${current.evolution.length}）`}>
-              <Table
-                rowKey="id"
-                size="small"
-                columns={evolutionColumns}
-                dataSource={current.evolution}
-                pagination={false}
-                scroll={{ x: 900 }}
-                locale={{ emptyText: '无演化事件' }}
-              />
+            <Card size="small" title={`关系（${current.relations.length}）`}>
+              <RelationTable items={current.relations} />
+            </Card>
+            <Card size="small" title={`未决冲突（${current.conflict_ids.length}）`}>
+              {current.conflict_ids.length > 0 ? (
+                <Space direction="vertical">
+                  {current.conflict_ids.map((conflictID) => (
+                    <Link key={conflictID} to={routes.conflict(conflictID)}>
+                      查看冲突 {conflictID}
+                    </Link>
+                  ))}
+                </Space>
+              ) : (
+                <Empty description="没有未决冲突" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+              )}
+            </Card>
+            <Card size="small" title={`依赖此记忆的派生内容（${current.derived_dependents.length}）`}>
+              {current.derived_dependents.length > 0 ? (
+                <Space direction="vertical">
+                  {current.derived_dependents.map((item) => (
+                    <Space key={item.id} wrap>
+                      <Tag>{item.layer.toUpperCase()}</Tag>
+                      <Link to={routes.artifact(item.id)}>{item.kind}</Link>
+                      <Typography.Text type="secondary">
+                        {item.state} · v{item.version}
+                      </Typography.Text>
+                    </Space>
+                  ))}
+                </Space>
+              ) : (
+                <Empty description="没有直接派生依赖" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+              )}
             </Card>
           </Space>
         ) : (
@@ -594,58 +472,37 @@ export default function MemoryDetailPage() {
         title={removalOutcome.kind === 'purge' ? '永久清除已由服务端确认' : '永久遗忘已由服务端确认'}
         subTitle="页面缓存已保守清除；以下以服务端实际返回为准。"
         extra={
-          <Space>
-            <Link to={routes.memories}>
-              <Button>返回记忆库</Button>
-            </Link>
-            <Link to={routes.conflicts}>
-              <Button>查看内容核对</Button>
-            </Link>
-          </Space>
+          <Link to={routes.memories}>
+            <Button>返回记忆库</Button>
+          </Link>
         }
       >
-        {forgetResult ? <RemovalSummary result={forgetResult} /> : <Typography.Paragraph>这条记忆及其专属数据已永久清除，共享来源保留。</Typography.Paragraph>}
-        <TechnicalDetails label="删除记录详情"><Descriptions bordered size="small" column={1}>
-          <Descriptions.Item label="目标记忆 ID">
-            <IdText value={id} />
-          </Descriptions.Item>
-          {removalOutcome.kind === 'purge' ? (
-            <Descriptions.Item label="purged">{String(removalOutcome.purged)}</Descriptions.Item>
-          ) : null}
-          {forgetResult ? (
-            <>
-              <Descriptions.Item label="实际删除记忆 ID">
-                {forgetResult.memory_ids.length > 0 ? (
-                  <Space direction="vertical">
-                    {forgetResult.memory_ids.map((value) => (
-                      <IdText key={value} value={value} />
-                    ))}
-                  </Space>
-                ) : (
-                  '无'
-                )}
-              </Descriptions.Item>
-              <Descriptions.Item label="实际删除来源 ID">
-                {forgetResult.source_ids.length > 0
-                  ? forgetResult.source_ids.join('、')
-                  : '无'}
-              </Descriptions.Item>
-              <Descriptions.Item label="实际删除报告 ID">
-                {forgetResult.experience_ids.length > 0
-                  ? forgetResult.experience_ids.join('、')
-                  : '无'}
-              </Descriptions.Item>
-              <Descriptions.Item label="警告">
-                {forgetResult.warnings?.length ? forgetResult.warnings.join('、') : '无'}
-              </Descriptions.Item>
-              <Descriptions.Item label="保留的相关记忆">
-                {forgetResult.retained_related_memory_ids?.length
-                  ? forgetResult.retained_related_memory_ids.join('、')
-                  : '无'}
-              </Descriptions.Item>
-            </>
-          ) : null}
-        </Descriptions></TechnicalDetails>
+        {forgetResult ? (
+          <RemovalSummary result={forgetResult} />
+        ) : (
+          <Typography.Paragraph>这条记忆及其专属数据已永久清除，共享来源保留。</Typography.Paragraph>
+        )}
+        <TechnicalDetails label="删除记录详情">
+          <Descriptions bordered size="small" column={1}>
+            <Descriptions.Item label="目标记忆 ID"><IdText value={id} /></Descriptions.Item>
+            {removalOutcome.kind === 'purge' ? (
+              <Descriptions.Item label="purged">{String(removalOutcome.purged)}</Descriptions.Item>
+            ) : null}
+            {forgetResult ? (
+              <>
+                <Descriptions.Item label="实际删除记忆 ID">
+                  {forgetResult.memory_ids.length > 0 ? forgetResult.memory_ids.join('、') : '无'}
+                </Descriptions.Item>
+                <Descriptions.Item label="实际删除来源 ID">
+                  {forgetResult.source_ids.length > 0 ? forgetResult.source_ids.join('、') : '无'}
+                </Descriptions.Item>
+                <Descriptions.Item label="实际删除报告 ID">
+                  {forgetResult.experience_ids.length > 0 ? forgetResult.experience_ids.join('、') : '无'}
+                </Descriptions.Item>
+              </>
+            ) : null}
+          </Descriptions>
+        </TechnicalDetails>
       </Result>
     );
   }
@@ -671,11 +528,7 @@ export default function MemoryDetailPage() {
         showIcon
         message="记忆详情读取失败"
         description={errorMessage(memory.error)}
-        action={
-          <Button onClick={() => void memory.refetch()}>
-            重试
-          </Button>
-        }
+        action={<Button onClick={() => void memory.refetch()}>重试</Button>}
       />
     );
   }
@@ -686,11 +539,7 @@ export default function MemoryDetailPage() {
 
   return (
     <>
-      <Space
-        style={{ width: '100%', justifyContent: 'space-between', marginBottom: 8 }}
-        align="start"
-        wrap
-      >
+      <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 8 }} align="start" wrap>
         <div>
           <Typography.Title level={3} style={{ marginBottom: 4 }}>
             {title}
@@ -701,9 +550,7 @@ export default function MemoryDetailPage() {
           </Space>
         </div>
         <Space wrap>
-          <Link to={routes.memories}>
-            <Button>返回列表</Button>
-          </Link>
+          <Link to={routes.memories}><Button>返回列表</Button></Link>
           {version !== null ? (
             <Button onClick={() => setSearchParams(new URLSearchParams(), { replace: true })}>
               回到当前
@@ -720,19 +567,10 @@ export default function MemoryDetailPage() {
           style={{ marginBottom: 12 }}
           type={isApiError(restoreError) && restoreError.status === 409 ? 'warning' : 'error'}
           showIcon
-          message={
-            isApiError(restoreError) && restoreError.code === 'restore_conflict'
-              ? '恢复会产生未标记冲突，未写入任何版本'
-              : '恢复历史版本失败'
-          }
+          message="恢复历史版本失败"
           description={
             knownCodeMessage(isApiError(restoreError) ? restoreError.code : undefined) ??
             errorMessage(restoreError)
-          }
-          action={
-            <Link to={routes.conflicts}>
-              <Button size="small">查看内容核对</Button>
-            </Link>
           }
           closable
           onClose={() => setRestoreError(null)}
@@ -746,11 +584,7 @@ export default function MemoryDetailPage() {
           showIcon
           message={`历史版本 v${version} 读取失败`}
           description={errorMessage(revision.error)}
-          action={
-            <Button size="small" onClick={() => void revision.refetch()}>
-              重试
-            </Button>
-          }
+          action={<Button size="small" onClick={() => void revision.refetch()}>重试</Button>}
         />
       ) : null}
 
@@ -761,12 +595,7 @@ export default function MemoryDetailPage() {
       ) : version !== null && revision.isError ? (
         <Empty description="无法展示未成功读取的历史版本" />
       ) : (
-        <Tabs
-          activeKey={activeTab}
-          onChange={setActiveTab}
-          items={revisionItems}
-          destroyOnHidden={false}
-        />
+        <Tabs activeKey={activeTab} onChange={setActiveTab} items={revisionItems} destroyOnHidden={false} />
       )}
 
       <DangerActionDialog
@@ -794,7 +623,7 @@ export default function MemoryDetailPage() {
         targetName={title}
         confirmText={id}
         confirmLabel="永久遗忘"
-        impacts="可能同时删除相关来源、重复事实及以它们为依据的自动整理内容。无法提前精确列出全部影响；完成后会显示实际删除结果和保留提示。此操作不可恢复。"
+        impacts="可能同时删除相关来源和自动整理内容。无法提前精确列出全部影响；完成后会显示实际删除结果。此操作不可恢复。"
         onClose={() => setForgetOpen(false)}
         action={() => forgetMutation.mutateAsync()}
         onSuccess={(result) => {

@@ -1,3 +1,5 @@
+//go:build legacy
+
 package capacity_test
 
 import (

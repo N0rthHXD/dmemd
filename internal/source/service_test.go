@@ -36,13 +36,13 @@ func TestRedactClearsSourceEvidenceAndCancelsOnlyPendingJobs(t *testing.T) {
 		Content:   []byte(`{"messages":[{"id":"m1","content":"sensitive quote"}]}`),
 		CreatedAt: serviceTime,
 	}
-	evidence := source.NewEvidence(src, source.EvidenceReference{Quote: "sensitive quote"}, "model", serviceTime)
+	evidence := codeEvidence(t, src, "seg-0001")[0]
 	jobs := []ingest.Job{
 		{ID: "job-queued", SourceID: src.ID, Status: ingest.JobQueued, CreatedAt: serviceTime, UpdatedAt: serviceTime},
 		{ID: "job-running", SourceID: src.ID, Status: ingest.JobRunning, Attempts: 1, CreatedAt: serviceTime, UpdatedAt: serviceTime},
 		{ID: "job-waiting", SourceID: src.ID, Status: ingest.JobWaiting, Attempts: 2,
 			WaitReason: ingest.WaitReasonTransient, CreatedAt: serviceTime, UpdatedAt: serviceTime},
-		{ID: "job-succeeded", SourceID: src.ID, Status: ingest.JobSucceeded, Attempts: 1, MemoryIDs: []string{"m-1"}, CreatedAt: serviceTime, UpdatedAt: serviceTime},
+		{ID: "job-succeeded", SourceID: src.ID, Status: ingest.JobSucceeded, Attempts: 1, ObservationIDs: []string{"o-1"}, CreatedAt: serviceTime, UpdatedAt: serviceTime},
 		{ID: "job-failed", SourceID: src.ID, Status: ingest.JobFailed, Attempts: 3, Error: "model echoed sensitive quote", CreatedAt: serviceTime, UpdatedAt: serviceTime},
 		{ID: "job-other-source", SourceID: "other-source", Status: ingest.JobQueued, CreatedAt: serviceTime, UpdatedAt: serviceTime},
 	}
@@ -103,7 +103,7 @@ func TestRedactClearsSourceEvidenceAndCancelsOnlyPendingJobs(t *testing.T) {
 		t.Fatal("cancelled jobs did not record finished_at")
 	}
 	succeeded := loadJob(t, store, "job-succeeded")
-	if succeeded.Status != ingest.JobSucceeded || succeeded.Error != "" || len(succeeded.MemoryIDs) != 1 {
+	if succeeded.Status != ingest.JobSucceeded || succeeded.Error != "" || len(succeeded.ObservationIDs) != 1 {
 		t.Fatalf("succeeded job changed: %+v", succeeded)
 	}
 	failed := loadJob(t, store, "job-failed")
@@ -146,7 +146,7 @@ func TestRedactRollsBackWhenAnyStepFails(t *testing.T) {
 	src := source.Source{
 		ID: "source-rollback", Content: []byte(`{"text":"keep me"}`), CreatedAt: serviceTime,
 	}
-	evidence := source.NewEvidence(src, source.EvidenceReference{Quote: "keep me"}, "model", serviceTime)
+	evidence := codeEvidence(t, src, "seg-0001")[0]
 	job := ingest.Job{
 		ID: "job-rollback", SourceID: src.ID, Status: ingest.JobQueued,
 		CreatedAt: serviceTime, UpdatedAt: serviceTime,
@@ -245,29 +245,39 @@ func loadJob(t *testing.T, store *sqlite.Store, id string) ingest.Job {
 	return job
 }
 
-func TestNewEvidenceUsesGeneratedIDAndSourceStatus(t *testing.T) {
+func TestEvidenceForSegmentsUsesGeneratedIDAndSourceStatus(t *testing.T) {
 	src := source.Source{
 		ID: "source-evidence", Content: []byte(`{"messages":[{"id":"m1","content":"你好世界"}]}`),
 	}
-	item := source.NewEvidence(src, source.EvidenceReference{Quote: "世界"}, "model", serviceTime)
+	item := codeEvidence(t, src, "seg-0001")[0]
 	if item.ID == "" {
 		t.Fatal("evidence ID is empty")
 	}
-	if item.SourceID != src.ID || item.MessageID != "m1" || item.ModelName != "model" ||
+	if item.SourceID != src.ID || item.SegmentID != "seg-0001" || item.MessageID != "m1" ||
 		item.CreatedAt != serviceTime || item.Redacted {
 		t.Fatalf("evidence = %+v", item)
 	}
-	if item.Location == nil || item.Location.Field != "messages.0.content" ||
-		item.Location.Start != 2 || item.Location.End != 4 {
-		t.Fatalf("location = %+v", item.Location)
+	if item.Quote != "你好世界" || item.Location == nil ||
+		item.Location.Field != "messages.0.content" ||
+		item.Location.Start != 0 || item.Location.End != 4 {
+		t.Fatalf("quote/location = %+v %+v", item.Quote, item.Location)
 	}
 
 	redactedAt := serviceTime.Add(time.Hour)
-	redacted := source.NewEvidence(source.Source{
+	redacted := codeEvidence(t, source.Source{
 		ID: "source-redacted", Redacted: true, RedactedAt: &redactedAt,
-	}, source.EvidenceReference{Quote: "世界"}, "model", serviceTime)
+	}, "seg-0001")[0]
 	if !redacted.Redacted || redacted.Quote != "" || redacted.Location != nil ||
 		redacted.RedactedAt == nil || !redacted.RedactedAt.Equal(redactedAt) {
 		t.Fatalf("redacted evidence = %+v", redacted)
 	}
+}
+
+func codeEvidence(t *testing.T, src source.Source, ids ...string) []source.Evidence {
+	t.Helper()
+	items, err := source.EvidenceForSegments(src, ids, serviceTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return items
 }

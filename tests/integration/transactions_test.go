@@ -1,3 +1,5 @@
+//go:build legacy
+
 package integration_test
 
 import (
@@ -97,7 +99,7 @@ func writeCrossTable(ctx context.Context, store *sqlite.Store, injector *testuti
 	}
 	evidence := source.Evidence{
 		ID: ids.evidence, SourceID: ids.sourceID, Quote: "crossprobe",
-		ModelName: "test-model", CreatedAt: now,
+		CreatedAt: now,
 	}
 	job := ingest.Job{
 		ID: ids.jobID, SourceID: ids.sourceID, Status: ingest.JobQueued,

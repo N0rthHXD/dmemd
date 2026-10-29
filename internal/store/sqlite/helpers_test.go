@@ -73,9 +73,6 @@ func seedMemory(t *testing.T, store *Store, sourceID string, item memory.Memory)
 	if item.UpdatedAt.IsZero() {
 		item.UpdatedAt = item.CreatedAt
 	}
-	if item.ObservedAt.IsZero() {
-		item.ObservedAt = item.CreatedAt
-	}
 	if item.OriginSourceID == "" {
 		item.OriginSourceID = sourceID
 	}

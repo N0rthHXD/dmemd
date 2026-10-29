@@ -53,8 +53,8 @@ func TestSourceAndJobInsertAtomically(t *testing.T) {
 	if loadedJob.Status != ingest.JobQueued || loadedJob.Attempts != 0 || loadedJob.SourceID != sourceID {
 		t.Fatalf("job = %+v", loadedJob)
 	}
-	if loadedJob.MemoryIDs == nil || len(loadedJob.MemoryIDs) != 0 {
-		t.Fatalf("memory_ids = %#v, want empty non-nil slice", loadedJob.MemoryIDs)
+	if loadedJob.ObservationIDs == nil || len(loadedJob.ObservationIDs) != 0 {
+		t.Fatalf("observation_ids = %#v, want empty non-nil slice", loadedJob.ObservationIDs)
 	}
 }
 

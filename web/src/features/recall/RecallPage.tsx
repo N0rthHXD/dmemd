@@ -6,7 +6,6 @@ import {
   Col,
   DatePicker,
   Descriptions,
-  Divider,
   Empty,
   Form,
   Input,
@@ -23,100 +22,176 @@ import type { ColumnsType } from 'antd/es/table';
 import type { Dayjs } from 'dayjs';
 import { useMutation } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { Link, useLocation } from 'react-router-dom';
+import { isRecord } from '../../shared/api/client';
 import { errorMessage } from '../../shared/api/errors';
 import { normalizeRecallRequest } from '../../shared/api/query-keys';
 import {
   activeMemoryStates,
   memoryKinds,
-  type ArtifactItem,
+  recallLayers,
+  recallQueryModes,
   type ConflictSummary,
   type MemoryKind,
   type MemoryState,
   type NormalizedRecallRequest,
+  type RecallDerivedItem,
+  type RecallLayer,
+  type RecallObservationItem,
+  type RecallQueryMode,
+  type RecallResponse,
   type SearchDiagnostics,
   type SearchItem,
-  type SearchResponse,
 } from '../../shared/api/types';
-import { codeDefinition, relatedReasonText } from '../../shared/lib/codes';
+import { codeDefinition } from '../../shared/lib/codes';
 import { routes } from '../../shared/lib/routes';
 import { formatTimestamp, toRFC3339 } from '../../shared/lib/time';
 import { JsonView } from '../../shared/ui/JsonView';
 import { MarkdownView } from '../../shared/ui/MarkdownView';
+import { RelationTable } from '../../shared/ui/RelationTable';
 import { MatchHighlight } from '../../shared/ui/MatchHighlight';
 import { StatusTag } from '../../shared/ui/StatusTag';
+import { TechnicalDetails } from '../../shared/ui/TechnicalDetails';
 import { UnsavedChangesGuard } from '../../shared/ui/UnsavedChangesGuard';
 import { WarningList } from '../../shared/ui/WarningList';
 import { recallMemories } from './api';
-import { TechnicalDetails } from '../../shared/ui/TechnicalDetails';
-import { IdText } from '../../shared/ui/IdText';
-import { isRecord } from '../../shared/api/client';
-
-type RecallLayer = 'atomic' | 'summary' | 'experience' | 'skill';
 
 interface RecallFormValues {
   query?: string;
   scopeKey?: string;
+  queryMode?: RecallQueryMode;
   layers: RecallLayer[];
   mode: 'keyword' | 'hybrid';
+  derivedStates: Array<'active' | 'stale'>;
   topK: number;
   maxContextTokens?: number | null;
   explain?: boolean;
   kinds?: MemoryKind[];
   states?: MemoryState[];
-  createdByApp?: string;
   updatedAfter?: Dayjs | null;
   updatedBefore?: Dayjs | null;
-  asOf?: Dayjs | null;
-  eventAt?: Dayjs | null;
 }
 
 const initialValues: RecallFormValues = {
   query: '',
   scopeKey: '',
-  layers: ['atomic', 'summary', 'experience', 'skill'],
+  queryMode: undefined,
+  layers: [],
   mode: 'keyword',
+  derivedStates: ['active'],
   topK: 20,
   maxContextTokens: null,
   explain: false,
   kinds: [],
   states: [],
-  createdByApp: '',
   updatedAfter: null,
   updatedBefore: null,
-  asOf: null,
-  eventAt: null,
 };
-
-const layerOptions: Array<{ value: RecallLayer; label: string }> = [
-  { value: 'atomic', label: '记忆' },
-  { value: 'summary', label: '摘要 / 概览 / 偏好与习惯' },
-  { value: 'experience', label: '经验案例' },
-  { value: 'skill', label: '操作指南' },
-];
 
 function requestFromForm(values: RecallFormValues): NormalizedRecallRequest {
   return normalizeRecallRequest({
     query: values.query ?? '',
     scopeKey: values.scopeKey,
+    queryMode: values.queryMode,
     layers: values.layers,
     mode: values.mode,
+    derivedStates: values.derivedStates,
     topK: values.topK,
     maxContextTokens: values.maxContextTokens ?? undefined,
     explain: Boolean(values.explain),
     filters: {
       kinds: values.kinds,
       states: values.states,
-      asOf: toRFC3339(values.asOf),
-      eventAt: toRFC3339(values.eventAt),
-      createdByApp: values.createdByApp,
       updatedAfter: toRFC3339(values.updatedAfter),
       updatedBefore: toRFC3339(values.updatedBefore),
     },
   });
 }
 
-function AtomicItem({ item }: { item: SearchItem }) {
+function EvidenceLinks({ items }: { items: Array<{ id: string; source_id: string }> }) {
+  if (items.length === 0) {
+    return <Typography.Text type="secondary">无证据引用</Typography.Text>;
+  }
+  return (
+    <Space wrap>
+      {items.map((ref, index) => (
+        <Link key={ref.id} to={routes.source(ref.source_id)}>
+          来源 {index + 1}
+        </Link>
+      ))}
+    </Space>
+  );
+}
+
+function ExplanationBlock({ item }: { item: SearchItem | RecallObservationItem }) {
+  if (!item.explanation) {
+    return null;
+  }
+  const explanation = item.explanation;
+  return (
+    <TechnicalDetails label="排序详情（不是真实性置信度）">
+      <Descriptions size="small" bordered column={1}>
+        <Descriptions.Item label="排序方式">{explanation.ranking}</Descriptions.Item>
+        {explanation.field_weights ? (
+          <Descriptions.Item label="字段权重">{explanation.field_weights.join(' / ')}</Descriptions.Item>
+        ) : null}
+        {explanation.keyword ? (
+          <Descriptions.Item label="关键词">
+            名次 {explanation.keyword.rank} · BM25 {explanation.keyword.bm25.toFixed(6)}
+          </Descriptions.Item>
+        ) : null}
+        {explanation.semantic ? (
+          <Descriptions.Item label="语义">
+            名次 {explanation.semantic.rank} · 余弦 {explanation.semantic.cosine.toFixed(6)}
+          </Descriptions.Item>
+        ) : null}
+      </Descriptions>
+    </TechnicalDetails>
+  );
+}
+
+function ObservationItemCard({ item }: { item: RecallObservationItem }) {
+  const observation = item.observation;
+  return (
+    <Card
+      size="small"
+      style={{ marginBottom: 12 }}
+      title={
+        <Space wrap>
+          <Link to={routes.observation(observation.id)}>L0 观察</Link>
+          <StatusTag category="memoryKind" value={observation.kind} />
+          <StatusTag category="observationStatus" value={observation.status} />
+          <Tag>{observation.source_id.slice(0, 8)}</Tag>
+        </Space>
+      }
+    >
+      <Typography.Paragraph style={{ whiteSpace: 'pre-wrap' }}>
+        <MatchHighlight text={item.snippet} terms={item.matched_terms} />
+      </Typography.Paragraph>
+      <Space wrap size={[12, 4]}>
+        <Typography.Text type="secondary">
+          {observation.scope_key || '范围未知'} · 角色 {observation.origin_role || '未知'}
+        </Typography.Text>
+        {item.matched_terms.length > 0 ? (
+          <Typography.Text type="secondary">命中：{item.matched_terms.join('、')}</Typography.Text>
+        ) : null}
+      </Space>
+      <Collapse
+        ghost
+        items={[
+          {
+            key: 'evidence',
+            label: `证据引用（${item.evidence_refs.length}）`,
+            children: <EvidenceLinks items={item.evidence_refs} />,
+          },
+        ]}
+      />
+    </Card>
+  );
+}
+
+function MemoryItemCard({ item }: { item: SearchItem }) {
   const memory = item.memory;
   return (
     <Card
@@ -130,9 +205,7 @@ function AtomicItem({ item }: { item: SearchItem }) {
           <StatusTag category="memoryKind" value={memory.kind} />
           <StatusTag category="memoryState" value={memory.state} />
           <StatusTag category="assertion" value={memory.assertion_status} />
-          <Tag color={item.temporal_status === 'unknown' ? 'warning' : 'default'}>
-            {item.temporal_status === 'unknown' ? '有效区间未知' : '在已知区间内'}
-          </Tag>
+          <Tag>v{memory.version}</Tag>
         </Space>
       }
     >
@@ -140,63 +213,17 @@ function AtomicItem({ item }: { item: SearchItem }) {
         <MatchHighlight text={item.snippet} terms={item.matched_terms} />
       </Typography.Paragraph>
       <Space wrap size={[12, 4]}>
-        <Typography.Text type="secondary">v{memory.version}</Typography.Text>
         {memory.scope_key ? <Tag>{memory.scope_key}</Tag> : null}
-        {memory.topics.map((topic) => (
-          <Tag key={topic}>{topic}</Tag>
-        ))}
         {item.matched_terms.length > 0 ? (
-          <Typography.Text type="secondary">
-            命中：{item.matched_terms.join('、')}
-          </Typography.Text>
+          <Typography.Text type="secondary">命中：{item.matched_terms.join('、')}</Typography.Text>
         ) : null}
       </Space>
-      {item.related ? (
-        <Alert
-          style={{ marginTop: 12 }}
-          type="info"
-          showIcon
-          message={`关联结果：${item.related.reason_codes.map(relatedReasonText).join('、')}`}
-          description={
-            <Space wrap>
-              相关记忆：
-              {item.related.anchor_memory_ids.map((memoryId, index) => (
-                <Link key={memoryId} to={routes.memory(memoryId)}>
-                  查看记忆 {index + 1}
-                </Link>
-              ))}
-            </Space>
-          }
-        />
-      ) : null}
-      {item.cluster ? (
-        <Alert
-          style={{ marginTop: 12 }}
-          type="info"
-          showIcon
-          message="重复表述只做了合并展示，不代表数据已合并"
-          description={
-            <Space direction="vertical" size={2}>
-              <span>证据数量：{item.cluster.evidence_count}</span>
-              <Space wrap>
-                成员：
-                {item.cluster.member_ids.map((memoryId, index) => (
-                  <Link key={memoryId} to={routes.memory(memoryId)}>
-                    相关记忆 {index + 1}
-                  </Link>
-                ))}
-              </Space>
-            </Space>
-          }
-        />
-      ) : null}
       {item.conflict_refs.length > 0 ? (
         <Space style={{ marginTop: 12 }} wrap>
           <Typography.Text type="warning">涉及冲突：</Typography.Text>
           {item.conflict_refs.map((conflict) => (
             <Link key={conflict.id} to={routes.conflict(conflict.id)}>
               <Tag color="warning">{codeDefinition('conflictReason', conflict.reason_code).label}</Tag>
-              查看核对事项
             </Link>
           ))}
         </Space>
@@ -208,49 +235,14 @@ function AtomicItem({ item }: { item: SearchItem }) {
           {
             key: 'evidence',
             label: `证据引用（${item.evidence_refs.length}）`,
-            children:
-              item.evidence_refs.length > 0 ? (
-                <Space wrap>
-                  {item.evidence_refs.map((ref, index) => (
-                    <Link key={ref.id} to={routes.source(ref.source_id)}>
-                      来源 {index + 1}
-                    </Link>
-                  ))}
-                </Space>
-              ) : (
-                <Typography.Text type="secondary">无证据引用</Typography.Text>
-              ),
+            children: <EvidenceLinks items={item.evidence_refs} />,
           },
           ...(item.explanation
             ? [
                 {
                   key: 'explanation',
-                  label: '排序解释（不是真实性置信度）',
-                   children: (
-                     <TechnicalDetails label="相关度与排序详情">
-                    <Descriptions size="small" bordered column={1}>
-                      <Descriptions.Item label="排序方式">
-                        {item.explanation.ranking}
-                      </Descriptions.Item>
-                      {item.explanation.field_weights ? (
-                        <Descriptions.Item label="字段权重">
-                          {item.explanation.field_weights.join(' / ')}
-                        </Descriptions.Item>
-                      ) : null}
-                      {item.explanation.keyword ? (
-                        <Descriptions.Item label="关键词">
-                          名次 {item.explanation.keyword.rank} · BM25{' '}
-                          {item.explanation.keyword.bm25.toFixed(6)}
-                        </Descriptions.Item>
-                      ) : null}
-                      {item.explanation.semantic ? (
-                        <Descriptions.Item label="语义">
-                          名次 {item.explanation.semantic.rank} · 余弦{' '}
-                          {item.explanation.semantic.cosine.toFixed(6)}
-                        </Descriptions.Item>
-                      ) : null}
-                    </Descriptions></TechnicalDetails>
-                  ),
+                  label: '排序解释',
+                  children: <ExplanationBlock item={item} />,
                 },
               ]
             : []),
@@ -260,12 +252,13 @@ function AtomicItem({ item }: { item: SearchItem }) {
   );
 }
 
-function DerivedItem({ item }: { item: ArtifactItem }) {
+function DerivedItemCard({ item }: { item: RecallDerivedItem }) {
+  const artifact = item.artifact;
   const disclaimer =
-    item.kind === 'experience_case'
+    artifact.kind === 'experience_case'
       ? '经验案例来自应用报告，不代表独立执行验证。'
-      : item.kind === 'skill'
-        ? '操作指南仅供参考，不代表执行成功或安全性已验证，页面不会执行或安装它。'
+      : artifact.kind === 'skill'
+        ? '操作指南仅供参考，不代表执行成功或安全性已验证。'
         : undefined;
   return (
     <Card
@@ -273,66 +266,62 @@ function DerivedItem({ item }: { item: ArtifactItem }) {
       style={{ marginBottom: 12 }}
       title={
         <Space wrap>
-          <Link to={routes.artifactVersion(item.id, item.version)}>
-            {item.title || '（无标题）'}
+          <Link to={routes.artifactVersion(artifact.id, item.revision.version)}>
+            {item.revision.title || '（无标题）'}
           </Link>
-          <StatusTag category="artifactKind" value={item.kind} />
-          <StatusTag category="artifactState" value={item.state} />
-          <Tag>v{item.version}</Tag>
-          {item.truncated ? <Tag color="warning">输入截断</Tag> : null}
+          <StatusTag category="artifactLayer" value={artifact.layer} />
+          <StatusTag category="artifactKind" value={artifact.kind} />
+          <StatusTag category="artifactState" value={artifact.state} />
+          <Tag>v{item.revision.version}</Tag>
+          {item.revision.truncated ? <Tag color="warning">输入截断</Tag> : null}
         </Space>
       }
     >
       {disclaimer ? <Alert type="info" showIcon message={disclaimer} style={{ marginBottom: 12 }} /> : null}
-      {item.scope_key || item.topic ? (
-        <Space wrap style={{ marginBottom: 8 }}>
-          {item.scope_key ? <Tag>{item.scope_key}</Tag> : null}
-          {item.topic ? <Tag>主题 {item.topic}</Tag> : <Tag color="default">主题未知</Tag>}
-        </Space>
-      ) : null}
-      <MarkdownView content={item.content} />
+      <MarkdownView content={item.revision.content} />
       <Collapse
+        style={{ marginTop: 8 }}
         items={[
+          {
+            key: 'dependencies',
+            label: `依赖输入（${item.dependencies.length}）`,
+            children:
+              item.dependencies.length > 0 ? (
+                <Table
+                  rowKey={(dependency) => `${dependency.type}:${dependency.id}:${dependency.version}`}
+                  size="small"
+                  pagination={false}
+                  dataSource={item.dependencies}
+                  columns={[
+                    { title: '类型', dataIndex: 'type', width: 120 },
+                    {
+                      title: '输入',
+                      dataIndex: 'id',
+                      render: (value: string, dependency) =>
+                        dependency.type === 'observation' ? (
+                          <Link to={routes.observation(value)}>{value}</Link>
+                        ) : dependency.type === 'memory' ? (
+                          <Link to={routes.memory(value)}>{value}</Link>
+                        ) : (
+                          <span>{value}</span>
+                        ),
+                    },
+                    { title: '版本', dataIndex: 'version', width: 80 },
+                  ]}
+                />
+              ) : (
+                <Typography.Text type="secondary">无依赖记录</Typography.Text>
+              ),
+          },
           {
             key: 'payload',
             label: '技术详情',
-            children: <JsonView value={item.payload} maxHeight={240} emptyText="无 payload" />,
-          },
-          {
-            key: 'refs',
-            label: '直接引用',
-            children: (
-              <Space direction="vertical" size={6}>
-                <div>
-                  <Typography.Text strong>记忆引用：</Typography.Text>
-                  {item.memory_refs.length > 0 ? (
-                    <Space wrap>
-                      {item.memory_refs.map((ref, index) => (
-                        <Link
-                          key={`${ref.memory_id}-${ref.version}`}
-                          to={routes.memoryVersion(ref.memory_id, ref.version)}
-                        >
-                          参考记忆 {index + 1} · 第 {ref.version} 版
-                        </Link>
-                      ))}
-                    </Space>
-                  ) : (
-                    '无'
-                  )}
-                </div>
-                <div>
-                  <Typography.Text strong>运行引用：</Typography.Text>
-                  {item.run_refs.length > 0
-                    ? <Space wrap>{item.run_refs.map((ref) => <IdText key={ref.experience_id} value={ref.experience_id} />)}</Space>
-                    : '无'}
-                </div>
-              </Space>
-            ),
+            children: <JsonView value={item.revision.payload} maxHeight={240} emptyText="无 payload" />,
           },
         ]}
       />
       <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-        更新于 {formatTimestamp(item.updated_at)}
+        更新于 {formatTimestamp(artifact.updated_at)}
       </Typography.Text>
     </Card>
   );
@@ -342,11 +331,7 @@ const conflictColumns: ColumnsType<ConflictSummary> = [
   {
     title: '冲突',
     dataIndex: 'id',
-    render: (_, item) => (
-      <Space direction="vertical" size={0}>
-        <Link to={routes.conflict(item.id)}>查看需要核对的内容</Link>
-      </Space>
-    ),
+    render: (_, item) => <Link to={routes.conflict(item.id)}>查看需要核对的内容</Link>,
   },
   {
     title: '原因',
@@ -370,33 +355,53 @@ const conflictColumns: ColumnsType<ConflictSummary> = [
 function diagnosticsRows(diagnostics: SearchDiagnostics) {
   const labels: Array<[keyof SearchDiagnostics, string]> = [
     ['keyword_candidates', '关键词候选'],
+    ['observation_candidates', '观察候选'],
+    ['memory_candidates', '记忆候选'],
+    ['derived_candidates', '派生候选'],
     ['semantic_candidates', '语义候选'],
     ['semantic_excluded', '语义排除'],
     ['term_candidates', '词项候选'],
     ['kind_filter_excluded', '类型过滤排除'],
     ['state_filter_excluded', '状态过滤排除'],
-    ['time_filter_excluded', '时间过滤排除'],
     ['ranking_candidates', '参与排序候选'],
-    ['related_expanded', '关联展开'],
-    ['related_excluded', '关联排除'],
     ['returned_items', '最终返回'],
     ['context_budget_truncated', '预算截断'],
     ['semantic_degradation', '语义降级'],
   ];
   return labels
     .filter(([key]) => diagnostics[key] !== undefined)
-    .map(([key, label]) => ({
-      key,
-      label,
-      value: String(diagnostics[key]),
-    }));
+    .map(([key, label]) => ({ key, label, value: String(diagnostics[key]) }));
+}
+
+function Partition({
+  title,
+  description,
+  empty,
+  count,
+  children,
+}: {
+  title: string;
+  description: string;
+  empty: string;
+  count: number;
+  children: ReactNode;
+}) {
+  return (
+    <Card title={`${title}（${count}）`} style={{ marginTop: 16 }}>
+      <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
+        {description}
+      </Typography.Paragraph>
+      {count === 0 ? <Empty description={empty} image={Empty.PRESENTED_IMAGE_SIMPLE} /> : children}
+    </Card>
+  );
 }
 
 export default function RecallPage() {
   const location = useLocation();
-  const incomingQuery = isRecord(location.state) && typeof location.state.query === 'string' ? location.state.query : '';
+  const incomingQuery =
+    isRecord(location.state) && typeof location.state.query === 'string' ? location.state.query : '';
   const [form] = Form.useForm<RecallFormValues>();
-  const [lastResult, setLastResult] = useState<SearchResponse | null>(null);
+  const [lastResult, setLastResult] = useState<RecallResponse | null>(null);
   const [lastRequest, setLastRequest] = useState<NormalizedRecallRequest | null>(null);
   const [formChanged, setFormChanged] = useState(false);
   const [touched, setTouched] = useState(false);
@@ -423,15 +428,13 @@ export default function RecallPage() {
     form.submit();
   }, [autoSearch, form, incomingQuery, location.key]);
 
-  const submit = (values: RecallFormValues) => {
-    mutation.mutate(requestFromForm(values));
-  };
-
   const hasResults = lastResult
-    ? lastResult.memories.length +
-        lastResult.summaries.length +
-        lastResult.experiences.length +
-        lastResult.skills.length +
+    ? lastResult.observations.length +
+        lastResult.memories.length +
+        lastResult.l1.length +
+        lastResult.l2.length +
+        lastResult.l3.length +
+        lastResult.l4.length +
         lastResult.conflicts.length >
       0
     : false;
@@ -439,9 +442,9 @@ export default function RecallPage() {
   return (
     <>
       <UnsavedChangesGuard when={touched} />
-      <Typography.Title level={3}>搜索记忆</Typography.Title>
+      <Typography.Title level={3}>分层召回</Typography.Title>
       <Typography.Paragraph type="secondary">
-        输入关键词或一个问题，查找记忆以及自动整理的摘要、经验和操作指南。
+        分别查询 L0 原始观察、当前规范记忆和 L1-L4 派生记忆。各层独立排序，不把不同层级混成一个结论。
       </Typography.Paragraph>
 
       <Card title="查询" style={{ marginBottom: 16 }}>
@@ -449,7 +452,7 @@ export default function RecallPage() {
           form={form}
           layout="vertical"
           initialValues={{ ...initialValues, query: incomingQuery }}
-          onFinish={() => submit(form.getFieldsValue(true))}
+          onFinish={() => mutation.mutate(requestFromForm(form.getFieldsValue(true)))}
           onValuesChange={() => {
             setTouched(true);
             if (lastResult) {
@@ -458,288 +461,259 @@ export default function RecallPage() {
           }}
         >
           <Row gutter={16}>
-            <Col xs={24} lg={14}>
-              <Form.Item
-                label="关键词 / 自然语言问题"
-                name="query"
-                rules={[{ required: false }]}
-                extra="点击搜索后才会查询；使用自然语言时，可选择关键词与语义搜索。"
-              >
-                <Input.TextArea rows={3} placeholder="例如：修改项目后应该如何验证" allowClear />
+            <Col xs={24} lg={16}>
+              <Form.Item name="query" label="关键词或问题">
+                <Input.TextArea rows={2} placeholder="例如：回答语言偏好" />
               </Form.Item>
             </Col>
-            <Col xs={24} lg={10}>
-              <Row gutter={12}>
-                <Col span={12}>
-                  <Form.Item label="所属范围" name="scopeKey" extra="指定范围时，也会包含用户全局范围的记忆。">
-                    <Input placeholder="例如 project:dmemd，留空不限制" allowClear />
-                  </Form.Item>
-                </Col>
-                <Col span={12}>
-                  <Form.Item
-                    label="模式"
-                    name="mode"
-                    extra="语义搜索只用于记忆；自动整理内容按关键词搜索。"
-                  >
-                    <Select
-                      options={[
-                        { value: 'keyword', label: '关键词' },
-                        { value: 'hybrid', label: '关键词与语义' },
-                      ]}
-                    />
-                  </Form.Item>
-                </Col>
-                <Col span={24}><TechnicalDetails label="结果数量与排序选项"><Row gutter={12}><Col span={12}>
-                  <Form.Item
-                    label="每类最多显示"
-                    name="topK"
-                    rules={[
-                      { required: true, message: '请输入每类结果的条数上限' },
-                      {
-                        type: 'number',
-                        min: 1,
-                        max: 100,
-                        message: '每类最多显示 1～100 条',
-                      },
-                    ]}
-                  >
-                    <InputNumber min={1} max={100} style={{ width: '100%' }} />
-                  </Form.Item>
-                </Col>
-                <Col span={12}>
-                 <Form.Item label="结果长度限制" name="maxContextTokens">
-                    <InputNumber
-                      min={1}
-                      style={{ width: '100%' }}
-                      placeholder="可选，按字符估算"
-                    />
-                  </Form.Item>
-                </Col>
-              </Row>
-               <Form.Item label="内容类别" name="layers">
-                <Select mode="multiple" options={layerOptions} placeholder="留空等同全部四层" />
+            <Col xs={24} lg={8}>
+              <Form.Item name="scopeKey" label="所属范围（可选）">
+                <Input placeholder="例如 project:dmemd" allowClear />
               </Form.Item>
-              <Form.Item
-                label="按需排序解释"
-                name="explain"
-                valuePropName="checked"
-                extra="查看相关度和排序过程，仅用于排查搜索效果，不代表内容真实性。"
-              >
-                <Switch />
-              </Form.Item></TechnicalDetails></Col>
-              </Row>
             </Col>
           </Row>
-
-
-          <Collapse
-            items={[
-              {
-                key: 'filters',
-                label: '更多条件与时间',
-                children: (
-                  <Row gutter={16}>
-                    <Col xs={24} md={12} lg={8}>
-                      <Form.Item label="记忆类型" name="kinds">
-                        <Select
-                          mode="multiple"
-                          allowClear
-                          placeholder="留空不限制"
-                          options={memoryKinds.map((kind) => ({
-                            value: kind,
-                            label: codeDefinition('memoryKind', kind).label,
-                          }))}
-                        />
-                      </Form.Item>
-                    </Col>
-                    <Col xs={24} md={12} lg={8}>
-                      <Form.Item
-                        label="保存状态"
-                        name="states"
-                        extra="已删除的内容不会出现在搜索结果中。"
-                      >
-                        <Select
-                          mode="multiple"
-                          allowClear
-                          placeholder="留空使用服务端默认"
-                          options={activeMemoryStates.map((state) => ({
-                            value: state,
-                            label: codeDefinition('memoryState', state).label,
-                          }))}
-                        />
-                      </Form.Item>
-                    </Col>
-                    <Col xs={24} md={12} lg={8}>
-                      <Form.Item label="来源应用" name="createdByApp">
-                        <Input allowClear placeholder="留空不限制" />
-                      </Form.Item>
-                    </Col>
-                    <Col xs={24} md={12} lg={8}>
-                      <Form.Item label="更新时间起点" name="updatedAfter">
-                        <DatePicker showTime style={{ width: '100%' }} placeholder="留空省略" />
-                      </Form.Item>
-                    </Col>
-                    <Col xs={24} md={12} lg={8}>
-                      <Form.Item label="更新时间终点" name="updatedBefore">
-                        <DatePicker showTime style={{ width: '100%' }} placeholder="留空省略" />
-                      </Form.Item>
-                    </Col>
-                    <Col xs={24} md={12} lg={8} />
-                    <Col xs={24} md={12} lg={8}>
-                      <Form.Item
-                        label="在哪个时间适用"
-                        name="asOf"
-                        extra="按事实适用时间查找，不是查询当时保存了什么。此条件只返回记忆，不返回自动整理内容。"
-                      >
-                        <DatePicker showTime style={{ width: '100%' }} placeholder="留空省略" />
-                      </Form.Item>
-                    </Col>
-                    <Col xs={24} md={12} lg={8}>
-                      <Form.Item
-                        label="事件发生时间"
-                        name="eventAt"
-                        extra="与适用时间不同，按事情实际发生的时间查找。"
-                      >
-                        <DatePicker showTime style={{ width: '100%' }} placeholder="留空省略" />
-                      </Form.Item>
-                    </Col>
-                  </Row>
-                ),
-              },
-            ]}
-          />
-
-          <Divider />
+          <Row gutter={16}>
+            <Col xs={24} md={8}>
+              <Form.Item name="queryMode" label="查询目标">
+                <Select
+                  allowClear
+                  placeholder="不指定：返回全部层级"
+                  options={recallQueryModes.map((value) => ({
+                    value,
+                    label: {
+                      overview: '概览',
+                      detail: '细节',
+                      history: '历史',
+                      conflict: '冲突',
+                      guidance: '指导',
+                    }[value],
+                  }))}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={8}>
+              <Form.Item name="layers" label="层级（留空使用查询目标默认值）">
+                <Select
+                  mode="multiple"
+                  allowClear
+                  placeholder="全部层级"
+                  options={recallLayers.map((value) => ({
+                    value,
+                    label: {
+                      observations: 'L0 观察',
+                      memories: '当前记忆',
+                      l1: 'L1 局部聚合',
+                      l2: 'L2 领域聚合',
+                      l3: 'L3 全局聚合',
+                      l4: 'L4 指导',
+                    }[value],
+                  }))}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="mode" label="检索方式">
+                <Select
+                  options={[
+                    { value: 'keyword', label: '关键词' },
+                    { value: 'hybrid', label: '关键词 + 语义' },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={4}>
+              <Form.Item name="topK" label="每层上限">
+                <InputNumber min={0} max={100} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={16}>
+            <Col xs={24} md={6}>
+              <Form.Item name="derivedStates" label="派生状态">
+                <Select
+                  mode="multiple"
+                  options={[
+                    { value: 'active', label: '可用' },
+                    { value: 'stale', label: '已失效（显式查看）' },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item name="kinds" label="记忆类型过滤">
+                <Select
+                  mode="multiple"
+                  allowClear
+                  options={memoryKinds.map((value) => ({
+                    value,
+                    label: codeDefinition('memoryKind', value).label,
+                  }))}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item name="states" label="记忆状态过滤">
+                <Select
+                  mode="multiple"
+                  allowClear
+                  placeholder="默认使用中"
+                  options={activeMemoryStates.map((value) => ({
+                    value,
+                    label: codeDefinition('memoryState', value).label,
+                  }))}
+                />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={16}>
+            <Col xs={24} md={8}>
+              <Form.Item name="updatedAfter" label="更新时间起点">
+                <DatePicker showTime style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={8}>
+              <Form.Item name="updatedBefore" label="更新时间终点">
+                <DatePicker showTime style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={8}>
+              <Form.Item label="解释与上下文预算">
+                <Space>
+                  <Form.Item name="explain" valuePropName="checked" noStyle>
+                    <Switch checkedChildren="解释" unCheckedChildren="解释" defaultChecked={false} />
+                  </Form.Item>
+                  <Form.Item name="maxContextTokens" noStyle>
+                    <InputNumber min={0} placeholder="上下文预算" style={{ width: 150 }} />
+                  </Form.Item>
+                </Space>
+              </Form.Item>
+            </Col>
+          </Row>
           <Space wrap>
             <Button type="primary" htmlType="submit" loading={mutation.isPending}>
               搜索
             </Button>
             <Button
               onClick={() => {
-                form.setFieldsValue(initialValues);
+                form.resetFields();
+                form.setFieldsValue({ ...initialValues, query: incomingQuery });
+                setLastResult(null);
+                setLastRequest(null);
                 setTouched(false);
-                if (lastResult) {
-                  setFormChanged(true);
-                }
               }}
             >
-              重置表单
+              清空
             </Button>
-            <Typography.Text type="secondary">
-              结果按记忆、摘要、经验和指南分类展示。
-            </Typography.Text>
           </Space>
         </Form>
       </Card>
 
-      {formChanged && lastResult ? (
-        <Alert
-          style={{ marginBottom: 12 }}
-          type="warning"
-          showIcon
-          message="以下结果是上一查询的结果，当前表单修改尚未提交"
-        />
-      ) : null}
       {mutation.isError ? (
         <Alert
-          style={{ marginBottom: 12 }}
           type="error"
           showIcon
-          message="本次召回请求失败"
+          message="召回失败"
           description={errorMessage(mutation.error)}
-          action={
-            <Button size="small" onClick={() => void mutation.reset()}>
-              清除错误
-            </Button>
-          }
         />
-      ) : null}
-
-      {!lastResult && !mutation.isPending && !mutation.isError ? (
-        <Card>
-          <Empty description="输入关键词或问题，再点击搜索。也可以试试更具体的项目、时间或事项。" />
-        </Card>
       ) : null}
 
       {lastResult ? (
         <>
-          <WarningList codes={lastResult.warnings} title="本次搜索提示" />
-          {!hasResults ? (
-            <Card style={{ marginTop: 12 }}>
-              <Empty description="本次查询已提交，但没有返回任何分区的结果" />
-              {lastRequest ? (
-                <Typography.Text type="secondary">
-                  试着缩短问题、换一个关键词，或减少筛选条件。
-                </Typography.Text>
-              ) : null}
+          {formChanged ? (
+            <Alert
+              type="info"
+              showIcon
+              message="表单已修改，下面仍是上一次提交的结果"
+              style={{ marginTop: 12 }}
+            />
+          ) : null}
+          {!hasResults ? <Empty description="没有召回结果" style={{ marginTop: 24 }} /> : null}
+          <Partition
+            title="L0 原始观察"
+            description="首次提取形成的不可变原始记录。它们不等于已经形成的当前记忆。"
+            empty="没有匹配的原始观察"
+            count={lastResult.observations.length}
+          >
+            {lastResult.observations.map((item) => (
+              <ObservationItemCard key={item.observation.id} item={item} />
+            ))}
+          </Partition>
+          <Partition
+            title="当前规范记忆"
+            description="异步治理后形成的当前视图；已采纳不表示真实性经过外部验证。"
+            empty="没有匹配的当前记忆"
+            count={lastResult.memories.length}
+          >
+            {lastResult.memories.map((item) => (
+              <MemoryItemCard key={`${item.memory.id}:${item.memory.version}`} item={item} />
+            ))}
+          </Partition>
+          {(
+            [
+              ['L1 局部聚合', lastResult.l1, '没有匹配的 L1 聚合'],
+              ['L2 领域聚合', lastResult.l2, '没有匹配的 L2 聚合'],
+              ['L3 全局聚合', lastResult.l3, '没有匹配的 L3 聚合'],
+              ['L4 指导', lastResult.l4, '没有匹配的 L4 指导'],
+            ] as Array<[string, RecallDerivedItem[], string]>
+          ).map(([title, items, empty]) => (
+            <Partition
+              key={title}
+              title={title}
+              description="派生内容由代码保存的依赖驱动，已失效内容默认不作为当前结论返回。"
+              empty={empty}
+              count={items.length}
+            >
+              {items.map((item) => (
+                <DerivedItemCard
+                  key={`${item.artifact.id}:${item.revision.version}`}
+                  item={item}
+                />
+              ))}
+            </Partition>
+          ))}
+
+          {lastResult.relations.length > 0 ? (
+            <Card title={`关系（${lastResult.relations.length}）`} style={{ marginTop: 16 }}>
+              <RelationTable items={lastResult.relations} />
             </Card>
           ) : null}
 
-          <Card
-            title={`记忆（${lastResult.memories.length}）`}
-            style={{ marginTop: 16 }}
-            extra={<Typography.Text type="secondary">按服务端顺序展示</Typography.Text>}
-          >
-            {lastResult.memories.length === 0 ? (
-              <Empty description="没有找到相关记忆，可尝试其他关键词" />
+          <Card title={`冲突（${lastResult.conflicts.length}）`} style={{ marginTop: 16 }}>
+            {lastResult.conflicts.length === 0 ? (
+              <Empty description="没有未决冲突" image={Empty.PRESENTED_IMAGE_SIMPLE} />
             ) : (
-              lastResult.memories.map((item) => <AtomicItem key={item.memory.id} item={item} />)
-            )}
-          </Card>
-          <Card title={`摘要 / 概览 / 偏好与习惯（${lastResult.summaries.length}）`} style={{ marginTop: 16 }}>
-            {lastResult.summaries.length === 0 ? (
-              <Empty description="摘要分区没有结果" />
-            ) : (
-              lastResult.summaries.map((item) => (
-                <DerivedItem key={item.id} item={item} />
-              ))
-            )}
-          </Card>
-          <Card title={`经验案例（${lastResult.experiences.length}）`} style={{ marginTop: 16 }}>
-            {lastResult.experiences.length === 0 ? (
-              <Empty description="经验分区没有结果" />
-            ) : (
-              lastResult.experiences.map((item) => (
-                <DerivedItem key={item.id} item={item} />
-              ))
-            )}
-          </Card>
-          <Card title={`操作指南（${lastResult.skills.length}）`} style={{ marginTop: 16 }}>
-            {lastResult.skills.length === 0 ? (
-              <Empty description="没有找到相关操作指南" />
-            ) : (
-              lastResult.skills.map((item) => <DerivedItem key={item.id} item={item} />)
-            )}
-          </Card>
-          <Card title={`需要核对的内容（${lastResult.conflicts.length}）`} style={{ marginTop: 16 }}>
-            <Table<ConflictSummary>
-              rowKey="id"
-              size="small"
-              columns={conflictColumns}
-              dataSource={lastResult.conflicts}
-              pagination={false}
-              locale={{ emptyText: '没有冲突摘要' }}
-            />
-          </Card>
-          {lastResult.diagnostics ? (
-            <TechnicalDetails label="技术详情与排序诊断"><Card title="排序诊断" style={{ marginTop: 16 }}>
               <Table
-                rowKey="key"
+                rowKey="id"
                 size="small"
+                columns={conflictColumns}
+                dataSource={lastResult.conflicts}
                 pagination={false}
-                dataSource={diagnosticsRows(lastResult.diagnostics)}
-                columns={[
-                  { title: '指标', dataIndex: 'label', width: 220 },
-                  { title: '值', dataIndex: 'value' },
-                ]}
               />
-              <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
-                这些是有界的阶段计数，不是语义正确性证明。
-              </Typography.Paragraph>
-            </Card></TechnicalDetails>
+            )}
+          </Card>
+
+          <WarningList codes={lastResult.warnings} title="本次搜索提示" />
+
+          {lastResult.diagnostics ? (
+            <TechnicalDetails label="检索诊断">
+              <Descriptions size="small" bordered column={{ xs: 1, md: 2, xl: 3 }}>
+                {diagnosticsRows(lastResult.diagnostics).map((row) => (
+                  <Descriptions.Item key={row.key} label={row.label}>
+                    {row.value}
+                  </Descriptions.Item>
+                ))}
+              </Descriptions>
+              {lastRequest ? (
+                <JsonView value={lastRequest} maxHeight={300} emptyText="无请求快照" />
+              ) : null}
+            </TechnicalDetails>
           ) : null}
         </>
       ) : null}
+
+      <Typography.Paragraph type="secondary" style={{ marginTop: 16 }}>
+        L0 观察、当前记忆和 L1-L4 派生内容分区展示；高层内容缺失或失效时不会阻塞下层查询。
+      </Typography.Paragraph>
     </>
   );
 }

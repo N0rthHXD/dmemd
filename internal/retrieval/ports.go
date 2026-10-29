@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/N0rthHXD/dmemd/internal/artifact"
+	"github.com/N0rthHXD/dmemd/internal/governance"
 	"github.com/N0rthHXD/dmemd/internal/memory"
 )
 
@@ -26,6 +27,13 @@ type Searcher interface {
 	Search(ctx context.Context, query Query) ([]Hit, error)
 }
 
+// ObservationSearcher is the keyword L0 read capability implemented by
+// store/sqlite. It is optional so a canonical-memory-only backend can still
+// serve the memories layer.
+type ObservationSearcher interface {
+	SearchObservations(ctx context.Context, query ObservationQuery) ([]ObservationHit, error)
+}
+
 // VectorSearcher is the exact, filtered cosine scan. It only reads vectors whose
 // profile and dimensions match and whose content hash still matches the current
 // derived document.
@@ -40,24 +48,20 @@ type CandidateReader interface {
 	LoadSearchAssemblies(ctx context.Context, keys []VersionKey) (map[VersionKey]Assembly, error)
 }
 
-// AssociationReader is the optional bounded same-fact expansion capability. A
-// backend that does not implement it simply returns main hits only.
-type AssociationReader interface {
-	LoadFactGroupMembers(ctx context.Context, groupIDs []string, limitPerGroup int) (map[string][]Candidate, error)
-}
-
 // VectorReadinessReader is the optional semantic-index readiness probe. It lets
 // an empty vector set report index_not_ready instead of implying irrelevance.
 type VectorReadinessReader interface {
 	CurrentVectorCount(ctx context.Context, profileID string, dimensions int) (documents int, current int, err error)
 }
 
-// ConflictReader loads open conflicts and fact-group timelines for consistent
-// context selection and recall decoration.
+// ConflictReader loads open conflicts for recall decoration.
 type ConflictReader interface {
 	OpenConflictsForMemories(ctx context.Context, memoryIDs []string) ([]memory.Conflict, error)
-	FactTimeline(ctx context.Context, groupID string, limit int) ([]memory.Memory, error)
-	CatalogGeneration(ctx context.Context) (int64, error)
+}
+
+// RelationReader loads typed governance relations for history/conflict recall.
+type RelationReader interface {
+	ListGovernanceRelationsForEndpoint(ctx context.Context, endpointType governance.EndpointType, id string) ([]governance.Relation, error)
 }
 
 // IndexWriter regenerates derived search documents from non-deleted business
@@ -75,7 +79,7 @@ type Backend interface {
 	IndexWriter
 }
 
-// ArtifactSearcher reads active derived versions for unified recall.
+// ArtifactSearcher reads current derived versions for unified recall.
 type ArtifactSearcher interface {
 	Search(ctx context.Context, query artifact.SearchQuery) ([]artifact.SearchHit, error)
 }

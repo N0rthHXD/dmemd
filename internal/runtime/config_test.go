@@ -21,8 +21,10 @@ func TestDefaultConfigMeetsArchitectureDefaults(t *testing.T) {
 	if cfg.Worker.Workers != 1 || cfg.Worker.MaxAttempts != 3 {
 		t.Fatalf("worker defaults = %+v", cfg.Worker)
 	}
-	if cfg.Worker.ProcessBudget.Std() != 600*time.Second || cfg.Worker.ExtractionTimeout.Std() != 180*time.Second || cfg.Worker.DecisionTimeout.Std() != 300*time.Second {
-		t.Fatalf("worker budgets = %+v", cfg.Worker)
+	if cfg.Worker.ExtractionTimeout.Std() != 180*time.Second ||
+		cfg.Worker.GovernanceTimeout.Std() != 60*time.Second ||
+		cfg.Worker.AggregationTimeout.Std() != 60*time.Second {
+		t.Fatalf("worker timeouts = %+v", cfg.Worker)
 	}
 	if len(cfg.Worker.RetryDelays) != 3 ||
 		cfg.Worker.RetryDelays[0].Std() != 5*time.Second ||
@@ -36,6 +38,13 @@ func TestDefaultConfigMeetsArchitectureDefaults(t *testing.T) {
 		cfg.Governance.MinCallInterval.Std() != 2*time.Minute ||
 		cfg.Governance.MaxInputs != 64 {
 		t.Fatalf("governance defaults = %+v", cfg.Governance)
+	}
+	if !cfg.Aggregation.IsEnabled() ||
+		cfg.Aggregation.Debounce.Std() != DefaultAggregationDebounce ||
+		cfg.Aggregation.ReconcileInterval.Std() != DefaultAggregationReconcileInterval ||
+		cfg.Aggregation.MaxInputs != DefaultAggregationMaxInputs ||
+		cfg.Aggregation.L1BucketSize.Std() != 24*time.Hour {
+		t.Fatalf("aggregation defaults = %+v", cfg.Aggregation)
 	}
 	if cfg.Database.BusyTimeout.Std() != 5*time.Second || cfg.Database.MaxReadConnections != 4 {
 		t.Fatalf("database defaults = %+v", cfg.Database)
@@ -80,16 +89,33 @@ func TestEmbeddingConfigValidation(t *testing.T) {
 	}
 }
 
-func TestLoadWorkerBudgetsAndConfigurableAttempts(t *testing.T) {
+func TestLoadWorkerTimeoutsAndConfigurableAttempts(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	writeConfigFile(t, path, `{"worker":{"process_budget":"900s","extraction_timeout":"200s","decision_timeout":"400s","max_attempts":5}}`)
+	writeConfigFile(t, path, `{"worker":{"extraction_timeout":"200s","governance_timeout":"300s","aggregation_timeout":"400s","max_attempts":5}}`)
 	loaded, err := LoadConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	w := loaded.Config.Worker
-	if w.ProcessBudget.Std() != 900*time.Second || w.ExtractionTimeout.Std() != 200*time.Second || w.DecisionTimeout.Std() != 400*time.Second || w.MaxAttempts != 5 {
+	if w.ExtractionTimeout.Std() != 200*time.Second ||
+		w.GovernanceTimeout.Std() != 300*time.Second ||
+		w.AggregationTimeout.Std() != 400*time.Second || w.MaxAttempts != 5 {
 		t.Fatalf("worker=%+v", w)
+	}
+}
+
+func TestLoadAggregationConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeConfigFile(t, path, `{"aggregation":{"enabled":false,"debounce":"2s","reconcile_interval":"3m","max_inputs":8,"l1_bucket_size":"12h"}}`)
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := loaded.Config.Aggregation
+	if a.IsEnabled() || a.Debounce.Std() != 2*time.Second ||
+		a.ReconcileInterval.Std() != 3*time.Minute || a.MaxInputs != 8 ||
+		a.L1BucketSize.Std() != 12*time.Hour {
+		t.Fatalf("aggregation=%+v", a)
 	}
 }
 
@@ -165,8 +191,10 @@ func TestLoadConfigRejectsPublicPermissionsAndMissingExplicitFile(t *testing.T) 
 func TestLoadConfigRejectsUnknownKeysAndTrailingJSON(t *testing.T) {
 	dir := t.TempDir()
 	for name, body := range map[string]string{
-		"unknown":  `{"unknown_field": true}`,
-		"trailing": `{} {}`,
+		"unknown":                `{"unknown_field": true}`,
+		"trailing":               `{} {}`,
+		"removed decision task":  `{"model":{"decision":{"name":"legacy"}}}`,
+		"removed process budget": `{"worker":{"process_budget":"600s"}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(dir, name+".json")
@@ -187,9 +215,11 @@ func TestConfigValidateRejectsArchitectureViolations(t *testing.T) {
 		"non-loopback listen":         func(cfg *Config) { cfg.Listen = "0.0.0.0:18432" },
 		"multiple workers":            func(cfg *Config) { cfg.Worker.Workers = 2 },
 		"zero max attempts":           func(cfg *Config) { cfg.Worker.MaxAttempts = 0 },
-		"zero process budget":         func(cfg *Config) { cfg.Worker.ProcessBudget = 0 },
 		"negative extraction timeout": func(cfg *Config) { cfg.Worker.ExtractionTimeout = -1 },
-		"zero decision timeout":       func(cfg *Config) { cfg.Worker.DecisionTimeout = 0 },
+		"zero governance timeout":     func(cfg *Config) { cfg.Worker.GovernanceTimeout = 0 },
+		"zero aggregation timeout":    func(cfg *Config) { cfg.Worker.AggregationTimeout = 0 },
+		"zero aggregation inputs":     func(cfg *Config) { cfg.Aggregation.MaxInputs = 0 },
+		"zero l1 bucket":              func(cfg *Config) { cfg.Aggregation.L1BucketSize = 0 },
 		"zero model timeout":          func(cfg *Config) { cfg.Model.Timeout = 0 },
 		"bad model URL":               func(cfg *Config) { cfg.Model.BaseURL = "not-a-url" },
 		"bad log level":               func(cfg *Config) { cfg.Log.Level = "verbose" },
@@ -302,19 +332,19 @@ func TestModelTaskOverridesAndRuntimeBounds(t *testing.T) {
 	base.Database.Path = filepath.Join(base.DataDir, "dmemd.db")
 	cfg := base
 	cfg.Model.Extraction = &ModelTaskConfig{Name: "fast-extract", Timeout: Duration(30 * time.Second), ReasoningEffort: "low"}
-	cfg.Model.Decision = &ModelTaskConfig{Name: "deep-decision", Timeout: Duration(90 * time.Second), ReasoningEffort: "high"}
-	cfg.Model.Governance = &ModelTaskConfig{Name: "governance", ReasoningEffort: "minimal"}
+	cfg.Model.Governance = &ModelTaskConfig{Name: "governance", Timeout: Duration(90 * time.Second), ReasoningEffort: "high"}
+	cfg.Model.Aggregation = &ModelTaskConfig{Name: "aggregation", ReasoningEffort: "minimal"}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	if got := cfg.Model.TaskName(cfg.Model.Extraction); got != "fast-extract" {
 		t.Fatalf("extraction task name = %q", got)
 	}
-	if got := cfg.Model.TaskTimeout(cfg.Model.Decision, time.Minute); got != 90*time.Second {
-		t.Fatalf("decision task timeout = %v", got)
+	if got := cfg.Model.TaskTimeout(cfg.Model.Governance, time.Minute); got != 90*time.Second {
+		t.Fatalf("governance task timeout = %v", got)
 	}
-	if got := cfg.Model.TaskReasoning(cfg.Model.Governance); got != "minimal" {
-		t.Fatalf("governance reasoning = %q", got)
+	if got := cfg.Model.TaskReasoning(cfg.Model.Aggregation); got != "minimal" {
+		t.Fatalf("aggregation reasoning = %q", got)
 	}
 	if base.Worker.ExtractionChunkRunes != DefaultExtractionChunkRunes {
 		t.Fatalf("chunk runes = %d", base.Worker.ExtractionChunkRunes)

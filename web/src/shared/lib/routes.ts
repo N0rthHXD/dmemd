@@ -6,6 +6,8 @@ export const routes = {
   memory: (memoryId: string) => `/memories/${id(memoryId)}`,
   memoryVersion: (memoryId: string, version: number) =>
     `/memories/${id(memoryId)}?version=${version}`,
+  observations: '/observations',
+  observation: (observationId: string) => `/observations/${id(observationId)}`,
   recall: '/recall',
   newIngestion: '/ingestions/new',
   jobs: '/jobs',

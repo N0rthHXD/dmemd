@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -26,8 +27,13 @@ type Segment struct {
 
 // View is the deterministic model-facing projection of one source. It contains
 // no internal IDs other than segment IDs and never replaces the stored source.
+//
+// ContextSegments are read-only fragments supplied from an earlier extraction
+// window. They are visible for understanding only and are never valid span
+// targets; ResolveSegments rejects them explicitly.
 type View struct {
-	Segments []Segment `json:"segments"`
+	Segments        []Segment `json:"segments"`
+	ContextSegments []Segment `json:"-"`
 }
 
 // Chunk is a bounded extraction window. Segments keep their source-wide IDs;
@@ -118,47 +124,6 @@ func (v View) Chunks(maxRunes int) []Chunk {
 	return chunks
 }
 
-// EvidenceReference is the model-facing evidence protocol. The model cites a
-// visible segment ID and a verbatim quote. Start and End are optional rune
-// offsets relative to the segment text and are only used to disambiguate a
-// quote that occurs more than once in the same segment.
-type EvidenceReference struct {
-	SegmentID string `json:"segment_id,omitempty"`
-	Quote     string `json:"quote,omitempty"`
-	Start     *int   `json:"start,omitempty"`
-	End       *int   `json:"end,omitempty"`
-}
-
-// Evidence error codes are fixed and safe to return in diagnostics.
-const (
-	EvidenceEmptyQuote     = "evidence_quote_empty"
-	EvidenceSegmentUnknown = "evidence_segment_unknown"
-	EvidenceQuoteNotFound  = "evidence_quote_not_found"
-	EvidenceQuoteAmbiguous = "evidence_quote_ambiguous"
-	EvidenceOffsetsInvalid = "evidence_offsets_invalid"
-)
-
-// EvidenceError describes why a model evidence reference cannot be resolved.
-type EvidenceError struct {
-	Code       string
-	Segment    string
-	Occurrence int
-}
-
-func (e *EvidenceError) Error() string {
-	if e == nil {
-		return "evidence reference invalid"
-	}
-	return fmt.Sprintf("evidence reference invalid: %s", e.Code)
-}
-
-// ResolvedEvidence is a reference mapped back to the stored source.
-type ResolvedEvidence struct {
-	Segment  Segment
-	Location Location
-	Recovery string
-}
-
 const maxSegmentRunes = 4000
 
 // BuildView decodes the source and assigns deterministic segment IDs. Objects
@@ -193,30 +158,157 @@ type segmentPart struct {
 	end   int
 }
 
+// splitSegmentText turns one source string into stable span candidates.
+//
+// Ordinary text is split at sentence and clause boundaries so the model can
+// select independent statements by ID instead of copying a quote. The boundary
+// set follows both Chinese and English punctuation, including the Chinese
+// comma, because it separates independently selectable clauses in the source
+// language. Long text keeps the bounded-window strategy: a single field must
+// never bypass the maximum window size.
 func splitSegmentText(text string) []segmentPart {
 	runes := []rune(text)
 	if len(runes) == 0 {
-		return []segmentPart{{text: "", start: 0, end: 0}}
+		return nil
 	}
+	if len(runes) > maxSegmentRunes {
+		return splitLongSegmentText(runes)
+	}
+	return splitClauses(runes)
+}
+
+// splitClauses splits a bounded string into sentence-level or clause-level
+// parts. Start and End are rune offsets in the original field, so a selected
+// span maps back to its exact source position.
+func splitClauses(runes []rune) []segmentPart {
+	parts := make([]segmentPart, 0, 8)
+	start := 0
+	for index := 0; index < len(runes); {
+		if !isClauseBoundary(runes, index) {
+			index++
+			continue
+		}
+		end := index
+		for end < len(runes) {
+			if isClauseBoundary(runes, end) {
+				end++
+				continue
+			}
+			// Keep a closing quote or bracket with the clause it closes.
+			if isClosingPunctuation(runes[end]) {
+				end++
+				continue
+			}
+			if unicode.IsSpace(runes[end]) {
+				look := end
+				for look < len(runes) && unicode.IsSpace(runes[look]) {
+					look++
+				}
+				if look < len(runes) && isClosingPunctuation(runes[look]) {
+					end = look
+					continue
+				}
+			}
+			break
+		}
+		if part, ok := trimSegmentPart(runes, start, end); ok {
+			parts = append(parts, part)
+		}
+		start = end
+		index = end
+	}
+	if part, ok := trimSegmentPart(runes, start, len(runes)); ok {
+		parts = append(parts, part)
+	}
+	return parts
+}
+
+// splitLongSegmentText keeps the fixed maximum rune window. A boundary in the
+// second half of the window is preferred so a sentence is not split without
+// need, but the hard limit always wins.
+func splitLongSegmentText(runes []rune) []segmentPart {
 	parts := make([]segmentPart, 0, (len(runes)+maxSegmentRunes-1)/maxSegmentRunes)
 	for start := 0; start < len(runes); {
 		end := start + maxSegmentRunes
 		if end > len(runes) {
 			end = len(runes)
 		} else {
-			// Prefer a sentence boundary in the second half of the window.
 			lower := start + maxSegmentRunes/2
 			for index := end; index > lower; index-- {
-				if strings.ContainsRune("。！？!?；;\n", runes[index-1]) {
+				if isLongWindowBoundary(runes[index-1]) {
 					end = index
 					break
 				}
 			}
 		}
-		parts = append(parts, segmentPart{text: string(runes[start:end]), start: start, end: end})
+		if part, ok := trimSegmentPart(runes, start, end); ok {
+			parts = append(parts, part)
+		}
 		start = end
 	}
 	return parts
+}
+
+// isClauseBoundary reports whether the rune at index ends an independently
+// selectable clause. An ASCII period only ends a clause at a real boundary, so
+// decimals, versions and file names stay intact.
+func isClauseBoundary(runes []rune, index int) bool {
+	switch runes[index] {
+	case '。', '！', '？', '；', '，', '\n', '\r', '!', '?', ';':
+		return true
+	case '.':
+		if index+1 >= len(runes) {
+			return true
+		}
+		next := runes[index+1]
+		return unicode.IsSpace(next) || isClosingPunctuation(next)
+	default:
+		return false
+	}
+}
+
+func isLongWindowBoundary(value rune) bool {
+	switch value {
+	case '。', '！', '？', '；', '，', '\n', '\r', '!', '?', ';':
+		return true
+	default:
+		return false
+	}
+}
+
+func isClosingPunctuation(value rune) bool {
+	switch value {
+	case '”', '’', '」', '』', '）', ')', ']', '}', '》', '〉', '】', '〕', '"', '\'':
+		return true
+	default:
+		return false
+	}
+}
+
+// trimSegmentPart removes surrounding whitespace while keeping rune offsets
+// aligned with the original field. Fragments with no letters or digits are not
+// useful span targets and are dropped rather than persisted as empty evidence.
+func trimSegmentPart(runes []rune, start, end int) (segmentPart, bool) {
+	for start < end && unicode.IsSpace(runes[start]) {
+		start++
+	}
+	for end > start && unicode.IsSpace(runes[end-1]) {
+		end--
+	}
+	if start >= end {
+		return segmentPart{}, false
+	}
+	meaningful := false
+	for _, value := range runes[start:end] {
+		if unicode.IsLetter(value) || unicode.IsDigit(value) {
+			meaningful = true
+			break
+		}
+	}
+	if !meaningful {
+		return segmentPart{}, false
+	}
+	return segmentPart{text: string(runes[start:end]), start: start, end: end}, true
 }
 
 type messageContext struct {
@@ -338,139 +430,4 @@ func (v View) Segment(id string) (Segment, bool) {
 		}
 	}
 	return Segment{}, false
-}
-
-// ContainsQuote reports whether the quote occurs verbatim inside one segment.
-// It never concatenates unrelated segments, so a match cannot span a message
-// or field boundary.
-func (v View) ContainsQuote(quote string) bool {
-	if strings.TrimSpace(quote) == "" {
-		return false
-	}
-	for _, segment := range v.Segments {
-		if strings.Contains(segment.Text, quote) {
-			return true
-		}
-	}
-	return false
-}
-
-// Resolve maps a model evidence reference to a persisted-able location. A
-// missing segment ID is recovered only when the quote has exactly one exact
-// occurrence across the whole view. An unknown segment ID is never guessed.
-func (v View) Resolve(reference EvidenceReference) (ResolvedEvidence, error) {
-	if strings.TrimSpace(reference.Quote) == "" {
-		return ResolvedEvidence{}, &EvidenceError{Code: EvidenceEmptyQuote, Segment: reference.SegmentID}
-	}
-	if reference.SegmentID == "" {
-		segment, start, end, total := v.uniqueQuote(reference.Quote)
-		if total == 0 {
-			return ResolvedEvidence{}, &EvidenceError{Code: EvidenceQuoteNotFound}
-		}
-		if total > 1 {
-			return ResolvedEvidence{}, &EvidenceError{Code: EvidenceQuoteAmbiguous}
-		}
-		return resolved(segment, start, end, "unique_quote"), nil
-	}
-	segment, ok := v.Segment(reference.SegmentID)
-	if !ok {
-		return ResolvedEvidence{}, &EvidenceError{Code: EvidenceSegmentUnknown, Segment: reference.SegmentID}
-	}
-	start, end, err := locateInSegment(segment, reference)
-	if err != nil {
-		return ResolvedEvidence{}, err
-	}
-	return resolved(segment, start, end, ""), nil
-}
-
-func (v View) uniqueQuote(quote string) (Segment, int, int, int) {
-	var found Segment
-	start, end, total := 0, 0, 0
-	for _, segment := range v.Segments {
-		for _, occurrence := range quoteOccurrences(segment.Text, quote) {
-			total++
-			if total == 1 {
-				found = segment
-				start = occurrence
-				end = occurrence + utf8.RuneCountInString(quote)
-			}
-		}
-	}
-	return found, start, end, total
-}
-
-func locateInSegment(segment Segment, reference EvidenceReference) (int, int, error) {
-	quoteRunes := []rune(reference.Quote)
-	runeText := []rune(segment.Text)
-	quoteLength := len(quoteRunes)
-	switch {
-	case reference.Start != nil && reference.End != nil:
-		start, end := *reference.Start, *reference.End
-		if start < 0 || end < start || end > len(runeText) || end-start != quoteLength ||
-			string(runeText[start:end]) != reference.Quote {
-			return 0, 0, &EvidenceError{Code: EvidenceOffsetsInvalid, Segment: segment.ID}
-		}
-		return start, end, nil
-	case reference.Start != nil:
-		start := *reference.Start
-		end := start + quoteLength
-		if start < 0 || end > len(runeText) || string(runeText[start:end]) != reference.Quote {
-			return 0, 0, &EvidenceError{Code: EvidenceOffsetsInvalid, Segment: segment.ID}
-		}
-		return start, end, nil
-	case reference.End != nil:
-		end := *reference.End
-		start := end - quoteLength
-		if start < 0 || end > len(runeText) || string(runeText[start:end]) != reference.Quote {
-			return 0, 0, &EvidenceError{Code: EvidenceOffsetsInvalid, Segment: segment.ID}
-		}
-		return start, end, nil
-	default:
-		occurrences := quoteOccurrences(segment.Text, reference.Quote)
-		switch len(occurrences) {
-		case 0:
-			return 0, 0, &EvidenceError{Code: EvidenceQuoteNotFound, Segment: segment.ID}
-		case 1:
-			return occurrences[0], occurrences[0] + quoteLength, nil
-		default:
-			return 0, 0, &EvidenceError{Code: EvidenceQuoteAmbiguous, Segment: segment.ID, Occurrence: len(occurrences)}
-		}
-	}
-}
-
-func quoteOccurrences(text, quote string) []int {
-	if quote == "" {
-		return nil
-	}
-	runes := []rune(text)
-	needle := []rune(quote)
-	if len(needle) == 0 || len(needle) > len(runes) {
-		return nil
-	}
-	result := make([]int, 0, 1)
-	for start := 0; start+len(needle) <= len(runes); start++ {
-		matched := true
-		for offset := range needle {
-			if runes[start+offset] != needle[offset] {
-				matched = false
-				break
-			}
-		}
-		if matched {
-			result = append(result, start)
-		}
-	}
-	return result
-}
-
-func resolved(segment Segment, start, end int, recovery string) ResolvedEvidence {
-	return ResolvedEvidence{
-		Segment: segment,
-		Location: Location{
-			Field: segment.Field,
-			Start: segment.Start + start,
-			End:   segment.Start + end,
-		},
-		Recovery: recovery,
-	}
 }

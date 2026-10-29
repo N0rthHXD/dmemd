@@ -10,12 +10,13 @@ import (
 	"time"
 
 	"github.com/N0rthHXD/dmemd/internal/memory"
+	"github.com/N0rthHXD/dmemd/internal/observation"
 	"github.com/N0rthHXD/dmemd/internal/source"
 )
 
-// Service implements keyword search, hybrid search, background related-memory
-// selection and index maintenance over the same normalization rules used by the
-// write path.
+// Service implements keyword search, hybrid search and index maintenance over
+// the same normalization rules used by the write path. Layered recall is
+// implemented in recall.go and never waits for governance or aggregation.
 type Service struct {
 	backend      Backend
 	documents    memory.DocumentBuilder
@@ -57,8 +58,8 @@ func WithSemantic(encoder QueryEncoder) Option {
 }
 
 // WithArtifacts installs the derived-layer search capability. A nil value
-// preserves atomic-only assembly, while the unified recall still returns empty
-// derived partitions as required by the contract.
+// preserves canonical-only assembly while recall still returns empty derived
+// partitions.
 func WithArtifacts(searcher ArtifactSearcher) Option {
 	return func(service *Service) {
 		if searcher != nil {
@@ -88,12 +89,13 @@ func NewService(backend Backend, documents memory.DocumentBuilder, options ...Op
 
 var (
 	_ SearchService   = (*Service)(nil)
-	_ RelatedService  = (*Service)(nil)
+	_ RecallService   = (*Service)(nil)
 	_ IndexMaintainer = (*Service)(nil)
 )
 
-// Search runs one Top-K query. Input without effective terms (empty,
-// punctuation-only or stopword-only) returns empty without querying any backend.
+// Search runs one canonical-memory Top-K query. Input without effective terms
+// (empty, punctuation-only or stopword-only) returns empty without querying any
+// backend.
 func (s *Service) Search(ctx context.Context, request Request) (Result, error) {
 	mode, err := normalizeMode(request.Mode)
 	if err != nil {
@@ -105,10 +107,6 @@ func (s *Service) Search(ctx context.Context, request Request) (Result, error) {
 	}
 	groups := queryGroups(request.Query)
 	filters, filtersOK := sanitizeFilters(request.Filters)
-	if filters.AsOf == nil && filters.EventAt == nil {
-		asOf := time.Now().UTC()
-		filters.AsOf = &asOf
-	}
 	var diagnostics *SearchDiagnostics
 	if request.Explain {
 		diagnostics = &SearchDiagnostics{}
@@ -130,17 +128,10 @@ func (s *Service) Search(ctx context.Context, request Request) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	// Fold duplicate primary expressions before association so repeated copies
-	// cannot consume the small budget reserved for related context.
-	result.Items = clusterDisplayItems(result.Items)
-	if err := s.expandAssociations(ctx, &result, groups, filters, topK, diagnostics); err != nil {
-		return Result{}, err
-	}
 	result, err = s.decorateConflicts(ctx, result, groups, filters)
 	if err != nil {
 		return Result{}, err
 	}
-	result.Items = clusterDisplayItems(result.Items)
 	if diagnostics != nil {
 		s.populateFilterDiagnostics(ctx, groups, filters, diagnostics)
 		diagnostics.ReturnedItems = len(result.Items)
@@ -149,113 +140,32 @@ func (s *Service) Search(ctx context.Context, request Request) (Result, error) {
 	return result, nil
 }
 
-// RelatedContext selects bounded consistency context for one candidate fact.
-// It deliberately bypasses the public current-time filter so historical,
-// pending and archived assertions can be judged.
-func (s *Service) RelatedContext(ctx context.Context, scopeKey, text string, limit int) (ContextResult, error) {
-	if limit <= 0 {
-		limit = DefaultRelatedLimit
+// RebuildIndex regenerates search documents from current business snapshots and
+// rebuilds both canonical-memory and L0-observation FTS. With semantic
+// retrieval enabled, unchanged documents reuse valid vectors and missing or
+// mismatched vectors receive durable background tasks. The store commits all
+// rows or rolls back; a failed rebuild is never reported as success.
+func (s *Service) RebuildIndex(ctx context.Context) (RebuildResult, error) {
+	started := time.Now()
+	if s.documents == nil {
+		err := ErrDocumentBuilderMissing
+		s.logger.Warn("search index rebuild failed", "error", err)
+		return RebuildResult{Duration: time.Since(started)}, err
 	}
-	groups := queryGroups(text)
-	if len(groups) > MaxRelatedQueryGroups {
-		groups = groups[:MaxRelatedQueryGroups]
-	}
-	if len(groups) == 0 {
-		return ContextResult{Memories: []memory.Memory{}, Complete: true}, nil
-	}
-	contextFilters := Filters{
-		States:          []memory.State{memory.StateActive, memory.StateArchived},
-		AssertionStatus: []memory.AssertionStatus{memory.AssertionAccepted, memory.AssertionPending},
-		ScopeKey:        scopeKey,
-	}
-	result, err := s.searchKeyword(ctx, groups, Request{}, contextFilters, limit+1, nil, false, nil)
+	indexed, err := s.backend.RebuildSearchDocuments(ctx, s.documents)
 	if err != nil {
-		return ContextResult{}, err
+		s.logger.Warn("search index rebuild failed",
+			"error", err,
+			"duration_ms", time.Since(started).Milliseconds(),
+		)
+		return RebuildResult{Duration: time.Since(started)}, err
 	}
-	items := make([]memory.Memory, 0, len(result.Items))
-	seen := make(map[string]struct{}, len(result.Items))
-	for _, item := range result.Items {
-		items = append(items, item.Memory)
-		seen[item.Memory.ID] = struct{}{}
-	}
-	warnings := []string{}
-	if s.encoder != nil {
-		// Semantic recall only supplements keyword context. A failure keeps the
-		// keyword context and records a stable degradation warning.
-		hits, warning, err := s.semanticCandidates(ctx, text, contextFilters, limit)
-		if err != nil {
-			return ContextResult{}, err
-		}
-		if warning != "" {
-			warnings = append(warnings, warning)
-		}
-		if len(hits) > 0 {
-			ids := make([]string, 0, len(hits))
-			for _, hit := range hits {
-				ids = append(ids, hit.MemoryID)
-			}
-			candidates, err := s.backend.LoadSearchCandidates(ctx, ids)
-			if err != nil {
-				return ContextResult{}, err
-			}
-			for _, hit := range hits {
-				candidate, ok := candidates[hit.MemoryID]
-				if !ok || candidate.Memory.State == memory.StateDeleted {
-					continue
-				}
-				if _, duplicate := seen[candidate.Memory.ID]; duplicate {
-					continue
-				}
-				seen[candidate.Memory.ID] = struct{}{}
-				items = append(items, candidate.Memory)
-			}
-		}
-	}
-	complete := len(items) <= limit
-	if len(items) > limit {
-		items = items[:limit]
-	}
-	return ContextResult{Memories: items, Complete: complete, Warnings: warnings}, nil
-}
-
-// FactTimeline returns the bounded timeline of one fact group.
-func (s *Service) FactTimeline(ctx context.Context, groupID string, limit int) (ContextResult, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	items, err := s.backend.FactTimeline(ctx, groupID, limit)
-	if err != nil {
-		return ContextResult{}, err
-	}
-	complete := len(items) <= limit
-	if len(items) > limit {
-		items = items[:limit]
-	}
-	return ContextResult{Memories: items, Complete: complete}, nil
-}
-
-// OpenConflictsForMemories exposes read-pool conflict discovery to ingest.
-func (s *Service) OpenConflictsForMemories(ctx context.Context, memoryIDs []string) ([]memory.Conflict, error) {
-	return s.backend.OpenConflictsForMemories(ctx, memoryIDs)
-}
-
-// MemoriesByIDs loads exact current snapshots for conflict-member context.
-func (s *Service) MemoriesByIDs(ctx context.Context, ids []string) ([]memory.Memory, error) {
-	candidates, err := s.backend.LoadSearchCandidates(ctx, ids)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]memory.Memory, 0, len(candidates))
-	for _, candidate := range candidates {
-		result = append(result, candidate.Memory)
-	}
+	result := RebuildResult{Indexed: indexed, Duration: time.Since(started)}
+	s.logger.Info("search index rebuilt",
+		"indexed", result.Indexed,
+		"duration_ms", result.Duration.Milliseconds(),
+	)
 	return result, nil
-}
-
-// CatalogGeneration returns the semantic catalog version used for optimistic
-// checks around a model call.
-func (s *Service) CatalogGeneration(ctx context.Context) (int64, error) {
-	return s.backend.CatalogGeneration(ctx)
 }
 
 // decorateConflicts runs an independent conflict discovery path over accepted
@@ -273,10 +183,6 @@ func (s *Service) decorateConflicts(ctx context.Context, result Result, groups [
 			result.Items[index].ConflictRefs = []memory.ConflictRef{}
 		}
 	}
-	if filters.AsOf == nil {
-		return result, nil
-	}
-	asOf := *filters.AsOf
 	expression, err := Compile(groups)
 	if err != nil {
 		return Result{}, err
@@ -306,7 +212,7 @@ func (s *Service) decorateConflicts(ctx context.Context, result Result, groups [
 	if err != nil {
 		return Result{}, err
 	}
-	relevant, candidateByID, truncated, err := s.relevantConflicts(ctx, conflicts, asOf)
+	relevant, candidates, truncated, err := s.relevantConflicts(ctx, conflicts)
 	if err != nil {
 		return Result{}, err
 	}
@@ -320,7 +226,8 @@ func (s *Service) decorateConflicts(ctx context.Context, result Result, groups [
 		memberIDs := make([]string, 0, len(conflict.Members))
 		for _, member := range conflict.Members {
 			memberIDs = append(memberIDs, member.MemoryID)
-			if candidate, ok := candidateByID[member.MemoryID]; ok && candidate.Memory.AssertionStatus == memory.AssertionAccepted {
+			if candidate, ok := candidates[member.MemoryID]; ok &&
+				candidate.Memory.AssertionStatus == memory.AssertionAccepted {
 				hasAccepted = true
 			}
 			byMemory[member.MemoryID] = append(byMemory[member.MemoryID], memory.ConflictRef{
@@ -333,7 +240,6 @@ func (s *Service) decorateConflicts(ctx context.Context, result Result, groups [
 			ReasonCode:  conflict.ReasonCode,
 			MemberIDs:   memberIDs,
 			HasAccepted: hasAccepted,
-			FactGroupID: conflict.FactGroupID,
 		})
 	}
 	for index := range result.Items {
@@ -349,7 +255,7 @@ func (s *Service) decorateConflicts(ctx context.Context, result Result, groups [
 	return result, nil
 }
 
-func (s *Service) relevantConflicts(ctx context.Context, conflicts []memory.Conflict, asOf time.Time) ([]memory.Conflict, map[string]Candidate, bool, error) {
+func (s *Service) relevantConflicts(ctx context.Context, conflicts []memory.Conflict) ([]memory.Conflict, map[string]Candidate, bool, error) {
 	if len(conflicts) == 0 {
 		return nil, nil, false, nil
 	}
@@ -376,7 +282,7 @@ func (s *Service) relevantConflicts(ctx context.Context, conflicts []memory.Conf
 			if item.AssertionStatus != memory.AssertionAccepted && item.AssertionStatus != memory.AssertionPending {
 				continue
 			}
-			if item.State != memory.StateDeleted && memory.Contains(item.ValidFrom, item.ValidTo, asOf) {
+			if item.State != memory.StateDeleted {
 				relates = true
 				break
 			}
@@ -390,34 +296,6 @@ func (s *Service) relevantConflicts(ctx context.Context, conflicts []memory.Conf
 		relevant = relevant[:20]
 	}
 	return relevant, candidates, truncated, nil
-}
-
-// RebuildIndex regenerates search documents from current business snapshots and
-// rebuilds FTS. With semantic retrieval enabled, unchanged documents reuse
-// valid vectors and missing or mismatched vectors receive durable background
-// tasks. The store commits all rows or rolls back; a failed rebuild is never
-// reported as success.
-func (s *Service) RebuildIndex(ctx context.Context) (RebuildResult, error) {
-	started := time.Now()
-	if s.documents == nil {
-		err := ErrDocumentBuilderMissing
-		s.logger.Warn("search index rebuild failed", "error", err)
-		return RebuildResult{Duration: time.Since(started)}, err
-	}
-	indexed, err := s.backend.RebuildSearchDocuments(ctx, s.documents)
-	if err != nil {
-		s.logger.Warn("search index rebuild failed",
-			"error", err,
-			"duration_ms", time.Since(started).Milliseconds(),
-		)
-		return RebuildResult{Duration: time.Since(started)}, err
-	}
-	result := RebuildResult{Indexed: indexed, Duration: time.Since(started)}
-	s.logger.Info("search index rebuilt",
-		"indexed", result.Indexed,
-		"duration_ms", result.Duration.Milliseconds(),
-	)
-	return result, nil
 }
 
 func (s *Service) searchKeyword(ctx context.Context, groups []Group, request Request, filters Filters, topK int, warnings []string, optimize bool, diagnostics *SearchDiagnostics) (Result, error) {
@@ -718,6 +596,16 @@ func sanitizeFilters(input Filters) (Filters, bool) {
 			return Filters{}, false
 		}
 	}
+
+	output.ObservationStatuses = nil
+	for _, status := range input.ObservationStatuses {
+		if status == observation.StatusObserved || status == observation.StatusPending {
+			output.ObservationStatuses = append(output.ObservationStatuses, status)
+		}
+	}
+	if len(output.ObservationStatuses) == 0 {
+		output.ObservationStatuses = []observation.Status{observation.StatusObserved}
+	}
 	return output, true
 }
 
@@ -726,9 +614,6 @@ func matchesFilters(item memory.Memory, filters Filters) bool {
 		return false
 	}
 	if len(filters.Kinds) > 0 && !containsKind(filters.Kinds, item.Kind) {
-		return false
-	}
-	if filters.CreatedByApp != "" && item.CreatedByApp != filters.CreatedByApp {
 		return false
 	}
 	if filters.UpdatedAfter != nil && item.UpdatedAt.Before(*filters.UpdatedAfter) {
@@ -741,12 +626,6 @@ func matchesFilters(item memory.Memory, filters Filters) bool {
 		return false
 	}
 	if filters.ScopeKey != "" && item.ScopeKey != filters.ScopeKey && item.ScopeKey != "user" {
-		return false
-	}
-	if filters.AsOf != nil && !memory.Contains(item.ValidFrom, item.ValidTo, *filters.AsOf) {
-		return false
-	}
-	if filters.EventAt != nil && (item.Kind != memory.KindEvent || !memory.EventContains(item, *filters.EventAt)) {
 		return false
 	}
 	return true

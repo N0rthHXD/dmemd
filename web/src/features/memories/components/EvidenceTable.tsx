@@ -48,10 +48,10 @@ const columns: ColumnsType<Evidence> = [
       ),
   },
   {
-    title: '提取信息',
-    dataIndex: 'model_name',
+    title: '技术详情',
+    dataIndex: 'id',
     width: 150,
-    render: (_, item) => <TechnicalDetails label="技术详情"><IdText value={item.id} /><div>{item.model_name || '未提供模型信息'}</div></TechnicalDetails>,
+    render: (_, item) => <TechnicalDetails label="技术详情"><IdText value={item.id} /></TechnicalDetails>,
   },
   {
     title: '创建 / 清除',

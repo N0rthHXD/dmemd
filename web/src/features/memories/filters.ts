@@ -44,8 +44,6 @@ export function readMemoryFilters(params: URLSearchParams): MemoryListFilters {
       csv(params, 'assertion_status'),
       assertionStatuses,
     ),
-    factGroupId: params.get('fact_group_id') ?? '',
-    createdByApp: params.get('created_by_app') ?? '',
     updatedAfter: fromRFC3339(updatedAfter) ? updatedAfter : undefined,
     updatedBefore: fromRFC3339(updatedBefore) ? updatedBefore : undefined,
     limit,
@@ -62,12 +60,6 @@ export function writeMemoryFilters(filters: MemoryListFilters): URLSearchParams 
   }
   if (filters.assertionStatuses.length > 0) {
     params.set('assertion_status', [...filters.assertionStatuses].sort().join(','));
-  }
-  if (filters.factGroupId.trim()) {
-    params.set('fact_group_id', filters.factGroupId.trim());
-  }
-  if (filters.createdByApp.trim()) {
-    params.set('created_by_app', filters.createdByApp.trim());
   }
   if (filters.updatedAfter) {
     params.set('updated_after', filters.updatedAfter);
@@ -86,8 +78,6 @@ export function defaultMemoryFilters(): MemoryListFilters {
     kinds: [],
     states: [],
     assertionStatuses: [],
-    factGroupId: '',
-    createdByApp: '',
     limit: 50,
   };
 }
@@ -97,8 +87,6 @@ export function isDefaultMemoryFilters(filters: MemoryListFilters): boolean {
     filters.kinds.length === 0 &&
     filters.states.length === 0 &&
     filters.assertionStatuses.length === 0 &&
-    !filters.factGroupId.trim() &&
-    !filters.createdByApp.trim() &&
     !filters.updatedAfter &&
     !filters.updatedBefore &&
     filters.limit === 50

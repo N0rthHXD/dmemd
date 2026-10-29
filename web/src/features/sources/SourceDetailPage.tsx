@@ -23,14 +23,17 @@ import { formatTimestamp, timestampTitle } from '../../shared/lib/time';
 import { DangerActionDialog } from '../../shared/ui/DangerActionDialog';
 import { IdText } from '../../shared/ui/IdText';
 import { SourceContent } from '../../shared/ui/SourceContent';
+import { StatusTag } from '../../shared/ui/StatusTag';
 import { TechnicalDetails } from '../../shared/ui/TechnicalDetails';
 import { RemovalSummary } from '../../shared/ui/RemovalSummary';
 import { forgetSource, redactSource } from './api';
 import { useSource } from './queries';
+import { useObservations } from '../observations/queries';
 
 export default function SourceDetailPage() {
   const { id = '' } = useParams();
   const source = useSource(id);
+  const observations = useObservations({ sourceId: id, scopeKey: '', limit: 50 });
   const queryClient = useQueryClient();
   const { message, modal } = App.useApp();
   const [redactResult, setRedactResult] = useState<RedactResponse | null>(null);
@@ -107,14 +110,6 @@ export default function SourceDetailPage() {
           </Descriptions.Item>
           <Descriptions.Item label="实际删除报告 ID">
             {forgetResult.experience_ids.length ? forgetResult.experience_ids.join('、') : '无'}
-          </Descriptions.Item>
-          <Descriptions.Item label="警告">
-            {forgetResult.warnings?.length ? forgetResult.warnings.join('、') : '无'}
-          </Descriptions.Item>
-          <Descriptions.Item label="保留的相关记忆">
-            {forgetResult.retained_related_memory_ids?.length
-              ? forgetResult.retained_related_memory_ids.join('、')
-              : '无'}
           </Descriptions.Item>
         </Descriptions></TechnicalDetails>
       </Result>
@@ -199,6 +194,66 @@ export default function SourceDetailPage() {
         <TechnicalDetails label="来源编号"><IdText value={data.id} /><Typography.Paragraph>外部记录编号：{data.external_id || '未提供'}</Typography.Paragraph></TechnicalDetails>
       </Card>
 
+      <Card title={`由该来源形成的 L0 观察（${observations.data?.length ?? 0}）`} style={{ marginBottom: 16 }}>
+        {observations.isError ? (
+          <Alert type="error" showIcon message={errorMessage(observations.error)} />
+        ) : observations.data && observations.data.length > 0 ? (
+          <Space direction="vertical" size={8} style={{ width: '100%' }}>
+            {observations.data.map((item) => (
+              <Card key={item.id} size="small" type="inner">
+                <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                  <Space wrap>
+                    <Link to={routes.observation(item.id)}>
+                      <Typography.Text>{item.content}</Typography.Text>
+                    </Link>
+                    <StatusTag category="memoryKind" value={item.kind} />
+                    <StatusTag category="observationStatus" value={item.status} />
+                  </Space>
+                  <Typography.Text type="secondary">
+                    {item.content_mode} · {item.scope_key || '范围未知'}
+                  </Typography.Text>
+                </Space>
+              </Card>
+            ))}
+          </Space>
+        ) : (
+          <Typography.Text type="secondary">
+            还没有形成可展示的观察；提取任务可能尚未完成。
+          </Typography.Text>
+        )}
+        <Typography.Paragraph type="secondary" style={{ marginBottom: 0, marginTop: 12 }}>
+          清除来源原文会撤回或删除这些观察，并使依赖它们的当前记忆和派生内容失效；已经形成的记忆正文不会因为清除原文而被自动重写。
+        </Typography.Paragraph>
+      </Card>
+
+      <Card title={`稳定 Span（${data.segments.length}）`} style={{ marginBottom: 16 }}>
+        {data.segments.length > 0 ? (
+          <Descriptions size="small" bordered column={1}>
+            {data.segments.map((segment) => (
+              <Descriptions.Item
+                key={segment.segment_id}
+                label={<IdText value={segment.segment_id} maxWidth={160} />}
+              >
+                <Space direction="vertical" size={2} style={{ width: '100%' }}>
+                  <Typography.Text style={{ whiteSpace: 'pre-wrap' }}>{segment.text}</Typography.Text>
+                  <Typography.Text type="secondary">
+                    {segment.role || '角色未知'} · {segment.field || '字段未知'} · [{segment.start}, {segment.end})
+                    {segment.message_id ? ` · message ${segment.message_id}` : ''}
+                  </Typography.Text>
+                </Space>
+              </Descriptions.Item>
+            ))}
+          </Descriptions>
+        ) : (
+          <Alert
+            type="info"
+            showIcon
+            message={isRedacted ? '原文已清除，无法重建 span' : '没有可展示的 span'}
+            description="span 由来源内容和遍历顺序确定性生成；模型只能选择 span ID，不能提供原文或偏移。"
+          />
+        )}
+      </Card>
+
       <Card title="原始内容" style={{ marginBottom: 16 }}>
         {isRedacted ? (
           <Alert
@@ -228,6 +283,14 @@ export default function SourceDetailPage() {
             <Descriptions.Item label="已清除">{String(redactResult.redacted)}</Descriptions.Item>
             <Descriptions.Item label="取消的未完成任务">
               {redactResult.cancelled_jobs}
+            </Descriptions.Item>
+            <Descriptions.Item label="撤回的观察数">
+              {redactResult.retracted_observations}
+            </Descriptions.Item>
+            <Descriptions.Item label="失效的派生内容">
+              {redactResult.invalidated_derived_ids.length > 0
+                ? redactResult.invalidated_derived_ids.join('、')
+                : '无'}
             </Descriptions.Item>
           </Descriptions>
           <Alert

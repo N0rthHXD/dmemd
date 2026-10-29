@@ -9,18 +9,18 @@ package governance
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
 	"github.com/N0rthHXD/dmemd/internal/governance/task"
 	"github.com/N0rthHXD/dmemd/internal/memory"
+	"github.com/N0rthHXD/dmemd/internal/observation"
 	"github.com/N0rthHXD/dmemd/internal/source"
 )
 
 // ErrRevisionChanged means another transaction changed the task target after it
 // was claimed. The worker discards the result; it never overwrites newer state.
-var ErrRevisionChanged = errors.New("governance task revision changed")
+var ErrRevisionChanged = task.ErrRevisionChanged
 
 // RetryError asks the worker to wait until At before trying the same task again.
 // It is used for call throttling and is not counted as a protocol failure.
@@ -51,6 +51,30 @@ type MemoryReader interface {
 	GetMemory(ctx context.Context, id string) (memory.Memory, error)
 }
 
+// ObservationGovernanceReader is the bounded read capability used before an
+// observation governance model call. It deliberately exposes candidate
+// selection primitives instead of a general database scan.
+type ObservationGovernanceReader interface {
+	GetObservation(ctx context.Context, id string) (observation.Observation, error)
+	GetSource(ctx context.Context, id string) (source.Source, error)
+	GetMemory(ctx context.Context, id string) (memory.Memory, error)
+	ListObservationEvidence(ctx context.Context, observationID string) ([]source.Evidence, error)
+	ListObservationsBySource(ctx context.Context, sourceID string) ([]observation.Observation, error)
+	ListMemoryIDsForObservation(ctx context.Context, observationID string) ([]string, error)
+	ListMemoryCandidates(ctx context.Context, scopeKey string, limit int) ([]memory.Memory, error)
+	ListMemoryObservationRefs(ctx context.Context, memoryID string, version int) ([]string, error)
+	ListGovernanceRelationsForEndpoint(ctx context.Context, endpointType EndpointType, id string) ([]Relation, error)
+	ListOpenConflictsForMemories(ctx context.Context, memoryIDs []string) ([]memory.Conflict, error)
+}
+
+// RelationReader is the typed relation read capability exposed by the relation
+// management service.
+type RelationReader interface {
+	ListGovernanceRelationsForEndpoint(ctx context.Context, endpointType EndpointType, id string) ([]Relation, error)
+	ListGovernanceRelationsBetween(ctx context.Context, fromType EndpointType, fromID string,
+		toType EndpointType, toID string) ([]Relation, error)
+}
+
 // ExperienceTx persists application-reported results and reads the bounded
 // inputs used by case and skill generation.
 type ExperienceTx interface {
@@ -67,12 +91,12 @@ type ExperienceTx interface {
 // before any foreign-key cascade removes an edge.
 type ForgetTx interface {
 	ListMemoryIDsForSource(ctx context.Context, sourceID string) ([]string, error)
-	ListForgetGroupMemories(ctx context.Context, groupID string) ([]memory.Memory, error)
 	DeleteForgetConflicts(ctx context.Context, memoryID string, now time.Time) error
 	ListExperienceIDsForSource(ctx context.Context, sourceID string) ([]string, error)
 	DeleteExperienceRun(ctx context.Context, experienceID string) error
 	DeleteIngestJobsBySource(ctx context.Context, sourceID string) error
 	DeleteEvidenceBySource(ctx context.Context, sourceID string) error
+	DeleteObservationsBySource(ctx context.Context, sourceID string) error
 	DeleteSource(ctx context.Context, sourceID string) error
 }
 
@@ -84,6 +108,20 @@ type Tx interface {
 	ExperienceTx
 	ForgetTx
 	source.SourceTx
+
+	GetObservation(ctx context.Context, id string) (observation.Observation, error)
+	ListObservationsBySource(ctx context.Context, sourceID string) ([]observation.Observation, error)
+	UpdateObservationStatus(ctx context.Context, id string, status observation.Status, now time.Time) error
+	ListObservationEvidence(ctx context.Context, observationID string) ([]source.Evidence, error)
+	ListMemoryCandidates(ctx context.Context, scopeKey string, limit int) ([]memory.Memory, error)
+	ListMemoryIDsForObservation(ctx context.Context, observationID string) ([]string, error)
+	ListMemoryObservationRefs(ctx context.Context, memoryID string, version int) ([]string, error)
+	InsertMemoryObservationRefs(ctx context.Context, memoryID string, version int, observationIDs []string) error
+	InsertGovernanceRelation(ctx context.Context, relation Relation) error
+	ListGovernanceRelationsForEndpoint(ctx context.Context, endpointType EndpointType, id string) ([]Relation, error)
+	ListGovernanceRelationsBetween(ctx context.Context, fromType EndpointType, fromID string,
+		toType EndpointType, toID string) ([]Relation, error)
+	ListOpenConflictsForMemories(ctx context.Context, memoryIDs []string) ([]memory.Conflict, error)
 }
 
 // Store runs one short transaction. The callback must not perform network

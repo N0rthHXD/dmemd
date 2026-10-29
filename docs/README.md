@@ -21,9 +21,9 @@
 
 | 文档 | 内容 |
 | --- | --- |
-| [功能与实现语义](technical-guide.md#功能与实现语义) | 记忆演化、时间与冲突模型、检索和降级行为 |
-| [派生质量与来源审计](technical-guide.md#派生质量与来源审计) | 主题规范化、派生资格、引用完整性和离线审计 |
-| [系统 AI 记忆服务架构设计](系统%20AI%20记忆服务架构设计.md) | 整体架构依据 |
+| [功能与实现语义](technical-guide.md#功能与实现语义) | Source/L0/当前视图/L1–L4、关系治理、召回和降级边界 |
+| [派生质量与来源审计](technical-guide.md#派生质量与来源审计) | 逐层输入、精确依赖、派生资格及当前离线审计范围 |
+| [系统 AI 记忆服务架构设计](系统%20AI%20记忆服务架构设计.md) | v2 基线：三阶段解耦、代码证据、依赖图、生命周期与规划边界 |
 | [前端管理台架构设计](frontend-architecture.md) | 前端边界、部署、页面、状态与 API 交互 |
 
 ## 接口与协议
@@ -32,14 +32,14 @@
 | --- | --- |
 | [OpenAPI 契约](../api/openapi.yaml) | HTTP 接口定义；保留在 `api/`，供前端类型生成使用 |
 | [接口语义决策](contracts/api-decisions.md) | 架构未展开的 HTTP 语义与边界 |
-| [远端模型协议](contracts/model-provider.md) | 提取、决策、治理与 Embedding 的模型协议 |
+| [远端模型协议](contracts/model-provider.md) | extraction-v6、最小关系、逐层聚合、L4 与 Embedding 协议 |
 | [存储契约](contracts/storage.md) | SQLite 连接、迁移、表与事务约束 |
 
 ## 开发与验证
 
 | 文档 | 内容 |
 | --- | --- |
-| [测试与统一验证命令](testing.md) | 测试命令、隔离方式、覆盖范围、CI 与评估边界 |
+| [测试与统一验证命令](testing.md) | 当前测试、legacy 隔离、CI、未执行质量与容量验证边界 |
 | [依赖与 SQLite 能力基线](dependency-baseline.md) | 固定依赖版本、SQLite 能力与升级规则 |
 
 ## 配置与图示

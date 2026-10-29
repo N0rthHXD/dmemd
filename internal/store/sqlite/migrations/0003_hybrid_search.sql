@@ -1,9 +1,6 @@
--- Hybrid retrieval persistence. Content hashes tie derived documents to the
--- exact Embedding input. Vectors and tasks cascade with the search document, so
--- deletion never leaves a stale row that a late worker call could reinsert.
-
-ALTER TABLE memory_search_docs ADD COLUMN content_hash TEXT NOT NULL DEFAULT '';
-
+-- Hybrid retrieval persistence. Vectors and tasks cascade with the search
+-- document, so deletion never leaves a stale row that a late worker call could
+-- reinsert.
 CREATE TABLE memory_embeddings (
     memory_id    TEXT NOT NULL PRIMARY KEY,
     profile_id   TEXT NOT NULL,

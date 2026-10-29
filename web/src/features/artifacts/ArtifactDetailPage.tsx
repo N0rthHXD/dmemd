@@ -7,6 +7,7 @@ import {
   InputNumber,
   Result,
   Space,
+  Table,
   Tag,
   Typography,
 } from 'antd';
@@ -97,6 +98,7 @@ export default function ArtifactDetailPage() {
             {revision?.title || artifactName(artifact)}
           </Typography.Title>
           <Space wrap>
+            <StatusTag category="artifactLayer" value={artifact.layer} />
             <StatusTag category="artifactKind" value={artifact.kind} />
             <StatusTag category="artifactState" value={artifact.state} />
             <Tag>当前 v{artifact.current_version}</Tag>
@@ -149,6 +151,9 @@ export default function ArtifactDetailPage() {
         <Descriptions size="small" bordered column={{ xs: 1, md: 2, xl: 3 }}>
           <Descriptions.Item label="ID">
             <IdText value={artifact.id} maxWidth={320} />
+          </Descriptions.Item>
+          <Descriptions.Item label="层级">
+            <StatusTag category="artifactLayer" value={artifact.layer} />
           </Descriptions.Item>
           <Descriptions.Item label="类型">
             <StatusTag category="artifactKind" value={artifact.kind} />
@@ -233,7 +238,6 @@ export default function ArtifactDetailPage() {
               <Space wrap>
                 <span>{revision.title || '（无标题）'}</span>
                 <Tag>v{revision.version}</Tag>
-                {revision.reason_code ? <Tag>{reasonText(revision.reason_code)}</Tag> : null}
               </Space>
             }
           >
@@ -251,71 +255,59 @@ export default function ArtifactDetailPage() {
             />
           </Card></TechnicalDetails>
 
-          <Card title="来源依据" style={{ marginTop: 16 }}>
-            <TechnicalDetails label="生成详情"><Descriptions size="small" bordered column={{ xs: 1, md: 2, xl: 3 }}>
-              <Descriptions.Item label="生成器">{revision.generator}</Descriptions.Item>
-              <Descriptions.Item label="生成器版本">{revision.generator_version}</Descriptions.Item>
-              <Descriptions.Item label="协议版本">{revision.protocol_version}</Descriptions.Item>
-              <Descriptions.Item label="Taxonomy 版本">{revision.taxonomy_version}</Descriptions.Item>
-              <Descriptions.Item label="生成 run_id">
-                <IdText value={revision.run_id} maxWidth={320} />
-              </Descriptions.Item>
-              <Descriptions.Item label="内容 hash">{revision.content_hash}</Descriptions.Item>
-              <Descriptions.Item label="创建时间">
-                {formatTimestamp(revision.created_at)}
-              </Descriptions.Item>
-              <Descriptions.Item label="输入截断">
-                {revision.truncated ? '是' : '否'}
-              </Descriptions.Item>
-              <Descriptions.Item label="状态">
-                <StatusTag category="artifactState" value={artifact.state} />
-              </Descriptions.Item>
-            </Descriptions></TechnicalDetails>
-            <Typography.Title level={5} style={{ marginTop: 16 }}>
-              参考内容
-            </Typography.Title>
-            <Descriptions size="small" bordered column={1}>
-              <Descriptions.Item label="相关记忆">
-                {revision.memory_refs.length > 0 ? (
-                  <Space wrap>
-                    {revision.memory_refs.map((ref, index) => (
-                      <Link
-                        key={`${ref.memory_id}-${ref.version}`}
-                        to={routes.memoryVersion(ref.memory_id, ref.version)}
-                      >
-                        参考记忆 {index + 1} · 第 {ref.version} 版
-                      </Link>
-                    ))}
-                  </Space>
-                ) : (
-                  '无'
-                )}
-              </Descriptions.Item>
-              <Descriptions.Item label="使用结果报告">
-                {revision.run_refs.length > 0
-                  ? <Space wrap>{revision.run_refs.map((ref) => <IdText key={ref.experience_id} value={ref.experience_id} />)}</Space>
-                  : '无'}
-              </Descriptions.Item>
-            </Descriptions>
+          <Card title="依赖输入" style={{ marginTop: 16 }}>
+            {detail.data.dependencies.length > 0 ? (
+              <Table
+                rowKey={(item) => `${item.type}:${item.id}:${item.version}`}
+                size="small"
+                pagination={false}
+                dataSource={detail.data.dependencies}
+                columns={[
+                  { title: '类型', dataIndex: 'type', width: 120 },
+                  {
+                    title: '输入',
+                    dataIndex: 'id',
+                    render: (value: string, row) =>
+                      row.type === 'observation' ? (
+                        <Link to={routes.observation(value)}>{value}</Link>
+                      ) : row.type === 'memory' ? (
+                        <Link to={routes.memory(value)}>{value}</Link>
+                      ) : (
+                        <span>{value}</span>
+                      ),
+                  },
+                  { title: '版本', dataIndex: 'version', width: 90 },
+                  { title: '必需', dataIndex: 'required', width: 90, render: (value: boolean) => (value ? '是' : '否') },
+                ]}
+                locale={{ emptyText: '该版本没有记录依赖' }}
+              />
+            ) : (
+              <Empty description="该版本没有记录依赖" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            )}
             <Alert
               style={{ marginTop: 12 }}
               type="info"
               showIcon
-              message="参考记忆链接会打开整理时使用的版本"
-              description="使用结果报告目前无法直接阅读；如需撤销，可在“反馈使用结果”中选择已有报告或输入报告编号。"
+              message="依赖由代码写入，不由模型返回"
+              description="依赖引用决定派生内容何时失效；打开引用的记忆或观察可继续下钻。"
             />
           </Card>
 
-          <TechnicalDetails label="技术详情与原始数据"><Card title="内容说明" style={{ marginTop: 16 }}>
+          <TechnicalDetails label="生成详情与原始数据"><Card title="内容说明" style={{ marginTop: 16 }}>
+            <Descriptions size="small" bordered column={{ xs: 1, md: 2 }}>
+              <Descriptions.Item label="生成器">{revision.generator}</Descriptions.Item>
+              <Descriptions.Item label="协议版本">{revision.protocol_version}</Descriptions.Item>
+              <Descriptions.Item label="内容 hash">{revision.content_hash}</Descriptions.Item>
+              <Descriptions.Item label="创建时间">{formatTimestamp(revision.created_at)}</Descriptions.Item>
+              <Descriptions.Item label="输入截断">{revision.truncated ? '是' : '否'}</Descriptions.Item>
+              <Descriptions.Item label="状态">
+                <StatusTag category="artifactState" value={artifact.state} />
+              </Descriptions.Item>
+            </Descriptions>
             <JsonView value={revision.payload} maxHeight={420} emptyText="无 payload" />
             <Typography.Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
-              payload 按已知字段展示，未知结构作为只读 JSON；请区分输入选择、截断、引用完整性和语义覆盖，
-              不能只看一个“质量通过”。
+              payload 按已知字段展示，未知结构作为只读 JSON；请区分输入选择、截断和语义覆盖。
             </Typography.Paragraph>
-          </Card>
-
-          <Card title="来源记录" style={{ marginTop: 16 }}>
-            <JsonView value={revision.provenance} maxHeight={420} emptyText="无 provenance" />
           </Card></TechnicalDetails>
 
           {artifact.kind === 'skill' ? (

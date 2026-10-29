@@ -1,7 +1,8 @@
 -- Application-reported completion results. The report is not a verified
 -- execution record: outcome is copied from the caller and never upgraded by
 -- generation or recall. run_id is an optional client deduplication key; NULL
--- rows always create a new result.
+-- rows always create a new result. Derived revisions reference runs through the
+-- generic derived_dependencies table.
 CREATE TABLE experience_runs (
     id            TEXT NOT NULL PRIMARY KEY,
     run_id        TEXT UNIQUE,
@@ -23,21 +24,3 @@ CREATE TABLE experience_runs (
 CREATE INDEX idx_experience_runs_scope ON experience_runs(scope_key, created_at, id);
 CREATE INDEX idx_experience_runs_skill ON experience_runs(skill_id, skill_version);
 CREATE INDEX idx_experience_runs_source ON experience_runs(source_id);
-
--- Skills and experience cases directly reference the application result that
--- contributed to their current revision. This is a leaf dependency, not an
--- artifact-to-artifact edge.
-CREATE TABLE artifact_run_dependencies (
-    artifact_id      TEXT NOT NULL,
-    artifact_version INTEGER NOT NULL,
-    experience_id    TEXT NOT NULL,
-    PRIMARY KEY (artifact_id, artifact_version, experience_id),
-    FOREIGN KEY (artifact_id, artifact_version)
-        REFERENCES artifact_revisions(artifact_id, version) ON DELETE CASCADE,
-    FOREIGN KEY (experience_id) REFERENCES experience_runs(id) ON DELETE CASCADE
-);
-
-CREATE INDEX idx_artifact_run_dependencies_run
-    ON artifact_run_dependencies(experience_id);
-CREATE INDEX idx_artifact_run_dependencies_artifact
-    ON artifact_run_dependencies(artifact_id, artifact_version);

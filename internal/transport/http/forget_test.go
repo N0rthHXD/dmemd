@@ -24,7 +24,6 @@ func (s *stubForget) Forget(_ context.Context, request governance.ForgetRequest)
 func TestForgetRouteForwardsExplicitIdentifiers(t *testing.T) {
 	service := &stubForget{result: governance.ForgetResult{
 		MemoryIDs: []string{"memory-1"}, SourceIDs: []string{"source-1"}, ExperienceIDs: []string{"experience-1"},
-		Warnings: []string{"related_memories_retained"}, RetainedRelatedMemoryIDs: []string{"memory-2"},
 	}}
 	body := `{"memory_ids":["memory-1"],"source_ids":["source-1"],"experience_ids":["experience-1"]}`
 	response := serve(t, Services{Forget: service}, nil,
@@ -36,8 +35,7 @@ func TestForgetRouteForwardsExplicitIdentifiers(t *testing.T) {
 		len(service.request.ExperienceIDs) != 1 {
 		t.Fatalf("request = %+v", service.request)
 	}
-	for _, want := range []string{`"memory_ids":["memory-1"]`, `"source_ids":["source-1"]`, `"experience_ids":["experience-1"]`,
-		`"warnings":["related_memories_retained"]`, `"retained_related_memory_ids":["memory-2"]`} {
+	for _, want := range []string{`"memory_ids":["memory-1"]`, `"source_ids":["source-1"]`, `"experience_ids":["experience-1"]`} {
 		if !strings.Contains(response.Body.String(), want) {
 			t.Fatalf("response %q missing %q", response.Body.String(), want)
 		}

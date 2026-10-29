@@ -134,10 +134,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 		_ = lock.Close()
 		return err
 	}
-	if err := stack.Worker.Recover(ctx); err != nil {
+	if err := stack.Recover(ctx); err != nil {
 		_ = store.Close()
 		_ = lock.Close()
-		return fmt.Errorf("恢复后台任务: %w", err)
+		return err
 	}
 
 	runErr := stack.App.Run(ctx)

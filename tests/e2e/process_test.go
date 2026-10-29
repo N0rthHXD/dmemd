@@ -255,7 +255,7 @@ func TestProcessSingleInstanceShutdownAndRestart(t *testing.T) {
 	model.Enqueue(testutil.FakeResponse{
 		Status:  http.StatusOK,
 		Block:   true,
-		Content: `{"candidates":[{"kind":"fact","title":"重启恢复","content":"重启后仍会处理这条记忆。","evidence":[{"quote":"进程重启后需要恢复任务。"}]}]}`,
+		Content: `{"items":[{"span_ids":["seg-0001"],"content":"重启后仍会处理这条记忆。"}]}`,
 	})
 
 	listenOne := freeAddress(t)
@@ -311,7 +311,7 @@ func TestProcessSingleInstanceShutdownAndRestart(t *testing.T) {
 	// running job without resetting its attempt count.
 	model.Enqueue(testutil.FakeResponse{
 		Status:  http.StatusOK,
-		Content: `{"candidates":[{"kind":"fact","title":"重启恢复","content":"重启后仍会处理这条记忆。","evidence":[{"quote":"进程重启后需要恢复任务。"}]}]}`,
+		Content: `{"items":[{"span_ids":["seg-0001"],"content":"重启后仍会处理这条记忆。"}]}`,
 	})
 	restarted := startProcess(t, binary, configOne)
 	portURL := "http://" + listenOne
@@ -321,16 +321,12 @@ func TestProcessSingleInstanceShutdownAndRestart(t *testing.T) {
 	if job["status"] != "succeeded" {
 		t.Fatalf("recovered job = %#v", job)
 	}
-	memoryIDs, ok := job["memory_ids"].([]any)
-	if !ok || len(memoryIDs) != 1 {
-		t.Fatalf("recovered job memory_ids = %#v", job["memory_ids"])
+	observationIDs, ok := job["observation_ids"].([]any)
+	if !ok || len(observationIDs) != 1 {
+		t.Fatalf("recovered job observation_ids = %#v", job["observation_ids"])
 	}
 	if job["attempts"].(float64) < 2 {
 		t.Fatalf("attempt count was reset: %#v", job)
-	}
-	status, memory := doJSON(t, client, http.MethodGet, portURL+"/v1/memories/"+memoryIDs[0].(string), "")
-	if status != http.StatusOK || memory["content"] != "重启后仍会处理这条记忆。" {
-		t.Fatalf("memory after restart = %d %#v", status, memory)
 	}
 	status, source := doJSON(t, client, http.MethodGet, portURL+"/v1/sources/"+sourceID, "")
 	if status != http.StatusOK || source["redacted"] != false {
@@ -345,9 +341,13 @@ func TestProcessSingleInstanceShutdownAndRestart(t *testing.T) {
 	_ = restarted.wait(10 * time.Second)
 	crashedRestart := startProcess(t, binary, configOne)
 	waitReady(t, portURL, crashedRestart)
-	status, memory = doJSON(t, client, http.MethodGet, portURL+"/v1/memories/"+memoryIDs[0].(string), "")
-	if status != http.StatusOK || memory["content"] != "重启后仍会处理这条记忆。" {
-		t.Fatalf("memory after crash restart = %d %#v", status, memory)
+	status, jobAfterCrash := doJSON(t, client, http.MethodGet, portURL+"/v1/ingest-jobs/"+jobID, "")
+	if status != http.StatusOK || jobAfterCrash["status"] != "succeeded" {
+		t.Fatalf("job after crash restart = %d %#v", status, jobAfterCrash)
+	}
+	afterIDs, ok := jobAfterCrash["observation_ids"].([]any)
+	if !ok || len(afterIDs) != 1 || afterIDs[0] != observationIDs[0] {
+		t.Fatalf("observation ids after crash restart = %#v", jobAfterCrash["observation_ids"])
 	}
 	if err := crashedRestart.cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)

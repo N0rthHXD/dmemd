@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/N0rthHXD/dmemd/internal/artifact"
 	"github.com/N0rthHXD/dmemd/internal/memory"
 	"github.com/N0rthHXD/dmemd/internal/retrieval"
 )
@@ -32,27 +33,31 @@ func (s stubConflicts) Resolve(ctx context.Context, input memory.ResolveInput) (
 	return s.resolve(ctx, input)
 }
 
-func TestRecallAsOfIsStrictAndForwarded(t *testing.T) {
+func TestRecallQueryModeAndDerivedStatesAreValidatedAndForwarded(t *testing.T) {
 	var received retrieval.RecallRequest
 	services := Services{Search: stubSearch{recall: func(_ context.Context, request retrieval.RecallRequest) (retrieval.RecallResult, error) {
 		received = request
 		return retrieval.RecallResult{Memories: []retrieval.Item{}, Conflicts: []memory.ConflictSummary{}}, nil
 	}}}
-	asOf := "2026-07-01T00:00:00Z"
 	response := serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/recall",
-		strings.NewReader(`{"query":"住址","filters":{"as_of":"`+asOf+`"}}`)))
+		strings.NewReader(`{"query":"住址","query_mode":"overview","derived_states":["stale"]}`)))
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", response.Code, response.Body.String())
 	}
-	want, _ := time.Parse(time.RFC3339Nano, asOf)
-	if received.Filters.AsOf == nil || !received.Filters.AsOf.Equal(want) {
-		t.Fatalf("as_of = %v", received.Filters.AsOf)
+	if received.QueryMode != retrieval.QueryModeOverview ||
+		len(received.DerivedStates) != 1 || received.DerivedStates[0] != artifact.StateStale {
+		t.Fatalf("received = %+v", received)
 	}
 
-	response = serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/recall",
-		strings.NewReader(`{"query":"住址","filters":{"as_of":"not-a-time"}}`)))
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("invalid as_of status = %d", response.Code)
+	for _, body := range []string{
+		`{"query":"住址","query_mode":"invented"}`,
+		`{"query":"住址","derived_states":["disabled"]}`,
+	} {
+		response = serve(t, services, nil, httptest.NewRequest(http.MethodPost, "/v1/memories/recall",
+			strings.NewReader(body)))
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("body %s status = %d", body, response.Code)
+		}
 	}
 }
 

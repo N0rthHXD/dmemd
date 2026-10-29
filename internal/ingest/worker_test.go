@@ -86,14 +86,14 @@ func TestWorkerRecoversAfterTransientFailure(t *testing.T) {
 	f := newProcessorFixture(t)
 	worker := newProcessorWorker(f)
 	f.fake.EnqueueStatus(500)
-	f.fake.EnqueueContent(`{"candidates":[{"content":"恢复后形成的记忆"}]}`)
+	f.fake.EnqueueContent(`{"items":[{"span_ids":["seg-0001"],"content":"恢复后形成的记忆"}]}`)
 	receipt := f.submit(t, `"恢复后形成的记忆"`)
 
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		job := f.job(t, receipt.JobID)
 		if job.Status == ingest.JobSucceeded {
-			if job.Attempts != 2 || len(job.MemoryIDs) != 1 {
+			if job.Attempts != 2 || len(job.ObservationIDs) != 1 {
 				t.Fatalf("succeeded job = %+v", job)
 			}
 			break
@@ -136,9 +136,9 @@ func TestWorkerParksPermanentProviderErrorUntilRestart(t *testing.T) {
 func TestWorkerUnparseableResponseUsesRetryBudget(t *testing.T) {
 	f := newProcessorFixture(t)
 	worker := newProcessorWorker(f)
-	// Each attempt permits one structured extraction retry before the worker
-	// counts a protocol failure.
-	for i := 0; i < 6; i++ {
+	// The minimal extraction protocol has no separate repair call: the worker
+	// spends one model call per attempt and counts structural failures directly.
+	for i := 0; i < 3; i++ {
 		f.fake.EnqueueMalformed()
 	}
 	receipt := f.submit(t, `"不可解析响应"`)
@@ -146,7 +146,7 @@ func TestWorkerUnparseableResponseUsesRetryBudget(t *testing.T) {
 	for {
 		job := f.job(t, receipt.JobID)
 		if job.Status == ingest.JobFailed {
-			if job.Attempts != 3 || f.fake.RequestCount() != 6 {
+			if job.Attempts != 3 || f.fake.RequestCount() != 3 {
 				t.Fatalf("job=%+v requests=%d", job, f.fake.RequestCount())
 			}
 			if strings.Contains(job.Error, "I could not") {
@@ -171,7 +171,7 @@ func TestWorkerRunsSequentiallyAndCancellationExitsWait(t *testing.T) {
 	t.Run("sequential", func(t *testing.T) {
 		f := newProcessorFixture(t)
 		worker := newProcessorWorker(f)
-		f.fake.Enqueue(ingestFakeBlockedCandidate("第一条"))
+		f.fake.Enqueue(ingestFakeBlockedDraft("第一条"))
 		first := f.submit(t, `"第一条"`)
 		f.advance(time.Millisecond)
 		second := f.submit(t, `"第二条"`)
@@ -277,7 +277,7 @@ func TestWorkerRecoveryRequeuesRunningWithoutFailingAttemptBudget(t *testing.T) 
 			}
 			return tx.InsertJob(ctx, ingest.Job{
 				ID: id, SourceID: src.ID, Status: status, Attempts: attempts,
-				MemoryIDs: []string{}, CreatedAt: now, UpdatedAt: now,
+				CreatedAt: now, UpdatedAt: now,
 			})
 		}); err != nil {
 			t.Fatal(err)
@@ -295,7 +295,7 @@ func TestWorkerRecoveryRequeuesRunningWithoutFailingAttemptBudget(t *testing.T) 
 		}
 		return tx.InsertJob(ctx, ingest.Job{
 			ID: "failed-protocol", SourceID: src.ID, Status: ingest.JobFailed, Attempts: 3,
-			ProtocolFailures: 3, MemoryIDs: []string{}, CreatedAt: now, UpdatedAt: now,
+			ProtocolFailures: 3, CreatedAt: now, UpdatedAt: now,
 		})
 	}); err != nil {
 		t.Fatal(err)
@@ -332,7 +332,7 @@ func TestWorkerRecoveryRequeuesRunningWithoutFailingAttemptBudget(t *testing.T) 
 	// running-1 is due and keeps its attempt count when claimed again. Other
 	// queued jobs may be older in the deterministic insertion order, so keep
 	// processing until running-1 reaches a terminal state.
-	f.fake.EnqueueContent(`{"candidates":[]}`)
+	f.fake.EnqueueContent(`{"items":[]}`)
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		completed := f.job(t, "running-1")
@@ -367,7 +367,7 @@ func TestWorkerRejectsTerminalJobs(t *testing.T) {
 			if err := tx.InsertSource(ctx, src); err != nil {
 				return err
 			}
-			return tx.InsertJob(ctx, ingest.Job{ID: id, SourceID: src.ID, Status: status, MemoryIDs: []string{}, CreatedAt: now, UpdatedAt: now})
+			return tx.InsertJob(ctx, ingest.Job{ID: id, SourceID: src.ID, Status: status, CreatedAt: now, UpdatedAt: now})
 		}); err != nil {
 			t.Fatal(err)
 		}

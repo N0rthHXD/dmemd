@@ -55,8 +55,6 @@ func (h *handler) listMemories(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 	options := memory.ListOptions{
-		FactGroupID:   strings.TrimSpace(query.Get("fact_group_id")),
-		CreatedByApp:  strings.TrimSpace(query.Get("created_by_app")),
 		UpdatedAfter:  updatedAfter,
 		UpdatedBefore: updatedBefore,
 		Limit:         parseLimit(query.Get("limit")),
@@ -85,25 +83,27 @@ func (h *handler) getMemory(w http.ResponseWriter, request *http.Request) {
 	if !ok {
 		return
 	}
-	item, err := service.Get(request.Context(), request.PathValue("id"))
-	if err != nil {
-		h.writeServiceError(w, request, err)
+	id := request.PathValue("id")
+	if detailService, ok := service.(memory.DetailService); ok {
+		item, err := detailService.Detail(request.Context(), id)
+		if err != nil {
+			h.writeServiceError(w, request, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, memoryDetailFromDomain(item))
 		return
 	}
-	relations, err := service.Relations(request.Context(), item.ID)
-	if err != nil {
-		h.writeServiceError(w, request, err)
-		return
-	}
-	evolution, err := service.Evolution(request.Context(), item.ID, 50)
+	item, err := service.Get(request.Context(), id)
 	if err != nil {
 		h.writeServiceError(w, request, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, memoryDetailDTO{
-		memoryDTO: memoryFromDomain(item),
-		Relations: relationsFromDomain(relations),
-		Evolution: evolutionFromDomain(evolution),
+		memoryDTO:         memoryFromDomain(item),
+		ObservationIDs:    []string{},
+		Relations:         []relationDTO{},
+		ConflictIDs:       []string{},
+		DerivedDependents: []derivedDependentDTO{},
 	})
 }
 

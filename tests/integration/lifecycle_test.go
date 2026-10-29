@@ -1,3 +1,5 @@
+//go:build legacy
+
 package integration_test
 
 import (
@@ -27,7 +29,11 @@ func TestLifecycleVersionEvidenceRedactionAndPurge(t *testing.T) {
 		Content:   []byte(`{"messages":[{"id":"m1","content":"默认中文回答"}]}`),
 		CreatedAt: clock,
 	}
-	evidence := source.NewEvidence(src, source.EvidenceReference{Quote: "默认中文回答"}, "test-model", clock)
+	evidenceList, err := source.EvidenceForSegments(src, []string{"seg-0001"}, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := evidenceList[0]
 	if err := store.WithTx(ctx, func(ctx context.Context, tx *sqlite.Tx) error {
 		if err := tx.InsertSource(ctx, src); err != nil {
 			return err

@@ -31,6 +31,12 @@ const columns: ColumnsType<ArtifactMeta> = [
     ),
   },
   {
+    title: '层级',
+    dataIndex: 'layer',
+    width: 120,
+    render: (value: string) => <StatusTag category="artifactLayer" value={value} />,
+  },
+  {
     title: '类型',
     dataIndex: 'kind',
     width: 130,
@@ -153,6 +159,7 @@ export function ArtifactLayerPanel({
           >
             <Space direction="vertical" size={6} style={{ width: '100%' }}>
               <Space wrap size={4}>
+                <StatusTag category="artifactLayer" value={item.layer} />
                 <StatusTag category="artifactKind" value={item.kind} />
                 <StatusTag category="artifactState" value={item.state} />
                 {item.current_version > 0 ? (

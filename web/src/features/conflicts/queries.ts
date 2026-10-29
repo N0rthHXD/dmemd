@@ -27,7 +27,7 @@ export function useConflictMembers(
   id: string,
   revision: number | undefined,
   memberIds: string[],
-  enabled: boolean,
+  enabled = true,
 ) {
   return useQuery({
     queryKey: queryKeys.conflicts.members(id, revision ?? 0, memberIds),

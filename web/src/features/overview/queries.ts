@@ -9,8 +9,6 @@ const recentFilters: MemoryListFilters = normalizeMemoryFilters({
   kinds: [],
   states: [],
   assertionStatuses: [],
-  factGroupId: '',
-  createdByApp: '',
   limit: 10,
 });
 

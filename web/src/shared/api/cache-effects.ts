@@ -4,6 +4,7 @@ import { removeSessionExperience, removeSessionIngestions } from './session-rece
 
 const businessQueryRoots = [
   queryKeys.memories.all,
+  queryKeys.observations.all,
   queryKeys.conflicts.all,
   queryKeys.artifacts.all,
   queryKeys.targets.all,
@@ -16,6 +17,7 @@ function isBusinessQuery(queryKey: readonly unknown[]): boolean {
   const root = String(queryKey[0] ?? '');
   return (
     root === 'memories' ||
+    root === 'observations' ||
     root === 'conflicts' ||
     root === 'artifacts' ||
     root === 'artifact-targets' ||
@@ -41,10 +43,12 @@ export async function clearRecallResults(queryClient: QueryClient) {
 export async function invalidateAfterMemoryChange(queryClient: QueryClient) {
   await invalidateRoots(queryClient, [
     queryKeys.memories.all,
+    queryKeys.observations.all,
     queryKeys.conflicts.all,
     queryKeys.artifacts.all,
     queryKeys.targets.all,
     queryKeys.skills.all,
+    queryKeys.jobs.governance.all,
     queryKeys.system.embedding,
   ]);
   await clearRecallResults(queryClient);
@@ -63,6 +67,7 @@ export async function invalidateAfterExperienceChange(queryClient: QueryClient) 
     queryKeys.artifacts.all,
     queryKeys.targets.all,
     queryKeys.skills.all,
+    queryKeys.jobs.governance.all,
     queryKeys.system.embedding,
   ]);
   await clearRecallResults(queryClient);

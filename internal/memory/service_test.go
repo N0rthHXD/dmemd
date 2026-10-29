@@ -75,15 +75,23 @@ func (f *fixture) revise(t *testing.T, input memory.ReviseInput) (memory.Memory,
 	return result, err
 }
 
+func generatedEvidence(t *testing.T, src source.Source, at time.Time, ids ...string) []source.Evidence {
+	t.Helper()
+	items, err := source.EvidenceForSegments(src, ids, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return items
+}
+
 func reviseInput(current memory.Memory, evidence []source.Evidence, operation memory.Operation) memory.ReviseInput {
 	return memory.ReviseInput{
-		MemoryID:   current.ID,
-		Kind:       current.Kind,
-		Title:      current.Title,
-		Content:    current.Content,
-		ObservedAt: current.ObservedAt,
-		Evidence:   evidence,
-		Operation:  operation,
+		MemoryID:  current.ID,
+		Kind:      current.Kind,
+		Title:     current.Title,
+		Content:   current.Content,
+		Evidence:  evidence,
+		Operation: operation,
 	}
 }
 
@@ -91,7 +99,7 @@ func TestCreateWritesSnapshotRevisionEvidenceAndIndex(t *testing.T) {
 	f := newFixture(t)
 	src := f.seedSource(t, "source-create", "desktop-assistant",
 		`{"messages":[{"id":"msg-1","role":"user","content":"以后请默认使用中文回答。"}]}`)
-	evidence := source.NewEvidence(src, source.EvidenceReference{Quote: "以后请默认使用中文回答。"}, "test-model", baseTime)
+	evidence := generatedEvidence(t, src, baseTime, "seg-0001")[0]
 	if evidence.Location == nil || evidence.Location.Field != "messages.0.content" ||
 		evidence.Location.Start != 0 || evidence.Location.End != 12 {
 		t.Fatalf("location = %+v", evidence.Location)
@@ -101,8 +109,6 @@ func TestCreateWritesSnapshotRevisionEvidenceAndIndex(t *testing.T) {
 		Kind:           memory.KindPreference,
 		Title:          "Answer Language",
 		Content:        "用户希望默认使用中文回答。",
-		ObservedAt:     baseTime.Add(-time.Hour),
-		CreatedByApp:   "desktop-assistant",
 		OriginSourceID: src.ID,
 		Evidence:       []source.Evidence{evidence},
 		Reason:         "initial extraction",
@@ -116,15 +122,12 @@ func TestCreateWritesSnapshotRevisionEvidenceAndIndex(t *testing.T) {
 	if created.CreatedAt != baseTime || created.UpdatedAt != baseTime {
 		t.Fatalf("timestamps = %v %v", created.CreatedAt, created.UpdatedAt)
 	}
-	if created.ObservedAt != baseTime.Add(-time.Hour) {
-		t.Fatalf("observed_at = %v", created.ObservedAt)
-	}
 
 	current, err := f.memory.Get(context.Background(), created.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.Content != created.Content || current.CreatedByApp != "desktop-assistant" {
+	if current.Content != created.Content {
 		t.Fatalf("current = %+v", current)
 	}
 
@@ -154,61 +157,15 @@ func TestCreateWritesSnapshotRevisionEvidenceAndIndex(t *testing.T) {
 	}
 }
 
-func TestCreateAndRevisionPersistExtractionPhaseAndDurability(t *testing.T) {
-	f := newFixture(t)
-	src := f.seedSource(t, "source-phase", "app", `{"text":"2026年10月8日安排拍摄"}`)
-	created, err := f.create(t, memory.CreateInput{
-		Kind: memory.KindEvent, Phase: memory.PhaseScheduled, Durability: memory.DurabilityEpisodic,
-		Title: "拍摄", Content: "2026年10月8日安排拍摄", ObservedAt: baseTime,
-		OriginSourceID: src.ID,
-		Evidence:       []source.Evidence{source.NewEvidence(src, source.EvidenceReference{Quote: "2026年10月8日安排拍摄"}, "model", baseTime)},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if created.Phase != memory.PhaseScheduled || created.Durability != memory.DurabilityEpisodic {
-		t.Fatalf("created=%+v", created)
-	}
-	got, err := f.memory.Get(context.Background(), created.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Phase != memory.PhaseScheduled || got.Durability != memory.DurabilityEpisodic {
-		t.Fatalf("stored=%+v", got)
-	}
-	revision, err := f.memory.GetVersion(context.Background(), created.ID, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if revision.Snapshot.Phase != memory.PhaseScheduled || revision.Snapshot.Durability != memory.DurabilityEpisodic {
-		t.Fatalf("revision=%+v", revision.Snapshot)
-	}
-	updated, err := f.revise(t, memory.ReviseInput{MemoryID: created.ID, Kind: created.Kind, Title: created.Title, Content: "2026年10月8日拍摄已取消", ObservedAt: created.ObservedAt, Phase: memory.PhaseCancelled, Durability: memory.DurabilityEpisodic, Evidence: revision.Evidence, Operation: memory.OperationUpdate})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if updated.Phase != memory.PhaseCancelled || updated.Durability != memory.DurabilityEpisodic {
-		t.Fatalf("updated=%+v", updated)
-	}
-	revision, err = f.memory.GetVersion(context.Background(), created.ID, updated.Version)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if revision.Snapshot.Phase != memory.PhaseCancelled || revision.Snapshot.Durability != memory.DurabilityEpisodic {
-		t.Fatalf("updated revision=%+v", revision.Snapshot)
-	}
-}
-
 func TestCreateRollsBackEveryTableOnCallerFailure(t *testing.T) {
 	f := newFixture(t)
 	src := f.seedSource(t, "source-rollback", "app", `{"text":"remember me"}`)
-	evidence := source.NewEvidence(src, source.EvidenceReference{Quote: "remember me"}, "model", baseTime)
+	evidence := generatedEvidence(t, src, baseTime, "seg-0001")[0]
 	failure := errors.New("injected create failure")
 
 	err := f.store.WithTx(context.Background(), func(ctx context.Context, tx *sqlite.Tx) error {
 		if _, err := f.memory.Create(ctx, tx, memory.CreateInput{
 			Kind: memory.KindFact, Title: "title", Content: "content",
-			ObservedAt: baseTime, OriginSourceID: src.ID,
 			Evidence: []source.Evidence{evidence},
 		}); err != nil {
 			return err
@@ -230,11 +187,11 @@ func TestCreateRollsBackEveryTableOnCallerFailure(t *testing.T) {
 func TestReviseKeepsHistoryAndDoesNotInheritOldEvidence(t *testing.T) {
 	f := newFixture(t)
 	src := f.seedSource(t, "source-revise", "app", `{"text":"old conclusion"}`)
-	oldEvidence := source.NewEvidence(src, source.EvidenceReference{Quote: "old conclusion"}, "model", baseTime)
+	oldEvidence := generatedEvidence(t, src, baseTime, "seg-0001")[0]
 	created, err := f.create(t, memory.CreateInput{
 		Kind: memory.KindFact, Title: "First", Content: "old conclusion",
-		ObservedAt: baseTime, CreatedByApp: "app", OriginSourceID: src.ID,
-		Evidence: []source.Evidence{oldEvidence},
+		OriginSourceID: src.ID,
+		Evidence:       []source.Evidence{oldEvidence},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -242,8 +199,7 @@ func TestReviseKeepsHistoryAndDoesNotInheritOldEvidence(t *testing.T) {
 
 	f.clock.Advance(time.Minute)
 	revised, err := f.revise(t, memory.ReviseInput{
-		MemoryID: created.ID, Kind: memory.KindFact, Title: "Corrected",
-		Content: "new conclusion", ObservedAt: baseTime.Add(time.Minute),
+		MemoryID: created.ID, Kind: memory.KindFact, Title: "Corrected", Content: "new conclusion",
 		Operation: memory.OperationUpdate, Reason: "explicit correction",
 	})
 	if err != nil {
@@ -252,7 +208,7 @@ func TestReviseKeepsHistoryAndDoesNotInheritOldEvidence(t *testing.T) {
 	if revised.Version != 2 || revised.Content != "new conclusion" {
 		t.Fatalf("revised = %+v", revised)
 	}
-	if revised.CreatedAt != created.CreatedAt || revised.CreatedByApp != "app" || revised.OriginSourceID != src.ID {
+	if revised.CreatedAt != created.CreatedAt || revised.OriginSourceID != src.ID {
 		t.Fatalf("creation metadata changed: %+v", revised)
 	}
 
@@ -278,10 +234,9 @@ func TestReviseKeepsHistoryAndDoesNotInheritOldEvidence(t *testing.T) {
 func TestAddEvidenceCreatesVersionAndIgnoresDuplicates(t *testing.T) {
 	f := newFixture(t)
 	src := f.seedSource(t, "source-evidence", "app", `{"text":"supporting quote"}`)
-	firstEvidence := source.NewEvidence(src, source.EvidenceReference{Quote: "supporting quote"}, "model", baseTime)
+	firstEvidence := generatedEvidence(t, src, baseTime, "seg-0001")[0]
 	created, err := f.create(t, memory.CreateInput{
 		Kind: memory.KindFact, Title: "Title", Content: "Body",
-		ObservedAt: baseTime, OriginSourceID: src.ID,
 		Evidence: []source.Evidence{firstEvidence},
 	})
 	if err != nil {
@@ -289,7 +244,7 @@ func TestAddEvidenceCreatesVersionAndIgnoresDuplicates(t *testing.T) {
 	}
 
 	f.clock.Advance(time.Minute)
-	secondEvidence := source.NewEvidence(src, source.EvidenceReference{Quote: "supporting quote"}, "model", f.clock.Now())
+	secondEvidence := generatedEvidence(t, src, f.clock.Now(), "seg-0001")[0]
 	added, err := f.revise(t, memory.ReviseInput{
 		MemoryID:  created.ID,
 		Evidence:  []source.Evidence{secondEvidence},
@@ -341,10 +296,9 @@ func TestAddEvidenceCreatesVersionAndIgnoresDuplicates(t *testing.T) {
 func TestLifecycleArchiveDeleteRestoreAndEvidenceQueries(t *testing.T) {
 	f := newFixture(t)
 	src := f.seedSource(t, "source-lifecycle", "app", `{"text":"fact"}`)
-	evidence := source.NewEvidence(src, source.EvidenceReference{Quote: "fact"}, "model", baseTime)
+	evidence := generatedEvidence(t, src, baseTime, "seg-0001")[0]
 	created, err := f.create(t, memory.CreateInput{
 		Kind: memory.KindFact, Title: "Fact", Content: "fact",
-		ObservedAt: baseTime, CreatedByApp: "app", OriginSourceID: src.ID,
 		Evidence: []source.Evidence{evidence},
 	})
 	if err != nil {
@@ -470,7 +424,7 @@ func TestLifecycleArchiveDeleteRestoreAndEvidenceQueries(t *testing.T) {
 	if restored.Version != 5 || restored.State != memory.StateActive || restored.Content != "fact" {
 		t.Fatalf("restored = %+v", restored)
 	}
-	if restored.CreatedAt != created.CreatedAt || restored.CreatedByApp != "app" {
+	if restored.CreatedAt != created.CreatedAt {
 		t.Fatalf("restore changed creation metadata: %+v", restored)
 	}
 	restoreRevision, err := f.memory.GetVersion(ctx, created.ID, restored.Version)
@@ -529,10 +483,9 @@ func TestLifecycleArchiveDeleteRestoreAndEvidenceQueries(t *testing.T) {
 func TestDeleteRollsBackStateRevisionAndIndexTogether(t *testing.T) {
 	f := newFixture(t)
 	src := f.seedSource(t, "source-delete-rollback", "app", `{"text":"keep"}`)
-	evidence := source.NewEvidence(src, source.EvidenceReference{Quote: "keep"}, "model", baseTime)
+	evidence := generatedEvidence(t, src, baseTime, "seg-0001")[0]
 	created, err := f.create(t, memory.CreateInput{
 		Kind: memory.KindFact, Title: "Keep", Content: "keep",
-		ObservedAt: baseTime, OriginSourceID: src.ID,
 		Evidence: []source.Evidence{evidence},
 	})
 	if err != nil {
@@ -595,10 +548,9 @@ func TestSourceRedactionKeepsBodyAndPreventsEvidenceRestoration(t *testing.T) {
 	f := newFixture(t)
 	src := f.seedSource(t, "source-redacted", "app",
 		`{"messages":[{"id":"m1","content":"secret quote"}]}`)
-	evidence := source.NewEvidence(src, source.EvidenceReference{Quote: "secret quote"}, "model", baseTime)
+	evidence := generatedEvidence(t, src, baseTime, "seg-0001")[0]
 	created, err := f.create(t, memory.CreateInput{
 		Kind: memory.KindFact, Title: "Secret", Content: "body survives",
-		ObservedAt: baseTime, OriginSourceID: src.ID,
 		Evidence: []source.Evidence{evidence},
 	})
 	if err != nil {
@@ -672,12 +624,11 @@ func TestSourceRedactionKeepsBodyAndPreventsEvidenceRestoration(t *testing.T) {
 func TestPurgeRemovesDedicatedDataAndKeepsSharedEvidence(t *testing.T) {
 	f := newFixture(t)
 	src := f.seedSource(t, "source-purge", "app", `{"text":"shared and dedicated"}`)
-	dedicated := source.NewEvidence(src, source.EvidenceReference{Quote: "dedicated"}, "model", baseTime)
-	shared := source.NewEvidence(src, source.EvidenceReference{Quote: "shared"}, "model", baseTime)
+	dedicated := generatedEvidence(t, src, baseTime, "seg-0001")[0]
+	shared := generatedEvidence(t, src, baseTime, "seg-0001")[0]
 
 	first, err := f.create(t, memory.CreateInput{
 		Kind: memory.KindFact, Title: "First", Content: "first",
-		ObservedAt: baseTime, OriginSourceID: src.ID,
 		Evidence: []source.Evidence{dedicated, shared},
 	})
 	if err != nil {
@@ -685,7 +636,6 @@ func TestPurgeRemovesDedicatedDataAndKeepsSharedEvidence(t *testing.T) {
 	}
 	second, err := f.create(t, memory.CreateInput{
 		Kind: memory.KindFact, Title: "Second", Content: "second",
-		ObservedAt: baseTime, OriginSourceID: src.ID,
 		Evidence: []source.Evidence{shared},
 	})
 	if err != nil {
@@ -737,8 +687,7 @@ func TestPurgeRemovesDedicatedDataAndKeepsSharedEvidence(t *testing.T) {
 
 	third, err := f.create(t, memory.CreateInput{
 		Kind: memory.KindFact, Title: "Third", Content: "third",
-		ObservedAt: baseTime, OriginSourceID: src.ID,
-		Evidence: []source.Evidence{source.NewEvidence(src, source.EvidenceReference{Quote: "third"}, "model", baseTime)},
+		Evidence: generatedEvidence(t, src, baseTime, "seg-0001"),
 	})
 	if err != nil {
 		t.Fatal(err)

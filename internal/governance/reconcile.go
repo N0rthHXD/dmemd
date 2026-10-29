@@ -26,8 +26,6 @@ type ReconcileHandler struct {
 	cursor        string
 	staleCursor   string
 	expiredCursor string
-	groupCursor   string
-	skillCursor   string
 }
 
 // ReconcileOption customizes the reconcile handler.
@@ -73,6 +71,18 @@ func NewReconcileHandler(store Store, debounce time.Duration, batchSize int, opt
 	return handler
 }
 
+// aggregationJobKind maps a stale or expired derived target to the task kind
+// that owns its layer.
+func aggregationJobKind(target artifact.Target) (task.Kind, bool) {
+	if target.LayerOrDefault() == artifact.LayerL4 ||
+		target.Kind == artifact.KindSkill ||
+		target.Kind == artifact.KindExperienceCase ||
+		target.Kind == artifact.KindGuidance {
+		return task.KindBuildGuidance, true
+	}
+	return task.AggregateKindForTargetKey(target.TargetKey())
+}
+
 // Process implements Handler.
 func (h *ReconcileHandler) Process(ctx context.Context, job task.Job) error {
 	if job.Kind != task.KindReconcile {
@@ -81,7 +91,7 @@ func (h *ReconcileHandler) Process(ctx context.Context, job task.Job) error {
 	now := h.now().UTC()
 	// Keep one reconcile tick bounded across all scans instead of letting each
 	// category consume a full batch in the same write transaction.
-	scanLimit := h.batchSize / 6
+	scanLimit := h.batchSize / 3
 	if scanLimit < 1 {
 		scanLimit = 1
 	}
@@ -89,14 +99,10 @@ func (h *ReconcileHandler) Process(ctx context.Context, job task.Job) error {
 	after := h.cursor
 	staleAfter := h.staleCursor
 	expiredAfter := h.expiredCursor
-	groupAfter := h.groupCursor
-	skillAfter := h.skillCursor
 	h.mu.Unlock()
 	nextCursor := after
 	nextStale := staleAfter
 	nextExpired := expiredAfter
-	nextGroup := groupAfter
-	nextSkill := skillAfter
 
 	err := h.store.WithTx(ctx, func(ctx context.Context, tx Tx) error {
 		if err := checkedJob(ctx, tx, job); err != nil {
@@ -105,14 +111,14 @@ func (h *ReconcileHandler) Process(ctx context.Context, job task.Job) error {
 		if _, err := tx.RequeueStaleRunningGovernanceJobs(ctx, now.Add(-h.staleAfter), now); err != nil {
 			return err
 		}
-		ids, err := tx.ListMemoryIDsMissingJob(ctx, task.KindClassify, after, scanLimit)
+		ids, err := tx.ListMemoryIDsMissingJob(ctx, task.KindClassifyObservation, after, scanLimit)
 		if err != nil {
 			return err
 		}
 		due := now.Add(h.debounce)
 		for _, id := range ids {
 			if _, _, err := tx.UpsertJob(ctx, task.UpsertInput{
-				Kind:          task.KindClassify,
+				Kind:          task.KindClassifyObservation,
 				TargetKey:     task.MemoryKey(id),
 				InputHash:     "",
 				NextAttemptAt: &due,
@@ -133,9 +139,9 @@ func (h *ReconcileHandler) Process(ctx context.Context, job task.Job) error {
 				return err
 			}
 			for _, target := range staleTargets {
-				jobKind := task.KindAggregate
-				if target.Kind == artifact.KindSkill {
-					jobKind = task.KindBuildSkill
+				jobKind, owned := aggregationJobKind(target)
+				if !owned {
+					continue
 				}
 				existing, err := tx.GetGovernanceJobByTarget(ctx, jobKind, target.TargetKey())
 				switch {
@@ -188,9 +194,9 @@ func (h *ReconcileHandler) Process(ctx context.Context, job task.Job) error {
 				if err := tx.DeleteArtifactSearchDocument(ctx, item.ID); err != nil {
 					return err
 				}
-				jobKind := task.KindAggregate
-				if target.Kind == artifact.KindSkill {
-					jobKind = task.KindBuildSkill
+				jobKind, owned := aggregationJobKind(target)
+				if !owned {
+					continue
 				}
 				if _, _, err := tx.UpsertJob(ctx, task.UpsertInput{
 					Kind:          jobKind,
@@ -206,72 +212,6 @@ func (h *ReconcileHandler) Process(ctx context.Context, job task.Job) error {
 				nextExpired = ""
 			} else if len(expiredTargets) > 0 {
 				nextExpired = expiredTargets[len(expiredTargets)-1].TargetKey()
-			}
-
-			groups, err := h.artifacts.ListAggregationGroups(ctx, groupAfter, scanLimit)
-			if err != nil {
-				return err
-			}
-			for _, group := range groups {
-				target := group.Target
-				targetKey := target.TargetKey()
-				if _, err := tx.GetArtifactByTarget(ctx, target.Kind, targetKey); err == nil {
-					continue
-				} else if !errors.Is(err, artifact.ErrNotFound) {
-					return err
-				}
-				if _, err := tx.GetGovernanceJobByTarget(ctx, task.KindAggregate, targetKey); err == nil {
-					continue
-				} else if !errors.Is(err, task.ErrNotFound) {
-					return err
-				}
-				if _, _, err := tx.UpsertJob(ctx, task.UpsertInput{
-					Kind:          task.KindAggregate,
-					TargetKey:     targetKey,
-					InputHash:     "reconcile-group:" + targetKey,
-					NextAttemptAt: &due,
-					Now:           now,
-				}); err != nil {
-					return err
-				}
-			}
-			if len(groups) < scanLimit {
-				nextGroup = ""
-			} else if len(groups) > 0 {
-				nextGroup = groups[len(groups)-1].Cursor
-			}
-
-			skillGroups, err := h.artifacts.ListSkillGroups(ctx, skillAfter, scanLimit)
-			if err != nil {
-				return err
-			}
-			for _, group := range skillGroups {
-				target := group.Target
-				targetKey := target.TargetKey()
-				if _, err := tx.GetArtifactByTarget(ctx, target.Kind, targetKey); err == nil {
-					continue
-				} else if !errors.Is(err, artifact.ErrNotFound) {
-					return err
-				}
-				if _, err := tx.GetGovernanceJobByTarget(ctx, task.KindBuildSkill, targetKey); err == nil {
-					continue
-				} else if !errors.Is(err, task.ErrNotFound) {
-					return err
-				}
-				if _, _, err := tx.UpsertJob(ctx, task.UpsertInput{
-					Kind:          task.KindBuildSkill,
-					TargetKey:     targetKey,
-					InputHash:     "reconcile-skill:" + targetKey,
-					NextAttemptAt: &due,
-					Now:           now,
-				}); err != nil {
-					return err
-				}
-			}
-			if len(skillGroups) < scanLimit {
-				nextSkill = ""
-			} else if len(skillGroups) > 0 {
-				nextSkill = skillGroups[len(skillGroups)-1].Cursor
 			}
 		}
 
@@ -291,8 +231,6 @@ func (h *ReconcileHandler) Process(ctx context.Context, job task.Job) error {
 	h.cursor = nextCursor
 	h.staleCursor = nextStale
 	h.expiredCursor = nextExpired
-	h.groupCursor = nextGroup
-	h.skillCursor = nextSkill
 	h.mu.Unlock()
 	return nil
 }

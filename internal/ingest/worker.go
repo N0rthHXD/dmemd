@@ -228,11 +228,10 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		"job_id", claimed.ID,
 		"status", result.Status,
 		"quality_outcome", result.Quality,
-		"memories", len(result.MemoryIDs),
-		"isolated_candidates", result.Stats.IsolatedCandidates,
-		"retained_candidates", result.Retention.Retained,
-		"not_retained_candidates", result.Retention.NotRetained,
-		"extraction_chunks", result.Stats.ExtractionChunks,
+		"observations", len(result.ObservationIDs),
+		"invalid_items", result.Stats.InvalidItems,
+		"pending_observations", result.Stats.PendingObservations,
+		"extraction_chunks", result.Stats.Chunks,
 		"queue_age_ms", queueAge,
 		"duration_ms", duration,
 		"model_calls", result.ModelUsage.Calls,
@@ -269,8 +268,6 @@ func (w *Worker) handleFailure(ctx context.Context, claimed Job, cause error) er
 		var qualityErr *ExtractionQualityError
 		if errors.As(cause, &qualityErr) {
 			current.ExtractionStats = qualityErr.Stats
-			current.Retention = qualityErr.Retention
-			current.Retention.Normalize()
 			current.Timings = qualityErr.Timings
 			current.ModelUsage = qualityErr.ModelUsage
 			current.Diagnostics = qualityErr.Diagnostics

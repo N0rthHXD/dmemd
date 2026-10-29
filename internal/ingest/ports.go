@@ -6,22 +6,16 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/N0rthHXD/dmemd/internal/governance/task"
 	"github.com/N0rthHXD/dmemd/internal/memory"
+	"github.com/N0rthHXD/dmemd/internal/observation"
 	"github.com/N0rthHXD/dmemd/internal/source"
 )
 
 // ErrNotFound is returned when a requested ingest job does not exist.
 var ErrNotFound = errors.New("ingest job not found")
 
-// ErrCandidateLimitExceeded fails one attempt without dropping candidates. The
-// caller may split the source into smaller submissions.
-var ErrCandidateLimitExceeded = errors.New("ingest: candidate_limit_exceeded")
-
-// ErrStateChanged signals that facts or catalog state moved during a model
-// call. The transaction is rolled back and the worker retries the whole source.
-var ErrStateChanged = errors.New("ingest: state changed during model call")
-
-// ErrProtocol marks an unusable provider decision set. It is retryable.
+// ErrProtocol marks an unusable provider extraction response. It is retryable.
 var ErrProtocol = errors.New("ingest: invalid model protocol")
 
 // IngestService is the unified submission and job-query capability. There is
@@ -29,31 +23,6 @@ var ErrProtocol = errors.New("ingest: invalid model protocol")
 type IngestService interface {
 	Submit(ctx context.Context, submission Submission) (Receipt, error)
 	GetJob(ctx context.Context, id string) (Job, error)
-}
-
-// ExtractionProvider turns the current input into independent candidate facts.
-// Implementations must not receive the full memory database and must not write
-// storage.
-type ExtractionProvider interface {
-	Extract(ctx context.Context, request ExtractionRequest) (ExtractionResult, error)
-}
-
-// ExtractionRepairProvider is optional. A processor spends at most one repair
-// call per extraction attempt, then isolates invalid candidates while retaining
-// valid ones. A structural retry shares that same budget.
-type ExtractionRepairProvider interface {
-	RepairExtraction(ctx context.Context, request ExtractionRepairRequest) (ExtractionResult, error)
-}
-
-// DecisionProvider judges the relationship between candidates and bounded
-// existing-fact context. The same remote adapter may implement both providers.
-type DecisionProvider interface {
-	Decide(ctx context.Context, request DecisionRequest) (DecisionResult, error)
-}
-
-// DecisionRepairProvider repairs only the invalid subset of a decision batch.
-type DecisionRepairProvider interface {
-	RepairDecision(ctx context.Context, request DecisionRepairRequest) (DecisionResult, error)
 }
 
 // ProviderError describes a provider failure without retaining raw model
@@ -119,16 +88,19 @@ type JobTx interface {
 	RequeueProtocolFailedJobs(ctx context.Context, now time.Time) (int64, error)
 }
 
-// Tx is the complete transaction scope for ingestion: memory snapshot,
-// revision, evidence, search index, source and job result all commit together.
+// Tx is the complete transaction scope for ingestion. Source checks,
+// evidence, observations, governance task registration and the extraction job
+// result all commit together.
 type Tx interface {
 	memory.Tx
 	source.Tx
+	observation.Tx
+	task.Tx
 	JobTx
 }
 
-// Store runs the short ingestion transaction. Model calls and candidate
-// analysis happen before the callback.
+// Store runs the short ingestion transaction. Model calls and observation
+// construction happen before the callback.
 type Store interface {
 	WithTx(ctx context.Context, fn func(context.Context, Tx) error) error
 }

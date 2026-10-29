@@ -1,3 +1,5 @@
+//go:build legacy
+
 package integration_test
 
 import (

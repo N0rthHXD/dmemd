@@ -3,42 +3,13 @@ package memory
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/N0rthHXD/dmemd/internal/governance/task"
 	"github.com/N0rthHXD/dmemd/internal/idgen"
 )
-
-// NewFactGroup creates service-owned metadata. The model never supplies the ID.
-func NewFactGroup(input FactGroupInput, now time.Time) (FactGroup, error) {
-	cardinality, err := NormalizeCardinality(input.Cardinality)
-	if err != nil {
-		return FactGroup{}, err
-	}
-	now = now.UTC()
-	conditions := NormalizeConditions(input.Conditions)
-	group := FactGroup{
-		ID:          idgen.NewUUID(),
-		ScopeKey:    NormalizeScopeKey(input.ScopeKey),
-		Subject:     strings.TrimSpace(input.Subject),
-		Predicate:   strings.TrimSpace(input.Predicate),
-		Scope:       strings.TrimSpace(input.Scope),
-		Conditions:  conditions,
-		Cardinality: cardinality,
-		Generation:  1,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}
-	group.SubjectKey = NormalizeIdentityText(group.Subject)
-	group.PredicateKey = NormalizeIdentityText(group.Predicate)
-	group.SceneKey = NormalizeIdentityText(group.Scope)
-	group.ConditionsKey = ConditionsKey(group.Conditions)
-	return group, nil
-}
 
 // ListConflicts returns a fixed-order management list.
 func (s *Service) ListConflicts(ctx context.Context, options ConflictListOptions) ([]Conflict, error) {
@@ -51,18 +22,9 @@ func (s *Service) GetConflict(ctx context.Context, id string) (Conflict, error) 
 }
 
 type resolutionPayload struct {
-	Action        ResolutionAction    `json:"action"`
-	MemberIDs     []string            `json:"member_ids,omitempty"`
-	SeparateGroup *FactGroupInput     `json:"separate_group,omitempty"`
-	Segments      []resolutionSegment `json:"segments,omitempty"`
-	Reason        string              `json:"reason,omitempty"`
-}
-
-type resolutionSegment struct {
-	MemoryID  string     `json:"memory_id,omitempty"`
-	Content   string     `json:"content,omitempty"`
-	ValidFrom *time.Time `json:"valid_from,omitempty"`
-	ValidTo   *time.Time `json:"valid_to,omitempty"`
+	Action    ResolutionAction `json:"action"`
+	MemberIDs []string         `json:"member_ids,omitempty"`
+	Reason    string           `json:"reason,omitempty"`
 }
 
 // Resolve performs one explicit, version-checked adjudication in a short
@@ -80,8 +42,7 @@ func (s *Service) Resolve(ctx context.Context, input ResolveInput) (Conflict, er
 
 // ResolveInTx applies an adjudication inside an existing transaction. Explicit
 // management and deterministic automatic review share this path so member
-// versions, intervals, assertion changes and derived invalidation stay
-// identical. Resolving cancels any queued review for the same conflict.
+// versions, assertion changes and derived invalidation stay identical.
 func (s *Service) ResolveInTx(ctx context.Context, tx Tx, input ResolveInput) (Conflict, error) {
 	conflict, err := tx.GetConflict(ctx, input.ConflictID)
 	if err != nil {
@@ -150,21 +111,11 @@ func CompleteConflictResolution(ctx context.Context, tx Tx, conflict Conflict, r
 }
 
 func (s *Service) resolutionPayload(input ResolveInput) resolutionPayload {
-	payload := resolutionPayload{
-		Action:        input.Action,
-		MemberIDs:     append([]string(nil), input.MemberIDs...),
-		SeparateGroup: input.SeparateGroup,
-		Reason:        input.Reason,
+	return resolutionPayload{
+		Action:    input.Action,
+		MemberIDs: append([]string(nil), input.MemberIDs...),
+		Reason:    input.Reason,
 	}
-	for _, segment := range input.Timeline {
-		payload.Segments = append(payload.Segments, resolutionSegment{
-			MemoryID:  segment.MemoryID,
-			Content:   segment.Content,
-			ValidFrom: UTCPointer(segment.ValidFrom),
-			ValidTo:   UTCPointer(segment.ValidTo),
-		})
-	}
-	return payload
 }
 
 func validateMemberVersions(conflict Conflict, supplied []ConflictMember) error {
@@ -184,8 +135,6 @@ func validateMemberVersions(conflict Conflict, supplied []ConflictMember) error 
 		if !ok {
 			return fmt.Errorf("%w: 成员 %s 不属于该冲突", ErrInvalidResolution, member.MemoryID)
 		}
-		// The detail exposes both detection and current versions. If the
-		// current version is known, the client must adjudicate that snapshot.
 		expected := detected.Version
 		if detected.CurrentVersion > 0 {
 			expected = detected.CurrentVersion
@@ -205,10 +154,6 @@ func (s *Service) applyResolution(ctx context.Context, tx Tx, conflict *Conflict
 	switch input.Action {
 	case ResolutionChoose:
 		return s.resolveChoose(ctx, tx, conflict, input)
-	case ResolutionTimeline:
-		return s.resolveTimeline(ctx, tx, conflict, input)
-	case ResolutionSeparateScope:
-		return s.resolveSeparate(ctx, tx, conflict, input)
 	case ResolutionRejectAll:
 		return s.resolveRejectAll(ctx, tx, conflict)
 	default:
@@ -224,18 +169,6 @@ func (s *Service) resolveChoose(ctx context.Context, tx Tx, conflict *Conflict, 
 	chosen, err := s.conflictMember(ctx, tx, conflict, chosenID)
 	if err != nil {
 		return err
-	}
-	for _, member := range conflict.Members {
-		if member.MemoryID == chosenID {
-			continue
-		}
-		other, err := tx.GetMemory(ctx, member.MemoryID)
-		if err != nil {
-			return err
-		}
-		if !Overlaps(chosen.ValidFrom, chosen.ValidTo, other.ValidFrom, other.ValidTo) {
-			return fmt.Errorf("%w: 成员时间段不重叠，必须使用 timeline", ErrInvalidResolution)
-		}
 	}
 	if err := s.setAssertion(ctx, tx, chosen, AssertionAccepted, OperationResolve); err != nil {
 		return err
@@ -268,181 +201,6 @@ func (s *Service) resolveRejectAll(ctx context.Context, tx Tx, conflict *Conflic
 	return nil
 }
 
-func (s *Service) resolveSeparate(ctx context.Context, tx Tx, conflict *Conflict, input ResolveInput) error {
-	if input.SeparateGroup == nil {
-		return fmt.Errorf("%w: separate_scope 需要新的主体或场景", ErrInvalidResolution)
-	}
-	// The scope of a separate group comes from the conflict members, never
-	// from model/client free text. Reuse an existing exact identity instead of
-	// violating the scoped unique index.
-	scopeKey := input.SeparateGroup.ScopeKey
-	if scopeKey == "" && len(conflict.Members) > 0 {
-		if item, err := tx.GetMemory(ctx, conflict.Members[0].MemoryID); err == nil {
-			scopeKey = item.ScopeKey
-		}
-	}
-	identity := FactGroupIdentity{
-		ScopeKey: scopeKey, Subject: input.SeparateGroup.Subject,
-		Predicate: input.SeparateGroup.Predicate, Scope: input.SeparateGroup.Scope,
-		Conditions: input.SeparateGroup.Conditions, Cardinality: input.SeparateGroup.Cardinality,
-	}
-	group, err := tx.FindFactGroup(ctx, identity)
-	if errors.Is(err, ErrNotFound) {
-		input.SeparateGroup.ScopeKey = scopeKey
-		group, err = NewFactGroup(*input.SeparateGroup, s.timestamp())
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrInvalidResolution, err)
-		}
-		if err := tx.InsertFactGroup(ctx, group); err != nil {
-			return err
-		}
-	} else if err != nil {
-		return err
-	}
-	for _, member := range conflict.Members {
-		item, err := tx.GetMemory(ctx, member.MemoryID)
-		if err != nil {
-			return err
-		}
-		evidence, err := tx.ListRevisionEvidence(ctx, item.ID, item.Version)
-		if err != nil {
-			return err
-		}
-		updated, err := s.Revise(ctx, tx, ReviseInput{
-			MemoryID:           item.ID,
-			Kind:               item.Kind,
-			Title:              item.Title,
-			Content:            item.Content,
-			ObservedAt:         item.ObservedAt,
-			ObservedAtBasis:    item.ObservedAtBasis,
-			EventTime:          item.EventTime,
-			EventTimeBasis:     item.EventTimeBasis,
-			EventTimePrecision: item.EventTimePrecision,
-			ValidFrom:          item.ValidFrom,
-			ValidTo:            item.ValidTo,
-			ValidFromBasis:     item.ValidFromBasis,
-			ValidToBasis:       item.ValidToBasis,
-			Temporal:           item.Temporal,
-			AssertionStatus:    item.AssertionStatus,
-			FactGroupID:        group.ID,
-			Procedure:          item.Procedure,
-			Qualifiers:         item.Qualifiers,
-			Evidence:           evidence,
-			Operation:          OperationResolve,
-			Reason:             input.Reason,
-		})
-		if err != nil {
-			return err
-		}
-		if updated.ID != item.ID {
-			return errors.New("memory: 重新归组不应更换记忆 ID")
-		}
-	}
-	return nil
-}
-
-func (s *Service) resolveTimeline(ctx context.Context, tx Tx, conflict *Conflict, input ResolveInput) error {
-	if len(input.Timeline) == 0 {
-		return fmt.Errorf("%w: timeline 至少需要一个分段", ErrInvalidResolution)
-	}
-	// Validate non-overlapping, non-empty segments first. A timeline segment
-	// must have both bounds; unknown boundaries require returning to unresolved.
-	previousTo := (*time.Time)(nil)
-	for _, segment := range input.Timeline {
-		if segment.ValidFrom == nil || segment.ValidTo == nil {
-			return fmt.Errorf("%w: 时间线分段必须提供明确起止", ErrInvalidResolution)
-		}
-		timeRange, err := NormalizeTimeRange(segment.ValidFrom, segment.ValidTo, BasisInferred, BasisInferred)
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrInvalidResolution, err)
-		}
-		if previousTo != nil && previousTo.After(*timeRange.From) {
-			return fmt.Errorf("%w: 时间线分段必须递增且不重叠", ErrInvalidResolution)
-		}
-		previousTo = timeRange.To
-	}
-
-	covered := make(map[string]struct{}, len(input.Timeline))
-	for _, segment := range input.Timeline {
-		if segment.MemoryID != "" {
-			item, err := s.conflictMember(ctx, tx, conflict, segment.MemoryID)
-			if err != nil {
-				return err
-			}
-			content := strings.TrimSpace(segment.Content)
-			if content == "" {
-				content = item.Content
-			}
-			evidence, err := tx.ListRevisionEvidence(ctx, item.ID, item.Version)
-			if err != nil {
-				return err
-			}
-			if _, err := s.Revise(ctx, tx, ReviseInput{
-				MemoryID:           item.ID,
-				Kind:               item.Kind,
-				Title:              item.Title,
-				Content:            content,
-				ObservedAt:         item.ObservedAt,
-				ObservedAtBasis:    item.ObservedAtBasis,
-				EventTime:          item.EventTime,
-				EventTimeBasis:     item.EventTimeBasis,
-				EventTimePrecision: item.EventTimePrecision,
-				ValidFrom:          segment.ValidFrom,
-				ValidTo:            segment.ValidTo,
-				ValidFromBasis:     BasisInferred,
-				ValidToBasis:       BasisInferred,
-				Temporal:           item.Temporal,
-				AssertionStatus:    AssertionAccepted,
-				FactGroupID:        item.FactGroupID,
-				Procedure:          item.Procedure,
-				Qualifiers:         item.Qualifiers,
-				Evidence:           evidence,
-				Operation:          OperationResolve,
-				Reason:             input.Reason,
-			}); err != nil {
-				return err
-			}
-			covered[item.ID] = struct{}{}
-			continue
-		}
-		if strings.TrimSpace(segment.Content) == "" {
-			return fmt.Errorf("%w: 新分段缺少正文", ErrInvalidResolution)
-		}
-		timeRange, _ := NormalizeTimeRange(segment.ValidFrom, segment.ValidTo, BasisInferred, BasisInferred)
-		created, err := s.Create(ctx, tx, CreateInput{
-			Kind:            KindFact,
-			Title:           defaultTitle(segment.Content),
-			Content:         strings.TrimSpace(segment.Content),
-			ObservedAt:      s.timestamp(),
-			ValidFrom:       timeRange.From,
-			ValidTo:         timeRange.To,
-			ValidFromBasis:  timeRange.FromBasis,
-			ValidToBasis:    timeRange.ToBasis,
-			AssertionStatus: AssertionAccepted,
-			FactGroupID:     conflict.FactGroupID,
-			Reason:          input.Reason,
-			Operation:       OperationResolve,
-		})
-		if err != nil {
-			return err
-		}
-		covered[created.ID] = struct{}{}
-	}
-	for _, member := range conflict.Members {
-		if _, ok := covered[member.MemoryID]; ok {
-			continue
-		}
-		item, err := tx.GetMemory(ctx, member.MemoryID)
-		if err != nil {
-			return err
-		}
-		if err := s.setAssertion(ctx, tx, item, AssertionRejected, OperationResolve); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (s *Service) conflictMember(ctx context.Context, tx Tx, conflict *Conflict, memoryID string) (Memory, error) {
 	for _, member := range conflict.Members {
 		if member.MemoryID == memoryID {
@@ -461,34 +219,14 @@ func (s *Service) setAssertion(ctx context.Context, tx Tx, item Memory, status A
 		return err
 	}
 	_, err = s.Revise(ctx, tx, ReviseInput{
-		MemoryID:           item.ID,
-		Kind:               item.Kind,
-		Title:              item.Title,
-		Content:            item.Content,
-		ObservedAt:         item.ObservedAt,
-		ObservedAtBasis:    item.ObservedAtBasis,
-		EventTime:          item.EventTime,
-		EventTimeBasis:     item.EventTimeBasis,
-		EventTimePrecision: item.EventTimePrecision,
-		ValidFrom:          item.ValidFrom,
-		ValidTo:            item.ValidTo,
-		ValidFromBasis:     item.ValidFromBasis,
-		ValidToBasis:       item.ValidToBasis,
-		Temporal:           item.Temporal,
-		AssertionStatus:    status,
-		FactGroupID:        item.FactGroupID,
-		Procedure:          item.Procedure,
-		Qualifiers:         item.Qualifiers,
-		Evidence:           evidence,
-		Operation:          operation,
+		MemoryID:        item.ID,
+		Kind:            item.Kind,
+		Title:           item.Title,
+		Content:         item.Content,
+		AssertionStatus: status,
+		ScopeKey:        item.ScopeKey,
+		Evidence:        evidence,
+		Operation:       operation,
 	})
 	return err
-}
-
-func defaultTitle(content string) string {
-	runes := []rune(strings.TrimSpace(content))
-	if len(runes) > 40 {
-		runes = runes[:40]
-	}
-	return strings.TrimSpace(string(runes))
 }

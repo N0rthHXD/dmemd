@@ -64,7 +64,7 @@ func TestSubmitPersistsSourceAndQueuedJobTogether(t *testing.T) {
 				t.Fatal(err)
 			}
 			if job.SourceID != receipt.SourceID || job.Status != ingest.JobQueued || job.Attempts != 0 ||
-				job.MemoryIDs == nil || len(job.MemoryIDs) != 0 || !job.CreatedAt.Equal(clock) {
+				job.ObservationIDs == nil || len(job.ObservationIDs) != 0 || !job.CreatedAt.Equal(clock) {
 				t.Fatalf("job = %+v", job)
 			}
 		})

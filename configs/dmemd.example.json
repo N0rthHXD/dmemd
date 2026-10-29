@@ -16,12 +16,12 @@
       "timeout": "180s",
       "reasoning_effort": "low"
     },
-    "decision": {
-      "name": "example-model",
-      "timeout": "300s",
-      "reasoning_effort": "medium"
-    },
     "governance": {
+      "name": "example-model",
+      "timeout": "60s",
+      "reasoning_effort": "minimal"
+    },
+    "aggregation": {
       "name": "example-model",
       "timeout": "60s",
       "reasoning_effort": "minimal"
@@ -37,9 +37,9 @@
     "min_similarity": 0.35
   },
   "worker": {
-    "process_budget": "600s",
     "extraction_timeout": "180s",
-    "decision_timeout": "300s",
+    "governance_timeout": "60s",
+    "aggregation_timeout": "60s",
     "workers": 1,
     "max_attempts": 3,
     "retry_delays": [
@@ -56,6 +56,13 @@
     "min_call_interval": "2m",
     "max_inputs": 64,
     "max_wait": "30m"
+  },
+  "aggregation": {
+    "enabled": true,
+    "debounce": "10s",
+    "reconcile_interval": "15m",
+    "max_inputs": 64,
+    "l1_bucket_size": "24h"
   },
   "log": {
     "level": "info",

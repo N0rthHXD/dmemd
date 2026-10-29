@@ -43,6 +43,22 @@ type JobCancellationTx interface {
 	ScrubJobErrorsBySource(ctx context.Context, sourceID, reason string, at time.Time) (int64, error)
 }
 
+// RedactionImpact reports the governance effects of one source redaction. It is
+// produced inside the redaction transaction so observation state, derived
+// invalidation and source removal commit together.
+type RedactionImpact struct {
+	ObservationIDs     []string
+	InvalidatedDerived []string
+}
+
+// RedactionPropagator applies observation withdrawal and derived invalidation
+// after the source payload and evidence have been cleared in the caller's
+// transaction. Governance implements this interface; source owns only the
+// trigger shape so it does not depend on governance types.
+type RedactionPropagator interface {
+	PropagateRedaction(ctx context.Context, tx Tx, sourceID string, at time.Time) (RedactionImpact, error)
+}
+
 // Tx is the capability set available inside one source transaction. The
 // concrete implementation lives in store/sqlite; business code never sees
 // *sql.Tx.

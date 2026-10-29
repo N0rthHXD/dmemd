@@ -1,12 +1,11 @@
--- Derived artifacts (topic summaries, profiles, experience cases and skills).
--- One row represents one current object; revisions are
--- immutable and every revision records the atomic memories it was built from.
+-- Derived memories at L1-L4. One row is one current object; revisions are
+-- immutable and every revision records its typed inputs in derived_dependencies.
 -- Only the active current version is indexed for derived recall.
 
 CREATE TABLE artifacts (
     id              TEXT NOT NULL PRIMARY KEY,
-    kind            TEXT NOT NULL CHECK (kind IN
-                     ('topic_summary', 'scope_summary', 'profile', 'experience_case', 'skill')),
+    layer           TEXT NOT NULL CHECK (layer IN ('l1', 'l2', 'l3', 'l4')),
+    kind            TEXT NOT NULL,
     target_key      TEXT NOT NULL,
     scope_key       TEXT NOT NULL DEFAULT '',
     topic           TEXT NOT NULL DEFAULT '',
@@ -17,48 +16,41 @@ CREATE TABLE artifacts (
     UNIQUE (kind, target_key)
 );
 
+CREATE INDEX idx_artifacts_layer_state ON artifacts(layer, state, updated_at);
 CREATE INDEX idx_artifacts_kind_state ON artifacts(kind, state, updated_at);
-CREATE INDEX idx_artifacts_scope ON artifacts(scope_key, kind);
+CREATE INDEX idx_artifacts_scope ON artifacts(scope_key, layer, kind);
 
 CREATE TABLE artifact_revisions (
-    artifact_id       TEXT NOT NULL,
-    version           INTEGER NOT NULL CHECK (version >= 1),
-    title             TEXT NOT NULL DEFAULT '',
-    content           TEXT NOT NULL DEFAULT '',
-    payload_json      TEXT NOT NULL DEFAULT '{}',
-    content_hash      TEXT NOT NULL DEFAULT '',
-    generator         TEXT NOT NULL DEFAULT '',
-    protocol_version  TEXT NOT NULL DEFAULT '',
-    taxonomy_version  TEXT NOT NULL DEFAULT '',
-    generator_version TEXT NOT NULL DEFAULT '',
-    run_id            TEXT NOT NULL DEFAULT '',
-    provenance_json   TEXT NOT NULL DEFAULT '{}',
-    reason_code       TEXT NOT NULL DEFAULT '',
-    truncated         INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0, 1)),
-    created_at        TEXT NOT NULL,
+    artifact_id      TEXT NOT NULL,
+    version          INTEGER NOT NULL CHECK (version >= 1),
+    title            TEXT NOT NULL DEFAULT '',
+    content          TEXT NOT NULL DEFAULT '',
+    payload_json     TEXT NOT NULL DEFAULT '{}',
+    content_hash     TEXT NOT NULL DEFAULT '',
+    generator        TEXT NOT NULL DEFAULT '',
+    protocol_version TEXT NOT NULL DEFAULT '',
+    truncated        INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0, 1)),
+    created_at       TEXT NOT NULL,
     PRIMARY KEY (artifact_id, version),
     FOREIGN KEY (artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE
 );
 
--- Direct leaf dependencies. Artifacts never depend on other artifacts in the
--- first release, so purge can enumerate the complete affected set before any
--- foreign-key cascade removes the edge.
-CREATE TABLE artifact_memory_dependencies (
-    artifact_id     TEXT NOT NULL,
-    artifact_version INTEGER NOT NULL,
-    memory_id       TEXT NOT NULL,
-    memory_version  INTEGER NOT NULL CHECK (memory_version >= 1),
-    PRIMARY KEY (artifact_id, artifact_version, memory_id),
-    FOREIGN KEY (artifact_id, artifact_version)
-        REFERENCES artifact_revisions(artifact_id, version) ON DELETE CASCADE,
-    FOREIGN KEY (memory_id, memory_version)
-        REFERENCES memory_revisions(memory_id, version) ON DELETE CASCADE
+-- Generic derived inputs. L1 depends on observations, L2 on L1, L3 on L2 and L4
+-- on stable memories, derived objects and experience runs. The table deliberately
+-- has no foreign key on derived_id: invalidation enumerates the complete affected
+-- set before any artifact row is removed.
+CREATE TABLE derived_dependencies (
+    derived_id      TEXT NOT NULL,
+    derived_version INTEGER NOT NULL,
+    input_type      TEXT NOT NULL CHECK (input_type IN ('observation', 'memory', 'derived', 'experience')),
+    input_id        TEXT NOT NULL,
+    input_version   INTEGER NOT NULL DEFAULT 0,
+    required        INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (derived_id, derived_version, input_type, input_id, input_version)
 );
 
-CREATE INDEX idx_artifact_memory_dependencies_memory
-    ON artifact_memory_dependencies(memory_id, memory_version);
-CREATE INDEX idx_artifact_memory_dependencies_artifact
-    ON artifact_memory_dependencies(artifact_id, artifact_version);
+CREATE INDEX idx_derived_dependencies_input
+    ON derived_dependencies(input_type, input_id, input_version);
 
 CREATE TABLE artifact_search_docs (
     row_id           INTEGER PRIMARY KEY,
@@ -99,8 +91,7 @@ END;
 -- failed content object with retained history. A successful commit clears the
 -- evaluation row for its target.
 CREATE TABLE derived_target_evaluations (
-    kind            TEXT NOT NULL CHECK (kind IN
-                     ('topic_summary', 'scope_summary', 'profile', 'experience_case', 'skill')),
+    kind            TEXT NOT NULL,
     target_key      TEXT NOT NULL,
     scope_key       TEXT NOT NULL DEFAULT '',
     topic           TEXT NOT NULL DEFAULT '',

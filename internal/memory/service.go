@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
+	"github.com/N0rthHXD/dmemd/internal/artifact"
 	"github.com/N0rthHXD/dmemd/internal/governance/task"
 	"github.com/N0rthHXD/dmemd/internal/idgen"
 	"github.com/N0rthHXD/dmemd/internal/source"
@@ -79,6 +79,7 @@ func NewService(reader Reader, store Store, documents DocumentBuilder, options .
 
 var (
 	_ MemoryService   = (*Service)(nil)
+	_ DetailService   = (*Service)(nil)
 	_ Writer          = (*Service)(nil)
 	_ ConflictService = (*Service)(nil)
 )
@@ -129,7 +130,7 @@ func (s *Service) GetEvidence(ctx context.Context, id string, version int) ([]so
 }
 
 // Relations returns both directions of the current relation graph for one
-// memory, including whether each endpoint moved past decision time.
+// memory, including whether each endpoint moved past the recorded version.
 func (s *Service) Relations(ctx context.Context, id string) ([]Relation, error) {
 	if _, err := s.reader.GetMemory(ctx, id); err != nil {
 		return nil, err
@@ -137,21 +138,78 @@ func (s *Service) Relations(ctx context.Context, id string) ([]Relation, error) 
 	return s.reader.ListRelationsForMemory(ctx, id)
 }
 
-// Evolution returns the deterministic supersession/correction audit chain that
-// touches one memory.
-func (s *Service) Evolution(ctx context.Context, id string, limit int) ([]EvolutionEvent, error) {
-	if _, err := s.reader.GetMemory(ctx, id); err != nil {
-		return nil, err
+// Detail returns the canonical current view together with the exact
+// observations that support its current version, typed relation refs, open
+// conflict refs and directly derived dependents.
+func (s *Service) Detail(ctx context.Context, id string) (Detail, error) {
+	item, err := s.reader.GetMemory(ctx, id)
+	if err != nil {
+		return Detail{}, err
 	}
-	return s.reader.ListEvolutionEvents(ctx, id, limit)
+	observations, err := s.reader.ListMemoryObservationRefs(ctx, id, item.Version)
+	if err != nil {
+		return Detail{}, err
+	}
+	relations, err := s.reader.ListMemoryRelationRefs(ctx, id)
+	if err != nil {
+		return Detail{}, err
+	}
+	conflicts, err := s.reader.ListConflictIDsForMemory(ctx, id)
+	if err != nil {
+		return Detail{}, err
+	}
+	dependents, err := s.reader.ListDependents(ctx, artifact.DependencyRef{
+		Type: artifact.DependencyMemory,
+		ID:   id,
+	})
+	if err != nil {
+		return Detail{}, err
+	}
+	detail := Detail{
+		Memory:            item,
+		ObservationIDs:    nonNilStrings(observations),
+		Relations:         nonNilRelationRefs(relations),
+		ConflictIDs:       nonNilStrings(conflicts),
+		DerivedDependents: derivedDependents(dependents),
+	}
+	return detail, nil
+}
+
+func nonNilStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
+}
+
+func nonNilRelationRefs(values []RelationRef) []RelationRef {
+	if values == nil {
+		return []RelationRef{}
+	}
+	return values
+}
+
+func derivedDependents(items []artifact.DerivedRef) []DerivedDependent {
+	result := make([]DerivedDependent, 0, len(items))
+	for _, item := range items {
+		result = append(result, DerivedDependent{
+			ID:        item.ID,
+			Layer:     string(item.Layer),
+			Kind:      string(item.Kind),
+			TargetKey: item.TargetKey,
+			ScopeKey:  item.ScopeKey,
+			Topic:     item.Topic,
+			Version:   item.Version,
+			State:     string(item.State),
+		})
+	}
+	return result
 }
 
 // Create writes the first snapshot, revision, complete evidence set and search
 // document in the caller's transaction.
 func (s *Service) Create(ctx context.Context, tx Tx, input CreateInput) (Memory, error) {
 	now := s.timestamp()
-	observedAt := normalizeObservedAt(input.ObservedAt, now)
-	observedBasis := normalizeObservedBasis(input.ObservedAtBasis, input.ObservedAt, now)
 	kind := input.Kind
 	if kind == "" {
 		kind = KindFact
@@ -160,47 +218,18 @@ func (s *Service) Create(ctx context.Context, tx Tx, input CreateInput) (Memory,
 	if err != nil {
 		return Memory{}, err
 	}
-	timeRange, err := NormalizeTimeRange(input.ValidFrom, input.ValidTo, input.ValidFromBasis, input.ValidToBasis)
-	if err != nil {
-		return Memory{}, err
-	}
-	eventTime, eventBasis, eventPrecision, err := NormalizeEventTime(input.EventTime, input.EventTimeBasis, input.EventTimePrecision)
-	if err != nil {
-		return Memory{}, err
-	}
 	item := Memory{
-		ID:                 idgen.NewUUID(),
-		Kind:               kind,
-		Phase:              normalizePhase(input.Phase),
-		Durability:         normalizeDurability(input.Durability),
-		Title:              input.Title,
-		Content:            input.Content,
-		State:              StateActive,
-		AssertionStatus:    status,
-		Version:            1,
-		ObservedAt:         observedAt,
-		ObservedAtBasis:    observedBasis,
-		EventTime:          eventTime,
-		EventTimeBasis:     eventBasis,
-		EventTimePrecision: eventPrecision,
-		ValidFrom:          timeRange.From,
-		ValidTo:            timeRange.To,
-		ValidFromBasis:     timeRange.FromBasis,
-		ValidToBasis:       timeRange.ToBasis,
-		Temporal:           input.Temporal,
-		FactGroupID:        input.FactGroupID,
-		CreatedAt:          now,
-		UpdatedAt:          now,
-		CreatedByApp:       input.CreatedByApp,
-		OriginSourceID:     input.OriginSourceID,
-		ScopeKey:           NormalizeScopeKey(input.ScopeKey),
-		Procedure:          input.Procedure,
-		Qualifiers:         input.Qualifiers,
-		Topics:             CanonicalTopics(rawTopics(input.Topics)),
-		RawTopics:          rawTopics(input.Topics),
-	}
-	if err := validateFactGroupReference(ctx, tx, item.FactGroupID); err != nil {
-		return Memory{}, err
+		ID:              idgen.NewUUID(),
+		Kind:            kind,
+		Title:           input.Title,
+		Content:         input.Content,
+		State:           StateActive,
+		AssertionStatus: status,
+		Version:         1,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		OriginSourceID:  input.OriginSourceID,
+		ScopeKey:        NormalizeScopeKey(input.ScopeKey),
 	}
 	evidence, err := s.prepareEvidence(ctx, tx, input.Evidence, now)
 	if err != nil {
@@ -225,14 +254,11 @@ func (s *Service) Create(ctx context.Context, tx Tx, input CreateInput) (Memory,
 	if err := s.syncMemoryChanged(ctx, tx, nil, &item, true); err != nil {
 		return Memory{}, err
 	}
-	if err := s.syncConflictReviews(ctx, tx, []string{item.ID}); err != nil {
-		return Memory{}, err
-	}
 	return item, nil
 }
 
-// Revise creates a new content, time, assertion, group or evidence revision from
-// the persisted current snapshot. The caller never supplies a version
+// Revise creates a new content, assertion or evidence revision from the
+// persisted current snapshot. The caller never supplies a version
 // precondition. Content changes do not inherit the previous conclusion's
 // evidence unless the caller explicitly includes it; add_evidence appends to
 // the current complete set.
@@ -250,43 +276,8 @@ func (s *Service) Revise(ctx context.Context, tx Tx, input ReviseInput) (Memory,
 		if candidate.Kind == "" {
 			candidate.Kind = current.Kind
 		}
-		if input.Phase != "" {
-			candidate.Phase = normalizePhase(input.Phase)
-		}
-		if input.Durability != "" {
-			candidate.Durability = normalizeDurability(input.Durability)
-		}
 		candidate.Title = input.Title
 		candidate.Content = input.Content
-		candidate.ObservedAt = normalizeObservedAt(input.ObservedAt, current.ObservedAt)
-		if input.ObservedAt.IsZero() && input.ObservedAtBasis == "" {
-			candidate.ObservedAtBasis = current.ObservedAtBasis
-		} else {
-			candidate.ObservedAtBasis = normalizeObservedBasis(input.ObservedAtBasis, input.ObservedAt, current.ObservedAt)
-		}
-		if input.ValidFrom != nil || input.ValidTo != nil || input.ValidFromBasis != "" ||
-			input.ValidToBasis != "" {
-			timeRange, err := NormalizeTimeRange(input.ValidFrom, input.ValidTo, input.ValidFromBasis, input.ValidToBasis)
-			if err != nil {
-				return Memory{}, err
-			}
-			candidate.ValidFrom = timeRange.From
-			candidate.ValidTo = timeRange.To
-			candidate.ValidFromBasis = timeRange.FromBasis
-			candidate.ValidToBasis = timeRange.ToBasis
-		}
-		if input.ReplaceStructured {
-			eventTime, eventBasis, eventPrecision, err := NormalizeEventTime(input.EventTime, input.EventTimeBasis, input.EventTimePrecision)
-			if err != nil {
-				return Memory{}, err
-			}
-			candidate.EventTime = eventTime
-			candidate.EventTimeBasis = eventBasis
-			candidate.EventTimePrecision = eventPrecision
-			candidate.Temporal = input.Temporal
-			candidate.Procedure = input.Procedure
-			candidate.Qualifiers = input.Qualifiers
-		}
 		if input.AssertionStatus != "" {
 			status, err := NormalizeAssertionStatus(input.AssertionStatus)
 			if err != nil {
@@ -294,52 +285,16 @@ func (s *Service) Revise(ctx context.Context, tx Tx, input ReviseInput) (Memory,
 			}
 			candidate.AssertionStatus = status
 		}
-		if input.FactGroupID != "" {
-			if err := validateFactGroupReference(ctx, tx, input.FactGroupID); err != nil {
-				return Memory{}, err
-			}
-			candidate.FactGroupID = input.FactGroupID
-		}
 		if scope := NormalizeScopeKey(input.ScopeKey); scope != "" {
 			candidate.ScopeKey = scope
 		}
-		if input.Topics != nil {
-			candidate.Topics = CanonicalTopics(rawTopics(input.Topics))
-			candidate.RawTopics = rawTopics(input.Topics)
-		}
-	}
-
-	// Content, kind, title or scope changes make the previous labels a claim
-	// about different evidence. When extraction supplied no new labels, clear
-	// them so the classify task is a real re-evaluation rather than a no-op.
-	classificationInputChanged := candidate.Kind != current.Kind ||
-		candidate.Title != current.Title ||
-		candidate.Content != current.Content ||
-		candidate.ScopeKey != current.ScopeKey
-	if classificationInputChanged && input.Operation != OperationAddEvidence && input.Topics == nil {
-		candidate.Topics = []string{}
-		candidate.RawTopics = []string{}
 	}
 
 	contentUnchanged := candidate.Kind == current.Kind &&
-		candidate.Phase == current.Phase &&
-		candidate.Durability == current.Durability &&
 		candidate.Title == current.Title &&
 		candidate.Content == current.Content &&
-		candidate.ObservedAt.Equal(current.ObservedAt) &&
-		candidate.ObservedAtBasis == current.ObservedAtBasis &&
-		sameTimePointer(candidate.EventTime, current.EventTime) &&
-		candidate.EventTimeBasis == current.EventTimeBasis &&
-		candidate.EventTimePrecision == current.EventTimePrecision &&
-		sameTemporalDetails(candidate.Temporal, current.Temporal) &&
-		sameProcedure(candidate.Procedure, current.Procedure) &&
-		sameQualifiers(candidate.Qualifiers, current.Qualifiers) &&
-		sameTimeRange(candidate, current) &&
 		candidate.AssertionStatus == current.AssertionStatus &&
-		candidate.FactGroupID == current.FactGroupID &&
-		candidate.ScopeKey == current.ScopeKey &&
-		SameTopics(candidate.Topics, current.Topics) &&
-		sameRawTopics(candidate.RawTopics, current.RawTopics)
+		candidate.ScopeKey == current.ScopeKey
 
 	currentEvidence, err := tx.ListRevisionEvidence(ctx, current.ID, current.Version)
 	if err != nil {
@@ -386,53 +341,22 @@ func (s *Service) Revise(ctx context.Context, tx Tx, input ReviseInput) (Memory,
 	}
 	// Evidence-only additions still count as new material for conflict review
 	// even though they leave derived prose usable.
-	if err := s.syncConflictReviews(ctx, tx, []string{candidate.ID}); err != nil {
-		return Memory{}, err
-	}
 	return candidate, nil
 }
 
-func normalizePhase(value Phase) Phase {
-	if value == "" {
-		return PhaseUnknown
-	}
-	switch value {
-	case PhaseUnknown, PhaseScheduled, PhaseInProgress, PhaseCompleted, PhaseCancelled, PhasePostponed:
-		return value
-	default:
-		return PhaseUnknown
-	}
-}
-
-func normalizeDurability(value Durability) Durability {
-	if value == "" {
-		return DurabilityUnknown
-	}
-	switch value {
-	case DurabilityUnknown, DurabilityDurable, DurabilityEpisodic, DurabilityTemporary:
-		return value
-	default:
-		return DurabilityUnknown
-	}
-}
-
-// Classify applies a classification result without registering another
-// classify task. Classification-only revisions are never an input change for
-// themselves; aggregation tasks consume the new labels.
+// Classify applies scope-only classification. Topics are a separate
+// classification result and are never embedded in the canonical memory.
 func (s *Service) Classify(ctx context.Context, tx Tx, input ClassificationInput) (Memory, error) {
 	current, err := tx.GetMemory(ctx, input.MemoryID)
 	if err != nil {
 		return Memory{}, err
 	}
-	candidate := current
-	if scope := NormalizeScopeKey(input.ScopeKey); scope != "" {
-		candidate.ScopeKey = scope
-	}
-	candidate.Topics = CanonicalTopics(rawTopics(input.Topics))
-	candidate.RawTopics = rawTopics(input.Topics)
-	if candidate.ScopeKey == current.ScopeKey && SameTopics(candidate.Topics, current.Topics) && sameRawTopics(candidate.RawTopics, current.RawTopics) {
+	scope := NormalizeScopeKey(input.ScopeKey)
+	if scope == "" || scope == current.ScopeKey {
 		return current, nil
 	}
+	candidate := current
+	candidate.ScopeKey = scope
 	candidate.Version = current.Version + 1
 	candidate.UpdatedAt = s.timestamp()
 	evidence, err := tx.ListRevisionEvidence(ctx, current.ID, current.Version)
@@ -458,7 +382,7 @@ func (s *Service) enqueueClassify(ctx context.Context, tx Tx, item Memory) error
 	now := s.timestamp()
 	next := now.Add(s.governanceDebounce)
 	_, _, err := tx.UpsertJob(ctx, task.UpsertInput{
-		Kind:          task.KindClassify,
+		Kind:          task.KindClassifyObservation,
 		TargetKey:     task.MemoryKey(item.ID),
 		InputHash:     classifyInputHash(item),
 		NextAttemptAt: &next,
@@ -471,31 +395,13 @@ func (s *Service) enqueueClassify(ctx context.Context, tx Tx, item Memory) error
 }
 
 func classifyInputHash(item Memory) string {
-	procedure := ""
-	if item.Procedure != nil {
-		procedure = item.Procedure.Goal + "\x00" + strings.Join(item.Procedure.Steps, "\x00") +
-			"\x00" + strings.Join(item.Procedure.Preconditions, "\x00") +
-			"\x00" + strings.Join(item.Procedure.CompletionConditions, "\x00") +
-			"\x00" + strings.Join(item.Procedure.FailureBranches, "\x00")
-	}
-	qualifiers := ""
-	if item.Qualifiers != nil {
-		qualifiers = string(item.Qualifiers.Polarity) + "\x00" + string(item.Qualifiers.Certainty) +
-			"\x00" + item.Qualifiers.Attribution + "\x00" + strings.Join(item.Qualifiers.Entities, "\x00") +
-			"\x00" + strings.Join(item.Qualifiers.Conditions, "\x00")
-	}
-	parts := []string{
+	return task.InputHash(
 		string(item.Kind),
 		item.Title,
 		item.Content,
 		item.ScopeKey,
-		strings.Join(NormalizeTopics(item.Topics), "\x00"),
-		strings.Join(item.RawTopics, "\x00"),
 		item.OriginSourceID,
-		procedure,
-		qualifiers,
-	}
-	return task.InputHash(parts...)
+	)
 }
 
 func (s *Service) writeRevision(ctx context.Context, tx Tx, snapshot Memory, operation Operation, reason string, evidence []source.Evidence) error {
@@ -536,119 +442,4 @@ func (s *Service) syncSearchDocument(ctx context.Context, tx Tx, item Memory) er
 
 func (s *Service) timestamp() time.Time {
 	return s.now().UTC()
-}
-
-func normalizeObservedAt(value, fallback time.Time) time.Time {
-	if value.IsZero() {
-		value = fallback
-	}
-	return value.UTC()
-}
-
-// normalizeObservedBasis marks the receipt-time fallback explicitly. A missing
-// basis for a supplied value is inferred, never silently "explicit".
-func normalizeObservedBasis(basis TemporalBasis, value, fallback time.Time) TemporalBasis {
-	if value.IsZero() {
-		return BasisRecorded
-	}
-	switch basis {
-	case BasisExplicit, BasisInferred:
-		return basis
-	case BasisRecorded:
-		return BasisRecorded
-	default:
-		return BasisInferred
-	}
-}
-
-func sameTimePointer(left, right *time.Time) bool {
-	return equalTimePointer(left, right)
-}
-
-func sameTemporalDetails(left, right TemporalDetails) bool {
-	return left == right
-}
-
-func sameProcedure(left, right *Procedure) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
-	}
-	if left.Goal != right.Goal || len(left.Steps) != len(right.Steps) ||
-		len(left.Preconditions) != len(right.Preconditions) ||
-		len(left.CompletionConditions) != len(right.CompletionConditions) ||
-		len(left.FailureBranches) != len(right.FailureBranches) {
-		return false
-	}
-	for index := range left.Steps {
-		if left.Steps[index] != right.Steps[index] {
-			return false
-		}
-	}
-	for index := range left.Preconditions {
-		if left.Preconditions[index] != right.Preconditions[index] {
-			return false
-		}
-	}
-	for index := range left.CompletionConditions {
-		if left.CompletionConditions[index] != right.CompletionConditions[index] {
-			return false
-		}
-	}
-	for index := range left.FailureBranches {
-		if left.FailureBranches[index] != right.FailureBranches[index] {
-			return false
-		}
-	}
-	return true
-}
-
-func sameQualifiers(left, right *AssertionQualifiers) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
-	}
-	if left.Polarity != right.Polarity || left.Certainty != right.Certainty ||
-		left.Attribution != right.Attribution || !sameStrings(left.Entities, right.Entities) ||
-		!sameStrings(left.Conditions, right.Conditions) {
-		return false
-	}
-	if left.Quantity == nil || right.Quantity == nil {
-		return left.Quantity == nil && right.Quantity == nil
-	}
-	return left.Quantity.Value == right.Quantity.Value && left.Quantity.Unit == right.Quantity.Unit
-}
-
-func sameStrings(left, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
-}
-
-func sameTimeRange(left, right Memory) bool {
-	return equalTimePointer(left.ValidFrom, right.ValidFrom) &&
-		equalTimePointer(left.ValidTo, right.ValidTo) &&
-		left.ValidFromBasis == right.ValidFromBasis &&
-		left.ValidToBasis == right.ValidToBasis
-}
-
-func equalTimePointer(left, right *time.Time) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
-	}
-	return left.Equal(*right)
-}
-
-func validateFactGroupReference(ctx context.Context, tx Tx, groupID string) error {
-	if groupID == "" {
-		return nil
-	}
-	if _, err := tx.GetFactGroup(ctx, groupID); err != nil {
-		return fmt.Errorf("事实组 %s 不存在: %w", groupID, err)
-	}
-	return nil
 }

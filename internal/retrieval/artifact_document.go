@@ -21,4 +21,11 @@ func (ArtifactDocumentBuilder) BuildArtifactDocument(input artifact.DocumentInpu
 	}, nil
 }
 
+// ObservationIndexText renders the L0 observation body with the same
+// normalization and dictionary segmentation as canonical and derived recall.
+// The original observation content remains the only readable source.
+func ObservationIndexText(content string) string {
+	return IndexText(content)
+}
+
 var _ artifact.DocumentBuilder = ArtifactDocumentBuilder{}

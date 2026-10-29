@@ -3,8 +3,6 @@ import type { ColumnsType } from 'antd/es/table';
 import type { ReactNode } from 'react';
 import type { Memory } from '../../../shared/api/types';
 import { codeDefinition } from '../../../shared/lib/codes';
-import { formatTemporal, formatValidInterval } from '../../../shared/lib/time';
-import { JsonView } from '../../../shared/ui/JsonView';
 
 interface DiffRow {
   key: string;
@@ -21,166 +19,46 @@ const text = (value: string | null | undefined) =>
     <Typography.Text style={{ whiteSpace: 'pre-wrap' }}>{value}</Typography.Text>
   );
 
-const jsonText = (value: unknown) => <JsonView value={value} maxHeight={160} emptyText="无" />;
-
-function normalized(value: unknown): string {
-  return JSON.stringify(value ?? null);
-}
-
 function buildRows(current: Memory, historical: Memory): DiffRow[] {
-  const rows: Omit<DiffRow, 'changed'>[] = [
-    { key: 'title', field: '标题', current: text(current.title), historical: text(historical.title) },
+  const rows: Array<Omit<DiffRow, 'changed'> & { changed: boolean }> = [
+    { key: 'title', field: '标题', current: text(current.title), historical: text(historical.title), changed: current.title !== historical.title },
     {
       key: 'kind',
       field: '类型',
       current: codeDefinition('memoryKind', current.kind).label,
       historical: codeDefinition('memoryKind', historical.kind).label,
+      changed: current.kind !== historical.kind,
     },
     {
       key: 'state',
       field: '保存状态',
       current: codeDefinition('memoryState', current.state).label,
       historical: codeDefinition('memoryState', historical.state).label,
+      changed: current.state !== historical.state,
     },
     {
       key: 'assertion',
       field: '采纳情况',
       current: codeDefinition('assertion', current.assertion_status).label,
       historical: codeDefinition('assertion', historical.assertion_status).label,
-    },
-    {
-      key: 'phase',
-      field: '阶段',
-      current: codeDefinition('memoryPhase', current.phase).label,
-      historical: codeDefinition('memoryPhase', historical.phase).label,
-    },
-    {
-      key: 'durability',
-      field: '适用时长',
-      current: codeDefinition('durability', current.durability).label,
-      historical: codeDefinition('durability', historical.durability).label,
+      changed: current.assertion_status !== historical.assertion_status,
     },
     {
       key: 'scope',
       field: '所属范围',
       current: text(current.scope_key),
       historical: text(historical.scope_key),
+      changed: current.scope_key !== historical.scope_key,
     },
-    {
-      key: 'topics',
-      field: '主题',
-      current: current.topics.join('、') || '无',
-      historical: historical.topics.join('、') || '无',
-    },
-    {
-      key: 'raw_topics',
-      field: '原始主题',
-      current: current.raw_topics.join('、') || '无',
-      historical: historical.raw_topics.join('、') || '无',
-    },
-    {
-      key: 'observed',
-      field: '观测时间',
-      current: formatTemporal(current.observed_at, current.temporal.observed),
-      historical: formatTemporal(historical.observed_at, historical.temporal.observed),
-    },
-    {
-      key: 'event',
-      field: '事件时间',
-      current: formatTemporal(current.event_time, current.temporal.event),
-      historical: formatTemporal(historical.event_time, historical.temporal.event),
-    },
-    {
-      key: 'valid',
-      field: '有效区间',
-      current: formatValidInterval(
-        current.valid_from,
-        current.valid_to,
-        current.temporal.valid_from,
-        current.temporal.valid_to,
-      ),
-      historical: formatValidInterval(
-        historical.valid_from,
-        historical.valid_to,
-        historical.temporal.valid_from,
-        historical.temporal.valid_to,
-      ),
-    },
-    {
-      key: 'fact_group',
-      field: '事实组',
-      current: current.fact_group_id || '无',
-      historical: historical.fact_group_id || '无',
-    },
-    {
-      key: 'qualifiers',
-      field: '结构化限定',
-      current: jsonText(current.qualifiers),
-      historical: jsonText(historical.qualifiers),
-    },
-    {
-      key: 'procedure',
-      field: '流程结构',
-      current: jsonText(current.procedure),
-      historical: jsonText(historical.procedure),
-    },
-  ];
-
-  const valueFor = (row: (typeof rows)[number]) => {
-    switch (row.key) {
-      case 'kind':
-        return current.kind === historical.kind;
-      case 'state':
-        return current.state === historical.state;
-      case 'assertion':
-        return current.assertion_status === historical.assertion_status;
-      case 'phase':
-        return current.phase === historical.phase;
-      case 'durability':
-        return current.durability === historical.durability;
-      case 'scope':
-        return current.scope_key === historical.scope_key;
-      case 'topics':
-        return normalized(current.topics) === normalized(historical.topics);
-      case 'raw_topics':
-        return normalized(current.raw_topics) === normalized(historical.raw_topics);
-      case 'observed':
-        return current.observed_at === historical.observed_at;
-      case 'event':
-        return normalized([current.event_time, current.temporal.event]) ===
-          normalized([historical.event_time, historical.temporal.event]);
-      case 'valid':
-        return (
-          normalized([current.valid_from, current.valid_to, current.temporal.valid_from, current.temporal.valid_to]) ===
-          normalized([
-            historical.valid_from,
-            historical.valid_to,
-            historical.temporal.valid_from,
-            historical.temporal.valid_to,
-          ])
-        );
-      case 'fact_group':
-        return current.fact_group_id === historical.fact_group_id;
-      case 'qualifiers':
-        return normalized(current.qualifiers) === normalized(historical.qualifiers);
-      case 'procedure':
-        return normalized(current.procedure) === normalized(historical.procedure);
-      default:
-        return true;
-    }
-  };
-
-  const contentChanged = current.content !== historical.content;
-  return [
-    ...rows.map((row) => ({ ...row, changed: !valueFor(row) })),
     {
       key: 'content',
       field: '正文',
-      current: <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{current.content}</Typography.Paragraph>,
-      historical: <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{historical.content}</Typography.Paragraph>,
-      changed: contentChanged,
+      current: text(current.content),
+      historical: text(historical.content),
+      changed: current.content !== historical.content,
     },
   ];
+  return rows;
 }
 
 const columns: ColumnsType<DiffRow> = [

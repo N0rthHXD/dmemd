@@ -3,7 +3,6 @@ import {
   Button,
   Card,
   DatePicker,
-  Input,
   Select,
   Space,
   Table,
@@ -13,7 +12,7 @@ import {
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import type { Dayjs } from 'dayjs';
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { errorMessage } from '../../shared/api/errors';
 import { normalizeMemoryFilters } from '../../shared/api/query-keys';
@@ -28,7 +27,6 @@ import { routes } from '../../shared/lib/routes';
 import { formatTimestamp, fromRFC3339, timestampTitle, toRFC3339 } from '../../shared/lib/time';
 import { ResponsiveList } from '../../shared/ui/ResponsiveList';
 import { StatusTag } from '../../shared/ui/StatusTag';
-import { TechnicalDetails } from '../../shared/ui/TechnicalDetails';
 import { ArtifactLayerPanel } from './components/ArtifactLayerPanel';
 import {
   isDefaultMemoryFilters,
@@ -37,39 +35,11 @@ import {
   writeMemoryFilters,
 } from './filters';
 import { useMemories } from './queries';
+import { ObservationLayerPanel } from '../observations/ObservationLayerPanel';
 
 const { RangePicker } = DatePicker;
 
-type LibraryLayer = 'memories' | 'summaries' | 'experiences' | 'skills';
-
-function TextFilter({
-  value,
-  placeholder,
-  onCommit,
-}: {
-  value: string;
-  placeholder: string;
-  onCommit: (value: string) => void;
-}) {
-  const [draft, setDraft] = useState(value);
-  useEffect(() => setDraft(value), [value]);
-  return (
-    <Input.Search
-      allowClear
-      value={draft}
-      placeholder={placeholder}
-      style={{ width: 210 }}
-      onChange={(event) => {
-        const next = event.target.value;
-        setDraft(next);
-        if (!next && value) {
-          onCommit('');
-        }
-      }}
-      onSearch={(next) => onCommit(next)}
-    />
-  );
-}
+type LibraryLayer = 'memories' | 'observations' | 'summaries' | 'experiences' | 'skills';
 
 const columns: ColumnsType<Memory> = [
   {
@@ -207,10 +177,6 @@ function MemoryLayerPanel() {
             清空筛选
           </Button>
         </Space>
-        <TechnicalDetails label="更多筛选">
-          <Space wrap><TextFilter value={filters.createdByApp} placeholder="来源应用" onCommit={(createdByApp) => update({ createdByApp })} />
-          <TextFilter value={filters.factGroupId} placeholder="同一事项编号" onCommit={(factGroupId) => update({ factGroupId })} /></Space>
-        </TechnicalDetails>
         <Typography.Paragraph type="secondary" style={{ margin: '12px 0 0' }}>
           默认显示使用中和已归档的记忆。选择“已删除”可查看能够从历史恢复的内容；需要查找正文时，请使用“搜索记忆”。
         </Typography.Paragraph>
@@ -325,7 +291,7 @@ export default function MemoriesPage() {
             记忆库
           </Typography.Title>
           <Typography.Text type="secondary">
-            按记忆、摘要与偏好、经验案例和操作指南分层回顾，也可以查看来源和修改历史。
+            当前记忆、L0 原始观察，以及 L1-L4 派生内容分层展示。当前记忆是治理结果，与首次提取的原始观察不同。
           </Typography.Text>
         </div>
         <Space wrap>
@@ -344,24 +310,29 @@ export default function MemoriesPage() {
         items={[
           {
             key: 'memories',
-            label: '记忆',
+            label: '当前记忆',
             children: <MemoryLayerPanel />,
           },
           {
+            key: 'observations',
+            label: '原始观察',
+            children: <ObservationLayerPanel />,
+          },
+          {
             key: 'summaries',
-            label: '摘要 / 概览 / 偏好与习惯',
+            label: 'L1-L3 聚合',
             children: (
               <ArtifactLayerPanel
-                kinds={['topic_summary', 'scope_summary', 'profile']}
-                title="摘要 / 概览 / 偏好与习惯"
-                description="根据记忆自动整理的主题摘要、范围概览，以及长期偏好与习惯。"
+                kinds={['local_summary', 'topic_summary', 'scope_summary', 'profile']}
+                title="L1-L3 聚合"
+                description="按局部、领域和作用域逐层聚合的派生内容。"
                 emptyText="还没有可展示的摘要、概览或偏好。"
               />
             ),
           },
           {
             key: 'experiences',
-            label: '经验案例',
+            label: 'L4 经验案例',
             children: (
               <ArtifactLayerPanel
                 kinds={['experience_case']}
@@ -373,7 +344,7 @@ export default function MemoriesPage() {
           },
           {
             key: 'skills',
-            label: '操作指南',
+            label: 'L4 操作指南',
             children: (
               <ArtifactLayerPanel
                 kinds={['skill']}

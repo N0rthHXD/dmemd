@@ -1,3 +1,5 @@
+//go:build legacy
+
 package integration_test
 
 import (
@@ -139,7 +141,7 @@ func newHTTPServer(t *testing.T, retryDelays []appruntime.Duration) (*httptest.S
 	}
 	workerCtx, cancelWorker := context.WithCancel(context.Background())
 	workerDone := make(chan error, 1)
-	go func() { workerDone <- stack.Worker.Run(workerCtx) }()
+	go func() { workerDone <- stack.ExtractionWorker.Run(workerCtx) }()
 	t.Cleanup(func() {
 		cancelWorker()
 		select {

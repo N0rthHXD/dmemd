@@ -1,44 +1,48 @@
 openapi: 3.0.3
 info:
   title: dmemd local memory service
-  version: 1.0.0
+  version: 2.0.0
   license:
     name: MIT
     url: https://opensource.org/licenses/MIT
   description: |
-    Local HTTP/1.1 JSON contract for dmemd. This document is descriptive only;
-    it does not generate authentication or business validation. There is no
-    authentication: Authorization headers are optional and ignored. Lists are
-    returned in one response and have no pagination metadata.
+    Local HTTP/1.1 JSON contract for dmemd.
 
-    Every path below is implemented in internal/transport/http and assembled by
-    internal/runtime. The HTTP contract and process lifecycle are exercised by
-    the integration and end-to-end tests.
+    The data model follows four explicit layers:
 
-    First-release validation uses fixed labeled samples covering classification,
-    summary constraints, deterministic conflict review and Skill boundaries; an
-    opt-in 10k atomic-memory scenario covers governance backlog, concurrent recall
-    and one-transaction permanent forget. Those checks do not claim real-model
-    semantic quality, 100k capacity, OS application isolation, execution
-    certification or backup/restore.
+      Source -> L0 Observation -> Canonical Memory -> Derived Memory (L1-L4)
+
+    Observations are raw extraction records and are never edited through HTTP.
+    Canonical memories are the current governed view. Derived memories are
+    asynchronous aggregates and expose their exact typed dependencies. An
+    extraction job reports only its own stage; governance and aggregation
+    progress is queried through the governance-jobs endpoints.
+
+    There is no authentication. Authorization headers are optional and ignored.
 servers:
   - url: http://127.0.0.1:18432
 security: []
 tags:
   - name: ingest
-    description: Unified content submission and processing jobs
+    description: Source submission and extraction jobs
+  - name: observations
+    description: L0 raw observations, their evidence and relations
   - name: memories
-    description: Current memories, lifecycle, history, evidence and recall
+    description: Canonical current views, history, evidence and recall
+  - name: derived
+    description: L1-L4 derived memories, dependencies and generation targets
   - name: conflicts
     description: Open contradictions and explicit human adjudication
   - name: sources
-    description: Original submission lookup and redaction
+    description: Original submissions, stable spans and redaction
   - name: experiences
-    description: Application-reported completion results and explicit retraction
+    description: Application-reported completion results and retraction
   - name: skills
     description: Rendered guidance skills with traceable sources
+  - name: jobs
+    description: Extraction, governance and aggregation task views
   - name: embedding
-    description: Explicit semantic-index configuration, coverage and degradation diagnostics
+    description: Semantic-index configuration, coverage and degradation diagnostics
   - name: health
     description: Process liveness and database readiness
 
@@ -48,13 +52,10 @@ paths:
       tags: [ingest]
       summary: Submit arbitrary JSON content for background extraction
       description: |
-        Accepts strings, objects, arrays or null as content. Saves the source and
-        a queued ingest job in one transaction, then returns 202 without waiting
-        for a model. app_id and external_id are optional informational source
-        fields. scope_key is an optional flat scope label supplied by the calling
-        context; the model never invents or promotes it. Job progress is queried
-        through GET /v1/ingest-jobs/{id}; classification runs later through the
-        persistent governance worker.
+        Saves the source and an extraction job in one transaction and returns
+        202. No model is called and no memory is created synchronously. The
+        extraction worker later creates L0 observations; governance and
+        aggregation continue asynchronously through their own task tables.
       operationId: createIngestion
       requestBody:
         required: true
@@ -62,48 +63,141 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/SubmitRequest'
-            examples:
-              text:
-                summary: Simple text
-                value:
-                  content: 以后请默认使用中文回答。
-              conversation:
-                summary: Conversation object
-                value:
-                  app_id: desktop-assistant
-                  external_id: conversation-42-batch-7
-                  content:
-                    messages:
-                      - role: user
-                        content: 以后请默认使用中文回答。
-                        occurred_at: '2026-10-20T02:00:00Z'
-              structured:
-                summary: Existing structured content
-                value:
-                  content:
-                    preferences:
-                      answer_language: zh-CN
-              array:
-                summary: Array content
-                value:
-                  content:
-                    - role: user
-                      content: 以后请默认使用中文回答。
-                    - role: assistant
-                      content: 好的。
       responses:
         '202':
-          description: Source and queued job persisted
+          description: Source and extraction job persisted
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/SubmitResponse'
-              example:
-                source_id: 22222222-2222-4222-8222-222222222222
-                job_id: 33333333-3333-4333-8333-333333333333
-                status: queued
         '400':
           $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v1/observations:
+    get:
+      tags: [observations]
+      summary: List L0 raw observations
+      description: |
+        Read-only view of the L0 layer. Observations are immutable raw records
+        extracted from a source; their content is never editable through HTTP.
+      operationId: listObservations
+      parameters:
+        - name: source_id
+          in: query
+          schema:
+            type: string
+        - name: scope_key
+          in: query
+          schema:
+            type: string
+        - name: kind
+          in: query
+          schema:
+            type: string
+            enum: [fact, preference, event, procedure]
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [observed, pending, retracted, deleted]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: Observation page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ObservationList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v1/observations/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [observations]
+      summary: Read one L0 observation
+      operationId: getObservation
+      responses:
+        '200':
+          description: Observation record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Observation'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v1/observations/{id}/evidence:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [observations]
+      summary: Read the code-generated evidence of one observation
+      description: |
+        Evidence is generated only from selected source spans. A model quote,
+        offset or identifier is never accepted as evidence.
+      operationId: getObservationEvidence
+      responses:
+        '200':
+          description: Evidence list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvidenceList'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v1/observations/{id}/relations:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [observations]
+      summary: Read typed relations touching one observation
+      operationId: getObservationRelations
+      responses:
+        '200':
+          description: Typed relation list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RelationList'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -112,12 +206,11 @@ paths:
   /v1/memories:
     get:
       tags: [memories]
-      summary: List current memories
+      summary: List canonical current memories
       description: |
-        Default state set is active+archived; deleted tombstones are returned
-        only when states explicitly contains deleted. Default limit is 50.
-        All assertion statuses are listed unless filtered. Order is
-        updated_at DESC, id ASC. There is no pagination.
+        Only the current governed view is returned. There is no raw extraction
+        content here; use /v1/observations for L0 records. Default state set is
+        active+archived; deleted tombstones require an explicit states filter.
       operationId: listMemories
       parameters:
         - name: kinds
@@ -125,69 +218,40 @@ paths:
           description: Comma-separated fact,preference,event,procedure
           schema:
             type: string
-          example: fact,preference
         - name: states
           in: query
           description: Comma-separated active,archived,deleted
           schema:
             type: string
-          example: active,archived
         - name: assertion_status
           in: query
           description: Comma-separated accepted,pending,rejected
           schema:
             type: string
-          example: pending
-        - name: fact_group_id
-          in: query
-          description: Filter by fact group id
-          schema:
-            type: string
-          example: 55555555-5555-4555-8555-555555555555
-        - name: created_by_app
-          in: query
-          description: Filter by the app_id captured when the memory was created
-          schema:
-            type: string
-          example: desktop-assistant
         - name: updated_after
           in: query
-          description: Inclusive RFC 3339 lower bound; invalid values are ignored
           schema:
             type: string
             format: date-time
         - name: updated_before
           in: query
-          description: Inclusive RFC 3339 upper bound; invalid values are ignored
           schema:
             type: string
             format: date-time
         - name: limit
           in: query
-          description: Positive result limit; missing or invalid values use 50
           schema:
             type: integer
-          example: 50
+            default: 50
       responses:
         '200':
-          description: One filtered result set
+          description: Current memory page
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/MemoryList'
-              example:
-                items:
-                  - id: 11111111-1111-4111-8111-111111111111
-                    kind: preference
-                    title: 回答语言
-                    content: 用户希望默认使用中文回答。
-                    state: active
-                    version: 3
-                    observed_at: '2026-10-20T02:00:00Z'
-                    created_at: '2026-10-20T02:00:01Z'
-                    updated_at: '2026-10-20T03:00:00Z'
-                    created_by_app: desktop-assistant
-                    origin_source_id: 22222222-2222-4222-8222-222222222222
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -196,118 +260,27 @@ paths:
   /v1/memories/recall:
     post:
       tags: [memories]
-      summary: Unified layered recall for atomic memories and derived artifacts
+      summary: Layered recall for observations, canonical memories and L1-L4
       description: |
-        The single recall entry point. layers selects atomic, summary,
-        experience and skill partitions; omitting layers selects all four.
-        filters.kinds and filters.states only narrow the atomic partition and
-        are never applied to derived layers. scope_key filters both atomic
-        memories and derived artifacts to the requested scope or the user-global
-        scope; omitted scope_key disables that filter. User text is ordinary
-        keywords, never FTS syntax. Hybrid and keyword modes use the same
-        internal retrieval semantics as atomic search. Explicit filters.as_of
-        returns atomic history only: derived partitions stay empty and include
-        derived_as_of_unsupported. A derived-index failure degrades to atomic
-        results with derived_unavailable and never waits for generation.
-        Experiences are application reports, not verified execution results;
-        skills are guidance only and carry no execution or safety certification.
-        After primary hits, atomic recall may append bounded same-fact and
-        unresolved-conflict members with a related marker. Association obeys the
-        same scope/kind/state/time filters and only uses remaining top_k room.
-        Exact duplicate expressions of one fact are folded into a display
-        cluster that preserves every member ID and the union of evidence.
-        explain=true adds optional bounded stage counts under diagnostics.
+        Returns independent partitions instead of one mixed ranking. query_mode
+        selects a fixed default layer set; explicit layers take precedence.
+        Each selected partition receives its own top_k bound. Stale derived
+        memories are not returned as current conclusions unless explicitly
+        requested through derived_states.
       operationId: recallMemories
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/SearchRequest'
-            examples:
-              layered:
-                summary: Default all-layer recall for one project
-                value:
-                  query: 修改项目后应该如何验证
-                  scope_key: project:dmemd
-                  max_context_tokens: 3000
-              atomic_only:
-                summary: Explicit atomic-only recall
-                value:
-                  query: 项目使用什么数据库
-                  scope_key: project:dmemd
-                  layers: [atomic]
-                  top_k: 20
-              hybrid:
-                summary: Hybrid atomic + summary recall
-                value:
-                  query: 吃饭有什么忌口
-                  mode: hybrid
-                  layers: [atomic, summary]
-                  top_k: 10
-              historical:
-                summary: Atomic history at one instant; derived partitions stay empty
-                value:
-                  query: 用户住在哪里
-                  layers: [atomic]
-                  filters:
-                    as_of: '2026-07-01T00:00:00Z'
-                  top_k: 10
+              $ref: '#/components/schemas/RecallRequest'
       responses:
         '200':
-          description: One partitioned recall result
+          description: Layered recall result
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SearchResponse'
-              example:
-                memories:
-                  - memory:
-                      id: 11111111-1111-4111-8111-111111111111
-                      kind: preference
-                      title: 回答语言
-                      content: 用户希望默认使用中文回答。
-                      state: active
-                      version: 3
-                      observed_at: '2026-10-20T02:00:00Z'
-                      created_at: '2026-10-20T02:00:01Z'
-                      updated_at: '2026-10-20T03:00:00Z'
-                      created_by_app: desktop-assistant
-                      origin_source_id: 22222222-2222-4222-8222-222222222222
-                    score: 0.03252247
-                    snippet: 用户希望默认使用中文回答。
-                    matched_terms: [回答, 语言]
-                    evidence_refs:
-                      - id: 44444444-4444-4444-8444-444444444444
-                        source_id: 22222222-2222-4222-8222-222222222222
-                    explanation:
-                      ranking: rrf
-                      keyword:
-                        rank: 1
-                        bm25: -0.0000042
-                      semantic:
-                        rank: 2
-                        cosine: 0.93
-                    temporal_status: unknown
-                    conflict_refs: []
-                summaries:
-                  - id: 66666666-6666-4666-8666-666666666666
-                    kind: topic_summary
-                    version: 1
-                    title: 回答偏好
-                    content: 用户希望默认使用中文回答。
-                    scope_key: user
-                    topic: language
-                    state: active
-                    truncated: false
-                    memory_refs:
-                      - memory_id: 11111111-1111-4111-8111-111111111111
-                        version: 3
-                    updated_at: '2026-10-20T03:10:00Z'
-                experiences: []
-                skills: []
-                conflicts: []
-                warnings: []
+                $ref: '#/components/schemas/RecallResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '500':
@@ -317,12 +290,8 @@ paths:
 
   /v1/artifacts:
     get:
-      tags: [memories]
-      summary: List current derived artifacts
-      description: |
-        Bounded keyset page of current derived objects. Filters do not change
-        recall visibility; stale and disabled objects remain readable for
-        management and audit.
+      tags: [derived]
+      summary: List current derived memories
       operationId: listArtifacts
       parameters:
         - name: scope_key
@@ -333,7 +302,7 @@ paths:
           in: query
           schema:
             type: string
-            enum: [topic_summary, scope_summary, profile, experience_case, skill]
+            enum: [local_summary, topic_summary, scope_summary, profile, experience_case, skill, guidance]
         - name: state
           in: query
           schema:
@@ -356,7 +325,7 @@ paths:
             default: 50
       responses:
         '200':
-          description: Current artifacts in stable target order
+          description: Derived-memory page
           content:
             application/json:
               schema:
@@ -370,12 +339,8 @@ paths:
 
   /v1/artifact-targets:
     get:
-      tags: [memories]
-      summary: List derived generation targets and their state
-      description: |
-        Includes targets that have never produced an artifact. This separates
-        "not eligible yet" from a disabled or failed content object, queued,
-        running and waiting work, a usable current version and stale content.
+      tags: [derived]
+      summary: List derived generation targets
       operationId: listArtifactTargets
       parameters:
         - name: scope_key
@@ -386,7 +351,7 @@ paths:
           in: query
           schema:
             type: string
-            enum: [topic_summary, scope_summary, profile, experience_case, skill]
+            enum: [local_summary, topic_summary, scope_summary, profile, experience_case, skill, guidance]
         - name: status
           in: query
           schema:
@@ -410,7 +375,7 @@ paths:
             default: 50
       responses:
         '200':
-          description: Generation targets in stable target order
+          description: Target page
           content:
             application/json:
               schema:
@@ -423,19 +388,19 @@ paths:
           $ref: '#/components/responses/Unavailable'
 
   /v1/artifacts/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
     get:
-      tags: [memories]
-      summary: Read one derived artifact and its current revision
+      tags: [derived]
+      summary: Read one derived memory, its current revision and dependencies
       operationId: getArtifact
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
       responses:
         '200':
-          description: Artifact state and current revision when one exists
+          description: Derived memory detail
           content:
             application/json:
               schema:
@@ -448,25 +413,25 @@ paths:
           $ref: '#/components/responses/Unavailable'
 
   /v1/artifacts/{id}/history/{version}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: version
+        in: path
+        required: true
+        schema:
+          type: integer
+          minimum: 1
     get:
-      tags: [memories]
-      summary: Read one historical derived revision
+      tags: [derived]
+      summary: Read one historical derived revision and its dependencies
       operationId: getArtifactHistoryEntry
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-        - name: version
-          in: path
-          required: true
-          schema:
-            type: integer
-            minimum: 1
       responses:
         '200':
-          description: Historical revision with owning artifact state
+          description: Historical derived detail
           content:
             application/json:
               schema:
@@ -481,14 +446,7 @@ paths:
   /v1/experiences:
     post:
       tags: [experiences]
-      summary: Submit one completed application-reported result
-      description: |
-        Stores the original report as a source and one experience_run, then
-        queues experience-case generation. outcome is the application's report
-        (success, failure or unknown) and is never upgraded to a verified
-        execution result. A supplied run_id is an optional deduplication key:
-        repeating it returns the existing receipt without comparing the request
-        body, overwriting the stored result or restoring a revoked result.
+      summary: Submit one application-reported result
       operationId: createExperience
       requestBody:
         required: true
@@ -496,18 +454,9 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/ExperienceSubmit'
-            example:
-              run_id: run-2026-10-22-1
-              scope_key: project:dmemd
-              goal: 修改 dmemd 后验证
-              conditions: [依赖已安装]
-              actions: [运行 go test, 执行构建检查]
-              outcome: success
-              skill_id: 88888888-8888-4888-8888-888888888888
-              skill_version: 2
       responses:
         '202':
-          description: Saved result receipt; duplicate run_id returns the existing receipt
+          description: Saved application report receipt
           content:
             application/json:
               schema:
@@ -520,23 +469,19 @@ paths:
           $ref: '#/components/responses/Unavailable'
 
   /v1/experiences/{id}/retract:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
     post:
       tags: [experiences]
-      summary: Revoke one reported result and block dependent use
-      description: |
-        Marks the application report revoked, disables its experience case and
-        synchronously removes affected skills from default recall while queuing
-        regeneration from the remaining sources. The operation is idempotent.
+      summary: Revoke one application report
       operationId: retractExperience
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
       responses:
         '200':
-          description: Updated receipt with state=revoked
+          description: Revoked receipt
           content:
             application/json:
               schema:
@@ -549,31 +494,25 @@ paths:
           $ref: '#/components/responses/Unavailable'
 
   /v1/skills/{id}/content:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
     get:
       tags: [skills]
       summary: Read one rendered SKILL.md guidance document
-      description: |
-        By default returns the active current version only; a stale or disabled
-        current skill is not served as active advice. An explicit positive
-        version reads that immutable revision and returns its owning state.
-        The content is guidance only and carries no execution or safety
-        certification. Permanently cleared objects are not readable.
       operationId: getSkillContent
       parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
         - name: version
           in: query
-          required: false
           schema:
             type: integer
             minimum: 1
       responses:
         '200':
-          description: Rendered SKILL.md plus exact version, state and sources
+          description: Rendered skill content
           content:
             application/json:
               schema:
@@ -592,30 +531,19 @@ paths:
       - $ref: '#/components/parameters/MemoryID'
     get:
       tags: [memories]
-      summary: Get the current memory snapshot
+      summary: Read the canonical current view and its references
       description: |
-        Deleted memories remain readable as tombstones by ID. Relations carry
-        decision-time versions and whether either endpoint has since changed.
+        Returns the current governed snapshot plus its observation source IDs,
+        typed relation refs, open conflict IDs and directly derived dependents.
+        The memory content itself is immutable through this endpoint.
       operationId: getMemory
       responses:
         '200':
-          description: Current snapshot and relations
+          description: Canonical memory detail
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/MemoryDetail'
-              example:
-                id: 11111111-1111-4111-8111-111111111111
-                kind: preference
-                title: 回答语言
-                content: 用户希望默认使用中文回答。
-                state: active
-                version: 3
-                observed_at: '2026-10-20T02:00:00Z'
-                created_at: '2026-10-20T02:00:01Z'
-                updated_at: '2026-10-20T03:00:00Z'
-                created_by_app: desktop-assistant
-                origin_source_id: 22222222-2222-4222-8222-222222222222
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -625,10 +553,6 @@ paths:
     delete:
       tags: [memories]
       summary: Logically delete a memory
-      description: |
-        Writes a deleted tombstone and a new revision. The record, history and
-        dedicated evidence remain readable; use POST /purge for permanent
-        removal.
       operationId: deleteMemory
       responses:
         '200':
@@ -637,9 +561,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DeleteResponse'
-              example:
-                id: 11111111-1111-4111-8111-111111111111
-                state: deleted
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -653,10 +574,6 @@ paths:
     patch:
       tags: [memories]
       summary: Change lifecycle state only
-      description: |
-        Accepts only active or archived. Unknown, missing or unchanged state is
-        a no-op returning the current memory. Content fields are ignored; content
-        corrections must be submitted through POST /v1/ingestions.
       operationId: setMemoryState
       requestBody:
         required: true
@@ -664,8 +581,6 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/StatePatch'
-            example:
-              state: archived
       responses:
         '200':
           description: Updated current memory
@@ -673,18 +588,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Memory'
-              example:
-                id: 11111111-1111-4111-8111-111111111111
-                kind: preference
-                title: 回答语言
-                content: 用户希望默认使用中文回答。
-                state: archived
-                version: 4
-                observed_at: '2026-10-20T02:00:00Z'
-                created_at: '2026-10-20T02:00:01Z'
-                updated_at: '2026-10-20T04:00:00Z'
-                created_by_app: desktop-assistant
-                origin_source_id: 22222222-2222-4222-8222-222222222222
         '400':
           $ref: '#/components/responses/BadRequest'
         '404':
@@ -699,21 +602,15 @@ paths:
       - $ref: '#/components/parameters/MemoryID'
     post:
       tags: [memories]
-      summary: Permanently purge a memory
-      description: |
-        Permanently removes the current record, history and dedicated evidence;
-        shared sources remain. This operation has no request body.
+      summary: Permanently purge one memory and its dedicated data
       operationId: purgeMemory
       responses:
         '200':
-          description: Purge result
+          description: Purge confirmation
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/PurgeResponse'
-              example:
-                id: 11111111-1111-4111-8111-111111111111
-                purged: true
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -726,54 +623,21 @@ paths:
       - $ref: '#/components/parameters/MemoryID'
     get:
       tags: [memories]
-      summary: List complete revision history
-      description: Newest version first; default limit 50; no pagination.
+      summary: List immutable memory revisions
       operationId: listMemoryHistory
       parameters:
         - name: limit
           in: query
-          description: Positive result limit; missing or invalid values use 50
           schema:
             type: integer
-          example: 50
+            default: 50
       responses:
         '200':
-          description: Version list
+          description: Revision list
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/RevisionList'
-              example:
-                items:
-                  - memory_id: 11111111-1111-4111-8111-111111111111
-                    version: 3
-                    operation: update
-                    reason: 用户更正回答语言
-                    snapshot:
-                      id: 11111111-1111-4111-8111-111111111111
-                      kind: preference
-                      title: 回答语言
-                      content: 用户希望默认使用中文回答。
-                      state: active
-                      version: 3
-                      observed_at: '2026-10-20T02:00:00Z'
-                      created_at: '2026-10-20T02:00:01Z'
-                      updated_at: '2026-10-20T03:00:00Z'
-                      created_by_app: desktop-assistant
-                      origin_source_id: 22222222-2222-4222-8222-222222222222
-                    evidence:
-                      - id: 44444444-4444-4444-8444-444444444444
-                        source_id: 22222222-2222-4222-8222-222222222222
-                        message_id: msg-1
-                        quote: 以后请默认使用中文回答。
-                        location:
-                          field: messages.0.content
-                          start: 0
-                          end: 12
-                        model_name: example-model
-                        redacted: false
-                        created_at: '2026-10-20T02:00:01Z'
-                    created_at: '2026-10-20T03:00:00Z'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -787,11 +651,11 @@ paths:
       - $ref: '#/components/parameters/Version'
     get:
       tags: [memories]
-      summary: Get one complete historical version
+      summary: Read one immutable memory revision
       operationId: getMemoryHistoryEntry
       responses:
         '200':
-          description: Version snapshot and complete evidence set
+          description: Revision snapshot and evidence
           content:
             application/json:
               schema:
@@ -809,37 +673,17 @@ paths:
       - $ref: '#/components/parameters/Version'
     post:
       tags: [memories]
-      summary: Restore a historical version as a new current version
-      description: |
-        Never overwrites history. Restored state is active; assertion status is
-        not promoted, and a pending/rejected historical assertion keeps its
-        status. If restoring an accepted assertion would create an unmarked
-        conflict in the current fact group, the whole restore returns 409 and
-        no version is written. A missing or unknown version returns 404.
+      summary: Restore a historical revision as a new current version
       operationId: restoreMemoryVersion
       responses:
         '200':
-          description: Restored current memory
+          description: New current memory
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Memory'
-              example:
-                id: 11111111-1111-4111-8111-111111111111
-                kind: preference
-                title: 回答语言
-                content: 用户希望默认使用中文回答。
-                state: active
-                version: 4
-                observed_at: '2026-10-20T02:00:00Z'
-                created_at: '2026-10-20T02:00:01Z'
-                updated_at: '2026-10-20T05:00:00Z'
-                created_by_app: desktop-assistant
-                origin_source_id: 22222222-2222-4222-8222-222222222222
         '404':
           $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/ConflictStale'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -850,39 +694,21 @@ paths:
       - $ref: '#/components/parameters/MemoryID'
     get:
       tags: [memories]
-      summary: Get the current or a historical version evidence set
-      description: |
-        version absent, 0 or invalid means current. A positive nonexistent
-        version returns 404. Redacted evidence keeps its ID and source_id but
-        never returns quote or location copies.
+      summary: Read the evidence set of one memory revision
       operationId: getMemoryEvidence
       parameters:
         - name: version
           in: query
-          description: Target version; absent/0/invalid means current version
           schema:
             type: integer
-          example: 2
+            minimum: 1
       responses:
         '200':
-          description: Complete evidence set
+          description: Evidence list
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/EvidenceList'
-              example:
-                items:
-                  - id: 44444444-4444-4444-8444-444444444444
-                    source_id: 22222222-2222-4222-8222-222222222222
-                    message_id: msg-1
-                    quote: 以后请默认使用中文回答。
-                    location:
-                      field: messages.0.content
-                      start: 0
-                      end: 12
-                    model_name: example-model
-                    redacted: false
-                    created_at: '2026-10-20T02:00:01Z'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -893,25 +719,23 @@ paths:
   /v1/memory-conflicts:
     get:
       tags: [conflicts]
-      summary: List conflicts
-      description: Fixed updated_at DESC, id ASC ordering with one result set.
+      summary: List memory conflicts
       operationId: listConflicts
       parameters:
         - name: status
           in: query
-          description: open or resolved; default open
           schema:
             type: string
             enum: [open, resolved]
             default: open
         - name: limit
           in: query
-          description: Positive result limit; missing or invalid values use 50
           schema:
             type: integer
+            default: 50
       responses:
         '200':
-          description: One filtered conflict set
+          description: Conflict list
           content:
             application/json:
               schema:
@@ -930,10 +754,9 @@ paths:
         required: true
         schema:
           type: string
-          format: uuid
     get:
       tags: [conflicts]
-      summary: Get a conflict with members and audit events
+      summary: Read one conflict with members and events
       operationId: getConflict
       responses:
         '200':
@@ -956,15 +779,9 @@ paths:
         required: true
         schema:
           type: string
-          format: uuid
     post:
       tags: [conflicts]
       summary: Explicitly adjudicate one conflict
-      description: |
-        The client submits the conflict revision and the member versions it
-        inspected. A stale conflict or member returns 409; malformed actions or
-        timelines return 400. Resolving an already resolved conflict with the
-        same payload returns the existing result; a different result returns 409.
       operationId: resolveConflict
       requestBody:
         required: true
@@ -974,7 +791,7 @@ paths:
               $ref: '#/components/schemas/ConflictResolveRequest'
       responses:
         '200':
-          description: Resolved conflict
+          description: Updated conflict
           content:
             application/json:
               schema:
@@ -993,23 +810,7 @@ paths:
   /v1/forget:
     post:
       tags: [memories]
-      summary: Permanently forget atomic memories, sources or application reports
-      description: |
-        Removes every requested leaf and, before any foreign-key cascade runs,
-        enumerates and removes dependent derived objects, their history, FTS
-        rows and dependency edges. Forgetting a source expands to all
-        associated memories and application reports; forgetting a report also
-        removes its dedicated source. The whole request is one transaction: an
-        unknown identifier or storage failure rolls back every listed target.
-        Historical and rendered derived reads return 404 after commit.
-        Source association includes evidence in any memory revision, not only
-        the current origin. Duplicate closure requires the same non-empty fact
-        group, scope, kind and phase, formatting-normalized identical content,
-        and equal or overlapping valid time. Deleted copies are included.
-        Same-group memories that fail these safeguards are retained and listed
-        with related_memories_retained. Dependent conflicts (including resolved
-        history) are removed and their review jobs cancelled; derived jobs are
-        revision-invalidated and rebuilt from remaining inputs.
+      summary: Permanently forget the requested closure
       operationId: forget
       requestBody:
         required: true
@@ -1017,20 +818,13 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/ForgetRequest'
-            example:
-              source_ids: [22222222-2222-4222-8222-222222222222]
-              experience_ids: [33333333-3333-4333-8333-333333333333]
       responses:
         '200':
-          description: Identifiers removed by the committed transaction
+          description: Actually removed identifiers
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ForgetResponse'
-              example:
-                memory_ids: [11111111-1111-4111-8111-111111111111]
-                source_ids: [22222222-2222-4222-8222-222222222222]
-                experience_ids: [33333333-3333-4333-8333-333333333333]
         '400':
           $ref: '#/components/responses/BadRequest'
         '404':
@@ -1047,37 +841,17 @@ paths:
         required: true
         schema:
           type: string
-          format: uuid
     get:
       tags: [sources]
-      summary: Get a submission and its original content
-      description: Redacted sources retain the ID and status but omit content.
+      summary: Read one source, its stable spans and redaction status
       operationId: getSource
       responses:
         '200':
-          description: Source record
+          description: Source record with stable spans
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Source'
-              examples:
-                original:
-                  value:
-                    id: 22222222-2222-4222-8222-222222222222
-                    app_id: desktop-assistant
-                    external_id: conversation-42-batch-7
-                    content:
-                      messages:
-                        - role: user
-                          content: 以后请默认使用中文回答。
-                    redacted: false
-                    created_at: '2026-10-20T02:00:01Z'
-                redacted:
-                  value:
-                    id: 22222222-2222-4222-8222-222222222222
-                    redacted: true
-                    redacted_at: '2026-10-20T06:00:00Z'
-                    created_at: '2026-10-20T02:00:01Z'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -1087,23 +861,147 @@ paths:
     delete:
       tags: [sources]
       summary: Redact original content and cancel unfinished jobs
-      description: |
-        Clears original content and every evidence quote/location copy in one
-        transaction, keeps the source ID and redacted status, cancels queued or
-        running jobs, scrubs terminal job error summaries that could retain
-        original text, and leaves already formed memory text intact.
       operationId: redactSource
       responses:
         '200':
-          description: Redaction result
+          description: Redaction and invalidation result
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/RedactResponse'
-              example:
-                id: 22222222-2222-4222-8222-222222222222
-                redacted: true
-                cancelled_jobs: 1
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v1/jobs:
+    get:
+      tags: [jobs]
+      summary: List extraction jobs
+      description: |
+        Extraction jobs report only their extraction stage. Governance and
+        aggregation progress is queried through /v1/governance-jobs.
+      operationId: listJobs
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [queued, running, waiting, succeeded, failed, cancelled]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: Extraction job list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v1/jobs/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [jobs]
+      summary: Read one extraction job
+      operationId: getJob
+      responses:
+        '200':
+          description: Extraction job
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v1/governance-jobs:
+    get:
+      tags: [jobs]
+      summary: List governance and aggregation tasks
+      operationId: listGovernanceJobs
+      parameters:
+        - name: category
+          in: query
+          schema:
+            type: string
+            enum: [governance, aggregation]
+        - name: kind
+          in: query
+          schema:
+            type: string
+            enum: [govern_observation, classify_observation, aggregate_l1,
+              aggregate_l2, aggregate_l3, build_guidance, review_conflict,
+              invalidate_dependency, reconcile]
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [queued, running, waiting, succeeded, failed, cancelled]
+        - name: target_key
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: Task list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GovernanceJobList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v1/governance-jobs/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [jobs]
+      summary: Read one governance or aggregation task
+      operationId: getGovernanceJob
+      responses:
+        '200':
+          description: Governance or aggregation task
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GovernanceJob'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -1118,70 +1016,17 @@ paths:
         required: true
         schema:
           type: string
-          format: uuid
     get:
-      tags: [ingest]
-      summary: Get processing status and result summary
+      tags: [jobs]
+      summary: Read one extraction job through the historical path
       operationId: getIngestJob
       responses:
         '200':
-          description: Job state
+          description: Extraction job
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Job'
-              example:
-                id: 33333333-3333-4333-8333-333333333333
-                source_id: 22222222-2222-4222-8222-222222222222
-                status: succeeded
-                attempts: 1
-                quality_outcome: complete
-                extraction_stats:
-                  raw_candidates: 1
-                  parsed_candidates: 1
-                  normalized_candidates: 0
-                  normalizations: 0
-                  repair_attempts: 0
-                  repaired_candidates: 0
-                  repair_succeeded: 0
-                  repair_failed: 0
-                  repair_timed_out: 0
-                  repair_invalid_output: 0
-                  excluded_candidates: 0
-                  isolated_candidates: 0
-                  accepted_candidates: 1
-                  skipped_candidates: 0
-                  memory_writes: 1
-                  extraction_chunks: 1
-                  extraction_chunk_failures: 0
-                  dropped_candidates: 0
-                  cross_chunk_duplicates: 0
-                  context_only_candidates: 0
-                retention:
-                  retained: 1
-                  not_retained: 0
-                  by_reason: {explicit_intent: 1}
-                  not_retained_by_reason: {}
-                timings:
-                  queue_age_ms: 1000
-                  extraction_ms: 900
-                  normalization_ms: 3
-                  repair_ms: 0
-                  context_ms: 20
-                  decision_ms: 0
-                  commit_ms: 15
-                  total_ms: 938
-                model_usage: {calls: 1, input_tokens: 120, output_tokens: 40, total_tokens: 160}
-                efficiency: {memories: 1, model_calls: 1, total_tokens: 160, calls_per_memory: 1, tokens_per_memory: 160}
-                queue_age_seconds: 1
-                stale_seconds: 0
-                diagnostics: []
-                convergence: []
-                memory_ids: [11111111-1111-4111-8111-111111111111]
-                created_at: '2026-10-20T02:00:01Z'
-                updated_at: '2026-10-20T02:00:03Z'
-                started_at: '2026-10-20T02:00:02Z'
-                finished_at: '2026-10-20T02:00:03Z'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -1192,63 +1037,24 @@ paths:
   /v1/embedding/status:
     get:
       tags: [embedding]
-      summary: Read semantic configuration and vector coverage diagnostics
-      description: |
-        Reports the configured model, credential-free endpoint, dimensions and
-        profile fingerprint alongside durable coverage counts. current_vectors
-        only counts vectors matching the active profile, dimensions and current
-        document content hash. stale_vectors and missing_vectors are excluded
-        from recall and drive rebuild_required. A non-empty index with zero
-        current vectors reports index_not_ready instead of implying semantic
-        irrelevance. The response never contains an API key, source text, query
-        text, vector values or a raw provider response.
+      summary: Read semantic-index status
       operationId: getEmbeddingStatus
       responses:
         '200':
-          description: Embedding diagnostics
+          description: Embedding status
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/EmbeddingStatus'
-              example:
-                enabled: true
-                model: embedding-model
-                endpoint: http://127.0.0.1:9999/v1
-                dimensions: 1024
-                min_similarity: 0.25
-                profile_id: 6f2a2f8b1d9e4c3a8b7f6e5d4c3b2a19
-                index_version: dmemd-embedding-v1
-                registered_profile_id: 6f2a2f8b1d9e4c3a8b7f6e5d4c3b2a19
-                registered_index_version: dmemd-embedding-v1
-                config_fingerprint_match: true
-                rebuild_required: false
-                documents: 120
-                current_vectors: 120
-                stale_vectors: 0
-                missing_vectors: 0
-                pending_jobs: 0
-                failed_jobs: 0
-                failed_codes: []
-                indexed_profiles:
-                  - profile_id: 6f2a2f8b1d9e4c3a8b7f6e5d4c3b2a19
-                    vectors: 120
-                coverage: 1.0
-                ready: true
-                reason_code: ready
-                checked_at: '2026-10-27T04:00:00Z'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/Unavailable'
+
   /v1/embedding/probe:
     post:
       tags: [embedding]
-      summary: Explicitly check the embedding endpoint and response shape
-      description: |
-        Makes one bounded online-model call with a fixed header-free probe text.
-        It distinguishes disabled configuration, authorization, rate limiting,
-        timeout, network/server failure and an invalid vector response. The result
-        is not persisted and never affects readiness or recall.
+      summary: Probe the configured embedding endpoint
       operationId: probeEmbedding
       responses:
         '200':
@@ -1257,13 +1063,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/EmbeddingProbe'
-              example:
-                attempted: true
-                success: true
-                code: ok
-                dimensions: 1024
-                duration_ms: 42
-                checked_at: '2026-10-27T04:00:00Z'
+        '500':
+          $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/Unavailable'
 
@@ -1274,37 +1075,30 @@ paths:
       operationId: healthz
       responses:
         '200':
-          description: Process alive
+          description: Process is alive
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Health'
-              example:
-                status: ok
 
   /readyz:
     get:
       tags: [health]
       summary: Database readiness
-      description: A model outage does not affect readiness.
       operationId: readyz
       responses:
         '200':
-          description: Database ready
+          description: Database is usable
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Health'
-              example:
-                status: ready
         '503':
-          description: Database not ready
+          description: Database is not usable
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Health'
-              example:
-                status: unavailable
 
 components:
   parameters:
@@ -1314,57 +1108,45 @@ components:
       required: true
       schema:
         type: string
-        format: uuid
     Version:
       name: version
       in: path
       required: true
       schema:
         type: integer
-      example: 2
+        minimum: 1
 
   responses:
     BadRequest:
-      description: Request body is not valid JSON
+      description: Request body or query value is invalid
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
-          example:
-            error: 请求体不是有效的 JSON。
     NotFound:
       description: Requested resource or version does not exist
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
-          example:
-            error: 资源不存在。
     InternalError:
       description: Internal execution failure
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
-          example:
-            error: 内部执行失败。
     ConflictStale:
-      description: The conflict, member versions or current accepted facts changed
+      description: Conflict revision or member versions changed
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
-          example:
-            error: 冲突或版本已变化，请重新读取。
-            code: conflict_stale
     Unavailable:
       description: Service or database is temporarily unavailable
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
-          example:
-            error: 服务暂不可用。
 
   schemas:
     Error:
@@ -1373,32 +1155,26 @@ components:
       properties:
         error:
           type: string
-          example: 请求体不是有效的 JSON。
         code:
           type: string
-          description: Stable code for conflict-specific failures
-          example: conflict_stale
+
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, ready, unavailable]
 
     SubmitRequest:
       type: object
-      description: |
-        All fields are optional. content may be any JSON value, including a
-        string, object, array, number, boolean or null.
       properties:
         app_id:
           type: string
-          description: Optional informational source name; no identity or uniqueness
-          example: desktop-assistant
         external_id:
           type: string
-          description: Optional external reference; no uniqueness constraint
-          example: conversation-42-batch-7
         scope_key:
           type: string
-          description: |
-            Optional flat scope label such as user or project:dmemd. Empty means
-            unknown; it is never silently promoted to a global scope.
-          example: project:dmemd
         content:
           description: Arbitrary JSON content, including null
       additionalProperties: true
@@ -1409,34 +1185,22 @@ components:
       properties:
         source_id:
           type: string
-          format: uuid
         job_id:
           type: string
-          format: uuid
         status:
           type: string
           enum: [queued, running, succeeded, failed, cancelled]
 
     Memory:
       type: object
-      required: [id, kind, phase, durability, title, content, state, assertion_status, version, observed_at,
-        observed_at_basis, event_time_basis, event_time_precision, valid_from_basis, valid_to_basis,
-        temporal, topics, raw_topics, created_at, updated_at]
+      description: Current canonical memory view produced by governance
+      required: [id, kind, title, content, state, assertion_status, version, created_at, updated_at]
       properties:
         id:
           type: string
-          format: uuid
         kind:
           type: string
           enum: [fact, preference, event, procedure]
-        phase:
-          type: string
-          description: Lifecycle phase of the assertion; independent from memory state
-          enum: [unknown, scheduled, in_progress, completed, cancelled, postponed]
-        durability:
-          type: string
-          description: Extraction durability metadata; not a truth or lifecycle decision
-          enum: [unknown, durable, episodic, temporary]
         title:
           type: string
         content:
@@ -1446,217 +1210,20 @@ components:
           enum: [active, archived, deleted]
         assertion_status:
           type: string
-          description: accepted is system-adopted, pending needs adjudication, rejected is audited but not recalled
           enum: [accepted, pending, rejected]
         version:
           type: integer
           minimum: 1
-        observed_at:
+        scope_key:
           type: string
-          format: date-time
-          description: >-
-            When the source made or observed the statement. A missing value is
-            filled from source receipt time and marked basis=recorded; that
-            fallback is never evidence that the assertion itself happened later.
-        observed_at_basis:
+        origin_source_id:
           type: string
-          enum: [explicit, inferred, unknown, recorded]
-        event_time:
-          type: string
-          format: date-time
-          nullable: true
-          description: >-
-            When a scheduled or occurred event happens. Kept separate from fact
-            validity so a future plan remains visible to a current plan query.
-        event_time_basis:
-          type: string
-          enum: [explicit, inferred, unknown]
-        event_time_precision:
-          type: string
-          enum: [unknown, year, month, day, hour, minute, second]
-        valid_from:
-          type: string
-          format: date-time
-          nullable: true
-          description: Half-open interval start; absent means unknown, not "always valid"
-        valid_to:
-          type: string
-          format: date-time
-          nullable: true
-          description: Half-open interval end; absent means unknown
-        valid_from_basis:
-          type: string
-          enum: [explicit, inferred, unknown]
-        valid_to_basis:
-          type: string
-          enum: [explicit, inferred, unknown]
-        temporal:
-          $ref: '#/components/schemas/TemporalDetails'
-        procedure:
-          $ref: '#/components/schemas/Procedure'
-        qualifiers:
-          $ref: '#/components/schemas/AssertionQualifiers'
-        fact_group_id:
-          type: string
-          format: uuid
         created_at:
           type: string
           format: date-time
         updated_at:
           type: string
           format: date-time
-        created_by_app:
-          type: string
-          description: app_id captured at creation; preserved by updates and restores
-        origin_source_id:
-          type: string
-          format: uuid
-        scope_key:
-          type: string
-          description: Flat scope label; absent or empty means unknown
-        topics:
-          type: array
-          description: Canonical topic labels including inherited parents; bilingual aliases use taxonomy-v1, unknown labels remain extension leaves
-          items:
-            type: string
-          example: [containers, kubernetes, oom]
-        raw_topics:
-          type: array
-          description: Original labels before alias and parent expansion, preserved for audit
-          items:
-            type: string
-          example: [K8s, 节点内存耗尽]
-        retention_reason:
-          type: string
-          description: >-
-            Service-derived retention reason. Informational only; it never
-            deletes the memory or changes assertion status. Temporary context
-            remains stored and visible for review.
-          enum: [explicit_intent, future_applicability, durable_knowledge,
-            episodic_event, temporary_context, unclassified]
-
-    TemporalDetail:
-      type: object
-      properties:
-        text:
-          type: string
-          description: Source date wording preserved for fidelity
-        precision:
-          type: string
-          enum: [unknown, year, month, day, hour, minute, second]
-        timezone_known:
-          type: boolean
-          description: False when the source stated a calendar date without a timezone
-
-    TemporalDetails:
-      type: object
-      required: [observed, event, valid_from, valid_to]
-      properties:
-        observed:
-          $ref: '#/components/schemas/TemporalDetail'
-        event:
-          $ref: '#/components/schemas/TemporalDetail'
-        valid_from:
-          $ref: '#/components/schemas/TemporalDetail'
-        valid_to:
-          $ref: '#/components/schemas/TemporalDetail'
-
-    Procedure:
-      type: object
-      description: Optional structured reusable workflow stored in the immutable revision
-      properties:
-        goal:
-          type: string
-        steps:
-          type: array
-          items:
-            type: string
-        preconditions:
-          type: array
-          items:
-            type: string
-        completion_conditions:
-          type: array
-          items:
-            type: string
-        failure_branches:
-          type: array
-          items:
-            type: string
-
-    AssertionQualifiers:
-      type: object
-      description: General qualifiers retained with an assertion; the content remains authoritative
-      properties:
-        entities:
-          type: array
-          items:
-            type: string
-        quantity:
-          type: object
-          required: [value]
-          properties:
-            value:
-              type: string
-            unit:
-              type: string
-        conditions:
-          type: array
-          items:
-            type: string
-        polarity:
-          type: string
-          enum: [unknown, positive, negative, mixed]
-        certainty:
-          type: string
-          enum: [unknown, asserted, uncertain, reported, hypothetical]
-        attribution:
-          type: string
-
-    Relation:
-      type: object
-      required: [id, from_memory_id, from_version, to_memory_id, to_version, kind,
-        created_at, from_version_changed, to_version_changed]
-      properties:
-        id:
-          type: string
-          format: uuid
-        from_memory_id:
-          type: string
-          format: uuid
-        from_version:
-          type: integer
-        to_memory_id:
-          type: string
-          format: uuid
-        to_version:
-          type: integer
-        kind:
-          type: string
-          enum: [supersedes]
-        created_at:
-          type: string
-          format: date-time
-        from_version_changed:
-          type: boolean
-        to_version_changed:
-          type: boolean
-
-    MemoryDetail:
-      allOf:
-        - $ref: '#/components/schemas/Memory'
-        - type: object
-          required: [relations, evolution]
-          properties:
-            relations:
-              type: array
-              items:
-                $ref: '#/components/schemas/Relation'
-            evolution:
-              type: array
-              description: Deterministic supersession/correction audit touching this memory.
-              items:
-                $ref: '#/components/schemas/EvolutionEvent'
 
     MemoryList:
       type: object
@@ -1667,9 +1234,92 @@ components:
           items:
             $ref: '#/components/schemas/Memory'
 
+    Relation:
+      type: object
+      description: Typed relation between observations and/or memories
+      required: [id, kind, from_type, from_id, from_version, to_type, to_id, to_version, created_at]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [duplicate, supports, enriches, supersedes, contradicts, separate, independent, unresolved]
+        from_type:
+          type: string
+          enum: [observation, memory]
+        from_id:
+          type: string
+        from_version:
+          type: integer
+        to_type:
+          type: string
+          enum: [observation, memory]
+        to_id:
+          type: string
+        to_version:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+
+    RelationList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Relation'
+
+    DerivedDependent:
+      type: object
+      required: [id, layer, kind, target_key, version, state]
+      properties:
+        id:
+          type: string
+        layer:
+          type: string
+          enum: [l1, l2, l3, l4]
+        kind:
+          type: string
+          enum: [local_summary, topic_summary, scope_summary, profile, experience_case, skill, guidance]
+        target_key:
+          type: string
+        scope_key:
+          type: string
+        topic:
+          type: string
+        version:
+          type: integer
+        state:
+          type: string
+          enum: [active, stale, disabled]
+
+    MemoryDetail:
+      allOf:
+        - $ref: '#/components/schemas/Memory'
+        - type: object
+          required: [observation_ids, relations, conflict_ids, derived_dependents]
+          properties:
+            observation_ids:
+              type: array
+              items:
+                type: string
+            relations:
+              type: array
+              items:
+                $ref: '#/components/schemas/Relation'
+            conflict_ids:
+              type: array
+              items:
+                type: string
+            derived_dependents:
+              type: array
+              items:
+                $ref: '#/components/schemas/DerivedDependent'
+
     StatePatch:
       type: object
-      description: Only active and archived are accepted; other fields are ignored.
       properties:
         state:
           type: string
@@ -1681,7 +1331,6 @@ components:
       properties:
         id:
           type: string
-          format: uuid
         state:
           type: string
           enum: [deleted]
@@ -1692,10 +1341,53 @@ components:
       properties:
         id:
           type: string
-          format: uuid
         purged:
           type: boolean
-          enum: [true]
+
+    Evidence:
+      type: object
+      required: [id, source_id, redacted, created_at]
+      properties:
+        id:
+          type: string
+        source_id:
+          type: string
+        segment_id:
+          type: string
+        message_id:
+          type: string
+        quote:
+          type: string
+        location:
+          $ref: '#/components/schemas/Location'
+        redacted:
+          type: boolean
+        redacted_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    Location:
+      type: object
+      required: [start, end]
+      properties:
+        field:
+          type: string
+        start:
+          type: integer
+        end:
+          type: integer
+
+    EvidenceList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Evidence'
 
     Revision:
       type: object
@@ -1703,14 +1395,11 @@ components:
       properties:
         memory_id:
           type: string
-          format: uuid
         version:
           type: integer
-          minimum: 1
         operation:
           type: string
-          enum: [create, update, add_evidence, archive, activate, delete, restore,
-            correct, change, resolve, classify]
+          enum: [create, update, add_evidence, archive, activate, delete, restore, resolve, classify]
         reason:
           type: string
         snapshot:
@@ -1732,149 +1421,98 @@ components:
           items:
             $ref: '#/components/schemas/Revision'
 
-    Evidence:
+    Observation:
       type: object
-      required: [id, source_id, redacted, created_at]
+      description: Immutable L0 raw memory extracted from one source
+      required: [id, source_id, kind, content, content_mode, status, created_at, updated_at]
       properties:
         id:
           type: string
-          format: uuid
         source_id:
           type: string
-          format: uuid
-        message_id:
+        scope_key:
           type: string
-        quote:
+        kind:
           type: string
-          description: Absent after source redaction
-        location:
-          $ref: '#/components/schemas/Location'
-        model_name:
+          enum: [fact, preference, event, procedure]
+        content:
           type: string
-        redacted:
-          type: boolean
-        redacted_at:
+        content_mode:
           type: string
-          format: date-time
+          enum: [extractive, normalized]
+        origin_role:
+          type: string
+        status:
+          type: string
+          enum: [observed, pending, retracted, deleted]
+        extraction_version:
+          type: string
         created_at:
           type: string
           format: date-time
-
-    Location:
-      type: object
-      properties:
-        field:
+        updated_at:
           type: string
-          example: messages.0.content
-        start:
-          type: integer
-          minimum: 0
-        end:
-          type: integer
-          minimum: 0
+          format: date-time
 
-    EvidenceList:
+    ObservationList:
       type: object
       required: [items]
       properties:
         items:
           type: array
           items:
-            $ref: '#/components/schemas/Evidence'
+            $ref: '#/components/schemas/Observation'
 
-    SearchRequest:
+    RecallRequest:
       type: object
       properties:
         query:
           type: string
-          description: >-
-            Keywords or a natural-language question. All keyword paths, including
-            derived layers and the hybrid keyword branch, use the same dictionary
-            segmentation and controlled stopword filtering, preserving negation.
-            Any remaining term may match. Empty, punctuation-only, or stopword-only
-            input returns empty partitions without running retrieval. Keyword mode
-            ranks by BM25 and bounded term coverage without a minimum-coverage
-            filter. Semantic retrieval uses the original query without the document
-            template.
         scope_key:
           type: string
-          description: >-
-            Optional flat scope. When supplied, atomic and derived results must
-            belong to this scope or the user-global scope. Omitted means no
-            scope filter. Unknown scope values are never promoted to global.
+        query_mode:
+          type: string
+          enum: [overview, detail, history, conflict, guidance]
         layers:
           type: array
-          description: >-
-            Knowledge layers to recall. Omitted selects all four; an explicit
-            list selects only those partitions. values other than the four
-            fixed names return 400.
           items:
             type: string
-            enum: [atomic, summary, experience, skill]
+            enum: [observations, memories, l1, l2, l3, l4]
         mode:
           type: string
           enum: [keyword, hybrid]
           default: keyword
-          description: >-
-            Keyword uses FTS5/BM25 only. Hybrid runs both atomic recall paths and
-            fuses them with RRF; semantic failures degrade to keyword with a
-            warning. Derived layers always use their own FTS index.
         filters:
           $ref: '#/components/schemas/SearchFilters'
+        derived_states:
+          type: array
+          items:
+            type: string
+            enum: [active, stale]
         top_k:
           type: integer
           minimum: 0
           maximum: 100
-          description: >-
-            Default 20 for missing or non-positive values; above 100 is 400.
-            The bound applies per selected layer.
         max_context_tokens:
           type: integer
           minimum: 0
-          description: >-
-            Optional conservative budget using a rune-based estimate, never a
-            model-tokenizer-exact count. Exceeding it truncates later items and
-            emits context_budget_truncated.
         explain:
           type: boolean
           default: false
-          description: >-
-            Adds per-item explanation and bounded response diagnostics. Stage
-            counts never change the returned result set and contain no content.
 
     SearchFilters:
       type: object
       properties:
         kinds:
           type: array
-          description: Recognized values are fact, preference, event, procedure
           items:
             type: string
+            enum: [fact, preference, event, procedure]
         states:
           type: array
-          description: Default is [active]; archived is opt-in; deleted is never returned
           items:
             type: string
-        as_of:
-          type: string
-          format: date-time
-          description: >-
-            Fact validity instant, not the system knowledge-time snapshot.
-            Missing pins request start once; an explicit malformed value returns
-            400. Independent from updated_after/before. A result whose validity
-            bounds are unknown remains visible with temporal_status=unknown and
-            a temporal_uncertain warning on an explicit historical query.
-        event_at:
-          type: string
-          format: date-time
-          description: >-
-            Event occurrence instant. Matches only events whose stored event_time
-            and precision cover this instant; events with unknown event time are
-            excluded. When provided without as_of, fact validity is not pinned
-            to the current time, so past and scheduled occurrences stay
-            queryable by their own event time.
-        created_by_app:
-          type: string
+            enum: [active, archived, deleted]
         updated_after:
           type: string
           format: date-time
@@ -1882,59 +1520,365 @@ components:
           type: string
           format: date-time
 
-    SearchResponse:
+    RecallResponse:
       type: object
-      required: [memories, summaries, experiences, skills, conflicts, warnings]
+      required: [observations, memories, l1, l2, l3, l4, relations, conflicts, warnings]
       properties:
+        query_mode:
+          type: string
+        observations:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecallObservationItem'
         memories:
           type: array
-          description: >-
-            Atomic fact, preference, event and procedure results. Among primary
-            hits, accepted assertions precede labelled pending alternatives;
-            rejected assertions are never recalled. Bounded related items follow
-            the primary hits and keep their own assertion status and related
-            marker. Pending items emit fact_conflict.
           items:
             $ref: '#/components/schemas/SearchItem'
-        summaries:
+        l1:
           type: array
-          description: Active topic_summary, scope_summary and profile artifacts.
           items:
-            $ref: '#/components/schemas/ArtifactItem'
-        experiences:
+            $ref: '#/components/schemas/RecallDerivedItem'
+        l2:
           type: array
-          description: >-
-            Active experience_case artifacts generated from application-reported
-            results. Outcomes are reports, not verified execution results.
           items:
-            $ref: '#/components/schemas/ArtifactItem'
-        skills:
+            $ref: '#/components/schemas/RecallDerivedItem'
+        l3:
           type: array
-          description: >-
-            Active guidance-only skills with traceable sources. They carry no
-            execution, truth or safety certification.
           items:
-            $ref: '#/components/schemas/ArtifactItem'
+            $ref: '#/components/schemas/RecallDerivedItem'
+        l4:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecallDerivedItem'
+        relations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Relation'
         conflicts:
           type: array
-          description: >-
-            Open conflicts touching this atomic query and as_of instant. Pending
-            member text may appear in memories with assertion_status=pending and conflict_refs.
           items:
             $ref: '#/components/schemas/ConflictSummary'
         warnings:
           type: array
-          description: Stable deduplicated warning codes.
           items:
             type: string
-            enum: [semantic_unavailable, semantic_timeout,
-              semantic_config_error, semantic_rate_limited,
-              semantic_invalid_response, semantic_index_not_ready,
-              fact_conflict, conflict_results_truncated,
-              derived_as_of_unsupported, derived_unavailable,
-              context_budget_truncated, temporal_uncertain]
         diagnostics:
           $ref: '#/components/schemas/SearchDiagnostics'
+
+    SearchItem:
+      type: object
+      required: [memory, score, snippet, matched_terms, evidence_refs, conflict_refs]
+      properties:
+        memory:
+          $ref: '#/components/schemas/Memory'
+        score:
+          type: number
+        snippet:
+          type: string
+        matched_terms:
+          type: array
+          items:
+            type: string
+        evidence_refs:
+          type: array
+          items:
+            $ref: '#/components/schemas/EvidenceRef'
+        explanation:
+          $ref: '#/components/schemas/Explanation'
+        conflict_refs:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConflictRef'
+
+    RecallObservationItem:
+      type: object
+      required: [observation, score, snippet, matched_terms, evidence_refs]
+      properties:
+        observation:
+          $ref: '#/components/schemas/Observation'
+        score:
+          type: number
+        snippet:
+          type: string
+        matched_terms:
+          type: array
+          items:
+            type: string
+        evidence_refs:
+          type: array
+          items:
+            $ref: '#/components/schemas/EvidenceRef'
+        explanation:
+          $ref: '#/components/schemas/Explanation'
+
+    RecallDerivedItem:
+      type: object
+      required: [artifact, revision, score, snippet, matched_terms, dependencies]
+      properties:
+        artifact:
+          $ref: '#/components/schemas/ArtifactMeta'
+        revision:
+          $ref: '#/components/schemas/ArtifactRevision'
+        score:
+          type: number
+        snippet:
+          type: string
+        matched_terms:
+          type: array
+          items:
+            type: string
+        dependencies:
+          type: array
+          items:
+            $ref: '#/components/schemas/ArtifactDependency'
+        explanation:
+          $ref: '#/components/schemas/Explanation'
+
+    ArtifactDependency:
+      type: object
+      required: [type, id, version, required]
+      properties:
+        type:
+          type: string
+          enum: [observation, memory, derived, experience]
+        id:
+          type: string
+        version:
+          type: integer
+        required:
+          type: boolean
+
+    EvidenceRef:
+      type: object
+      required: [id, source_id]
+      properties:
+        id:
+          type: string
+        source_id:
+          type: string
+
+    KeywordExplanation:
+      type: object
+      required: [rank, bm25]
+      properties:
+        rank:
+          type: integer
+        bm25:
+          type: number
+
+    SemanticExplanation:
+      type: object
+      required: [rank, cosine]
+      properties:
+        rank:
+          type: integer
+        cosine:
+          type: number
+
+    Explanation:
+      type: object
+      required: [ranking]
+      properties:
+        ranking:
+          type: string
+        field_weights:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items:
+            type: integer
+        keyword:
+          $ref: '#/components/schemas/KeywordExplanation'
+        semantic:
+          $ref: '#/components/schemas/SemanticExplanation'
+
+    SearchDiagnostics:
+      type: object
+      required: [keyword_candidates, observation_candidates, memory_candidates,
+        derived_candidates, semantic_candidates, semantic_excluded, term_candidates,
+        kind_filter_excluded, state_filter_excluded, ranking_candidates,
+        returned_items, context_budget_truncated]
+      properties:
+        keyword_candidates:
+          type: integer
+        observation_candidates:
+          type: integer
+        memory_candidates:
+          type: integer
+        derived_candidates:
+          type: integer
+        semantic_candidates:
+          type: integer
+        semantic_excluded:
+          type: integer
+        term_candidates:
+          type: integer
+        kind_filter_excluded:
+          type: integer
+        state_filter_excluded:
+          type: integer
+        ranking_candidates:
+          type: integer
+        returned_items:
+          type: integer
+        context_budget_truncated:
+          type: integer
+        semantic_degradation:
+          type: string
+
+    ArtifactMeta:
+      type: object
+      required: [id, layer, kind, target_key, current_version, state, updated_at]
+      properties:
+        id:
+          type: string
+        layer:
+          type: string
+          enum: [l1, l2, l3, l4]
+        kind:
+          type: string
+          enum: [local_summary, topic_summary, scope_summary, profile, experience_case, skill, guidance]
+        target_key:
+          type: string
+        scope_key:
+          type: string
+        topic:
+          type: string
+        current_version:
+          type: integer
+        state:
+          type: string
+          enum: [active, stale, disabled]
+        reason_code:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+
+    ArtifactRevision:
+      type: object
+      required: [artifact_id, version, title, content, content_hash, generator,
+        protocol_version, truncated, created_at]
+      properties:
+        artifact_id:
+          type: string
+        version:
+          type: integer
+        title:
+          type: string
+        content:
+          type: string
+        payload:
+          description: Structured payload; unknown shapes are read-only JSON
+        content_hash:
+          type: string
+        generator:
+          type: string
+        protocol_version:
+          type: string
+        truncated:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    ArtifactDetail:
+      type: object
+      required: [artifact, dependencies]
+      properties:
+        artifact:
+          $ref: '#/components/schemas/ArtifactMeta'
+        revision:
+          $ref: '#/components/schemas/ArtifactRevision'
+        dependencies:
+          type: array
+          items:
+            $ref: '#/components/schemas/ArtifactDependency'
+
+    ArtifactList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ArtifactMeta'
+        next_cursor:
+          type: string
+
+    ArtifactTargetJob:
+      type: object
+      required: [status, attempts, consecutive_failures, age_seconds, stale_seconds]
+      properties:
+        status:
+          type: string
+          enum: [queued, running, waiting, succeeded, failed, cancelled]
+        wait_reason:
+          type: string
+        last_error_code:
+          type: string
+        retry_reason:
+          type: string
+        attempts:
+          type: integer
+        consecutive_failures:
+          type: integer
+        age_seconds:
+          type: integer
+        stale_seconds:
+          type: integer
+        updated_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+
+    ArtifactTarget:
+      type: object
+      required: [kind, target_key, status, has_usable_version, updated_at]
+      properties:
+        kind:
+          type: string
+          enum: [local_summary, topic_summary, scope_summary, profile, experience_case, skill, guidance]
+        target_key:
+          type: string
+        scope_key:
+          type: string
+        topic:
+          type: string
+        status:
+          type: string
+          enum: [queued, running, waiting, active, stale, disabled,
+            no_eligible_input, model_unavailable, generation_failed, invalid_output]
+        reason_code:
+          type: string
+        has_usable_version:
+          type: boolean
+        artifact:
+          $ref: '#/components/schemas/ArtifactMeta'
+        job:
+          $ref: '#/components/schemas/ArtifactTargetJob'
+        evaluated_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ArtifactTargetList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ArtifactTarget'
+        next_cursor:
+          type: string
 
     ArtifactMemoryRef:
       type: object
@@ -1944,7 +1888,6 @@ components:
           type: string
         version:
           type: integer
-          minimum: 1
 
     ArtifactRunRef:
       type: object
@@ -1952,7 +1895,34 @@ components:
       properties:
         experience_id:
           type: string
-          description: Service-internal recorded application result identifier
+
+    SkillContent:
+      type: object
+      required: [id, version, state, name, description, content, truncated, memory_refs, run_refs]
+      properties:
+        id:
+          type: string
+        version:
+          type: integer
+        state:
+          type: string
+          enum: [active, stale, disabled]
+        name:
+          type: string
+        description:
+          type: string
+        content:
+          type: string
+        truncated:
+          type: boolean
+        memory_refs:
+          type: array
+          items:
+            $ref: '#/components/schemas/ArtifactMemoryRef'
+        run_refs:
+          type: array
+          items:
+            $ref: '#/components/schemas/ArtifactRunRef'
 
     ExperienceSubmit:
       type: object
@@ -1960,7 +1930,6 @@ components:
       properties:
         run_id:
           type: string
-          description: Optional client deduplication key; repeat returns the existing receipt
         app_id:
           type: string
         external_id:
@@ -1980,17 +1949,13 @@ components:
         outcome:
           type: string
           enum: [success, failure, unknown, partial_success]
-          description: Application's own report; missing means unknown
         skill_id:
           type: string
-          description: Optional exact skill object the run reports against
         skill_version:
           type: integer
           minimum: 0
         content:
-          type: object
-          additionalProperties: true
-          description: Optional original report JSON stored as the source payload
+          description: Optional original report JSON
 
     ExperienceReceipt:
       type: object
@@ -2015,240 +1980,237 @@ components:
           type: string
           format: date-time
 
-    SkillContent:
+    SourceSegment:
       type: object
-      required: [id, version, state, name, description, content, truncated,
-        memory_refs, run_refs]
+      required: [segment_id, start, end, text]
       properties:
-        id:
+        segment_id:
           type: string
-        version:
+        message_id:
+          type: string
+        role:
+          type: string
+        occurred_at:
+          type: string
+        field:
+          type: string
+        start:
           type: integer
-          minimum: 1
-        state:
-          type: string
-          enum: [active, stale, disabled]
-        name:
-          type: string
-        description:
-          type: string
-        content:
-          type: string
-          description: Rendered SKILL.md with name/description frontmatter
-        truncated:
-          type: boolean
-        memory_refs:
-          type: array
-          items:
-            $ref: '#/components/schemas/ArtifactMemoryRef'
-        run_refs:
-          type: array
-          items:
-            $ref: '#/components/schemas/ArtifactRunRef'
-
-    ArtifactItem:
-      type: object
-      required: [id, kind, version, title, content, state, truncated,
-        memory_refs, run_refs, updated_at]
-      properties:
-        id:
-          type: string
-        kind:
-          type: string
-          enum: [topic_summary, scope_summary, profile, experience_case, skill]
-        version:
+        end:
           type: integer
-          minimum: 1
-        title:
+        text:
           type: string
-        content:
-          type: string
-        payload:
-          type: object
-          description: Structured experience/skill payload when the kind has one
-        scope_key:
-          type: string
-        topic:
-          type: string
-        state:
-          type: string
-          enum: [active, stale, disabled]
-        truncated:
-          type: boolean
-          description: True when this version covers only a bounded subset of eligible input
-        memory_refs:
-          type: array
-          items:
-            $ref: '#/components/schemas/ArtifactMemoryRef'
-        run_refs:
-          type: array
-          items:
-            $ref: '#/components/schemas/ArtifactRunRef'
-        updated_at:
-          type: string
-          format: date-time
-        score:
-          type: number
-          description: Derived FTS ranking score; larger is more relevant within this partition
 
-    ArtifactMeta:
+    Source:
       type: object
-      required: [id, kind, target_key, current_version, state, updated_at]
+      required: [id, redacted, created_at, segments]
       properties:
-        reason_code:
-          type: string
-          description: Current diagnostic such as no_procedure_input, topic_mismatch, model_generation_failed, invalid_model_output, invalid_profile_content, model_unavailable or no_eligible_input; readable even before a first revision exists
         id:
           type: string
-        kind:
+        app_id:
           type: string
-          enum: [topic_summary, scope_summary, profile, experience_case, skill]
-        target_key:
+        external_id:
           type: string
         scope_key:
           type: string
-        topic:
-          type: string
-        current_version:
-          type: integer
-          minimum: 0
-          description: Zero only when no usable version has been generated
-        state:
-          type: string
-          enum: [active, stale, disabled]
-        updated_at:
+        content:
+          description: Original JSON unless the source has been redacted
+        segments:
+          type: array
+          items:
+            $ref: '#/components/schemas/SourceSegment'
+        redacted:
+          type: boolean
+        redacted_at:
           type: string
           format: date-time
-
-    ArtifactRevision:
-      type: object
-      required: [artifact_id, version, title, content, content_hash, generator,
-        protocol_version, taxonomy_version, generator_version, run_id, provenance,
-        truncated, memory_refs, run_refs, created_at]
-      properties:
-        artifact_id:
-          type: string
-        version:
-          type: integer
-          minimum: 1
-        title:
-          type: string
-        content:
-          type: string
-        payload:
-          type: object
-          description: >-
-            Structured payload. Summaries record input_selection
-            (eligible/selected/included/omitted counts and reasons),
-            citation_integrity, semantic_coverage (unknown/subset), validated
-            citations and omitted_inputs; semantic coverage is unknown when the
-            service cannot determine it and subset when omission is known. Profiles additionally
-            record profile_check. Experience cases include the
-            application-reported outcome and verification disclaimer.
-        content_hash:
-          type: string
-          description: SHA-256 of title, body, serialized payload and immutable provenance, separated by NUL bytes
-        generator:
-          type: string
-        protocol_version:
-          type: string
-        taxonomy_version:
-          type: string
-          example: taxonomy-v1
-        generator_version:
-          type: string
-          example: generator-v2
-        run_id:
-          type: string
-          description: Generation job ID and revision (not the client experience deduplication key)
-        provenance:
-          type: object
-          description: Immutable serialized audit manifest, checked independently against the dependency tables
-          required: [memory_refs, run_refs, run_id, taxonomy_version, generator_version, protocol_version, truncated]
-          properties:
-            memory_refs:
-              type: array
-              items:
-                $ref: '#/components/schemas/ArtifactMemoryRef'
-            run_refs:
-              type: array
-              items:
-                $ref: '#/components/schemas/ArtifactRunRef'
-            run_id:
-              type: string
-            taxonomy_version:
-              type: string
-            generator_version:
-              type: string
-            protocol_version:
-              type: string
-            truncated:
-              type: boolean
-        reason_code:
-          type: string
-          description: Fixed code such as input_truncated
-        truncated:
-          type: boolean
-        memory_refs:
-          type: array
-          items:
-            $ref: '#/components/schemas/ArtifactMemoryRef'
-        run_refs:
-          type: array
-          items:
-            $ref: '#/components/schemas/ArtifactRunRef'
         created_at:
           type: string
           format: date-time
 
-    ArtifactDetail:
+    RedactResponse:
       type: object
-      required: [artifact]
+      required: [id, redacted, cancelled_jobs, retracted_observations, invalidated_derived_ids]
       properties:
-        artifact:
-          $ref: '#/components/schemas/ArtifactMeta'
-        revision:
-          $ref: '#/components/schemas/ArtifactRevision'
-
-    ArtifactList:
-      type: object
-      required: [items]
-      properties:
-        items:
+        id:
+          type: string
+        redacted:
+          type: boolean
+        cancelled_jobs:
+          type: integer
+        retracted_observations:
+          type: integer
+        invalidated_derived_ids:
           type: array
           items:
-            $ref: '#/components/schemas/ArtifactMeta'
-        next_cursor:
+            type: string
+
+    ForgetRequest:
+      type: object
+      properties:
+        memory_ids:
+          type: array
+          items:
+            type: string
+        source_ids:
+          type: array
+          items:
+            type: string
+        experience_ids:
+          type: array
+          items:
+            type: string
+
+    ForgetResponse:
+      type: object
+      required: [memory_ids, source_ids, experience_ids]
+      properties:
+        memory_ids:
+          type: array
+          items:
+            type: string
+        source_ids:
+          type: array
+          items:
+            type: string
+        experience_ids:
+          type: array
+          items:
+            type: string
+
+    ExtractionStats:
+      type: object
+      required: [items, observations, normalized_observations, pending_observations,
+        invalid_items, duplicate_observations, chunks, chunk_failures]
+      properties:
+        items:
+          type: integer
+        observations:
+          type: integer
+        normalized_observations:
+          type: integer
+        pending_observations:
+          type: integer
+        invalid_items:
+          type: integer
+        duplicate_observations:
+          type: integer
+        chunks:
+          type: integer
+        chunk_failures:
+          type: integer
+
+    JobTimings:
+      type: object
+      required: [queue_age_ms, extraction_ms, normalization_ms, commit_ms, total_ms]
+      properties:
+        queue_age_ms:
+          type: integer
+        extraction_ms:
+          type: integer
+        normalization_ms:
+          type: integer
+        commit_ms:
+          type: integer
+        total_ms:
+          type: integer
+
+    ModelUsage:
+      type: object
+      required: [calls, input_tokens, output_tokens, total_tokens]
+      properties:
+        calls:
+          type: integer
+        input_tokens:
+          type: integer
+        output_tokens:
+          type: integer
+        total_tokens:
+          type: integer
+
+    ExtractionDiagnostic:
+      type: object
+      required: [code, stage, disposition]
+      properties:
+        field:
+          type: string
+        code:
+          type: string
+        stage:
+          type: string
+        disposition:
           type: string
 
-    ArtifactTargetJob:
+    JobStage:
+      type: string
+      enum: [received, extracting, observations_saved, governance_pending,
+        memory_materialized, aggregation_pending, completed, failed]
+
+    Job:
       type: object
-      required: [status]
+      description: |
+        Extraction job. Its stage stops at observations_saved/completed; the
+        governance and aggregation stages are separate tasks.
+      required: [id, source_id, status, stage, attempts, protocol_failures,
+        observation_ids, warnings, extraction_stats, timings, model_usage,
+        diagnostics, queue_age_seconds, stale_seconds, created_at, updated_at]
       properties:
+        id:
+          type: string
+        source_id:
+          type: string
         status:
           type: string
           enum: [queued, running, waiting, succeeded, failed, cancelled]
-        wait_reason:
+        stage:
+          $ref: '#/components/schemas/JobStage'
+        diagnostic_stage:
           type: string
-        last_error_code:
-          type: string
-        retry_reason:
-          type: string
-          description: Fixed wait or error reason, safe for monitoring
+          description: Extraction-internal failure stage when one was recorded
         attempts:
           type: integer
-          minimum: 0
-        consecutive_failures:
+        protocol_failures:
           type: integer
-          minimum: 0
-        age_seconds:
+        wait_reason:
+          type: string
+          enum: [transient, configuration, protocol]
+        reason_code:
+          type: string
+        next_attempt_at:
+          type: string
+          format: date-time
+        error:
+          type: string
+        observation_ids:
+          type: array
+          items:
+            type: string
+        warnings:
+          type: array
+          items:
+            type: string
+        quality_outcome:
+          type: string
+          enum: [empty, complete, partial, unusable]
+        extraction_stats:
+          $ref: '#/components/schemas/ExtractionStats'
+        timings:
+          $ref: '#/components/schemas/JobTimings'
+        model_usage:
+          $ref: '#/components/schemas/ModelUsage'
+        diagnostics:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExtractionDiagnostic'
+        queue_age_seconds:
           type: integer
-          minimum: 0
-          description: Age of the durable target, including time deferred by ingest priority
         stale_seconds:
           type: integer
-          minimum: 0
-          description: Time since the queued, running or waiting task last changed state
+        retry_reason:
+          type: string
+        created_at:
+          type: string
+          format: date-time
         updated_at:
           type: string
           format: date-time
@@ -2259,188 +2221,196 @@ components:
           type: string
           format: date-time
 
-    ArtifactTarget:
-      type: object
-      required: [kind, target_key, status, has_usable_version, updated_at]
-      properties:
-        kind:
-          type: string
-          enum: [topic_summary, scope_summary, profile, experience_case, skill]
-        target_key:
-          type: string
-        scope_key:
-          type: string
-        topic:
-          type: string
-        status:
-          type: string
-          enum: [queued, running, waiting, active, stale, disabled,
-            no_eligible_input, model_unavailable, generation_failed, invalid_output]
-        reason_code:
-          type: string
-          description: Fixed reason such as no_procedure_input, topic_mismatch, model_generation_failed or invalid_model_output
-        has_usable_version:
-          type: boolean
-          description: True when the artifact has at least one immutable revision, even if it is currently stale or disabled
-        artifact:
-          $ref: '#/components/schemas/ArtifactMeta'
-        job:
-          $ref: '#/components/schemas/ArtifactTargetJob'
-        evaluated_at:
-          type: string
-          format: date-time
-        updated_at:
-          type: string
-          format: date-time
-
-    ArtifactTargetList:
+    JobList:
       type: object
       required: [items]
       properties:
         items:
           type: array
           items:
-            $ref: '#/components/schemas/ArtifactTarget'
-        next_cursor:
-          type: string
+            $ref: '#/components/schemas/Job'
 
-    SearchItem:
+    GovernanceJob:
       type: object
-      required: [memory, score, snippet, matched_terms, evidence_refs,
-        temporal_status, conflict_refs]
+      description: Governance or aggregation task with its own category and stage
+      required: [id, category, stage, kind, target_key, revision, status, attempts,
+        consecutive_failures, created_at, updated_at]
       properties:
-        memory:
-          $ref: '#/components/schemas/Memory'
-        score:
-          type: number
-          description: >-
-            Keyword mode uses a bounded BM25-rank and term-coverage fusion.
-            Hybrid mode uses the RRF score. Accepted assertions precede pending
-            primary assertions regardless of score; scores compare relevance
-            within the same assertion status in this result set. Bounded related
-            items use score 0 because they were expanded by an explicit
-            association rather than matched by the query.
-        snippet:
+        id:
           type: string
-          description: >-
-            Readable original content, never tokenized index text or HTML;
-            long content is truncated around the first match with an ellipsis.
-        matched_terms:
+        category:
+          type: string
+          enum: [governance, aggregation]
+        stage:
+          $ref: '#/components/schemas/JobStage'
+        kind:
+          type: string
+          enum: [govern_observation, classify_observation, aggregate_l1,
+            aggregate_l2, aggregate_l3, build_guidance, review_conflict,
+            invalidate_dependency, reconcile]
+        target_key:
+          type: string
+        revision:
+          type: integer
+        status:
+          type: string
+          enum: [queued, running, waiting, succeeded, failed, cancelled]
+        attempts:
+          type: integer
+        consecutive_failures:
+          type: integer
+        next_attempt_at:
+          type: string
+          format: date-time
+        last_error_code:
+          type: string
+        wait_reason:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+
+    GovernanceJobList:
+      type: object
+      required: [items]
+      properties:
+        items:
           type: array
-          description: >-
-            Keyword query groups actually found in the title or content.
-            Terms use the shared filtered any query. Semantic-only results always
-            return an empty array.
+          items:
+            $ref: '#/components/schemas/GovernanceJob'
+
+    ConflictReason:
+      type: string
+      enum: [contradictory_value, uncertain_time, ambiguous_scope, complex_timeline]
+
+    ConflictRef:
+      type: object
+      required: [id, reason_code]
+      properties:
+        id:
+          type: string
+        reason_code:
+          $ref: '#/components/schemas/ConflictReason'
+
+    ConflictSummary:
+      type: object
+      required: [id, reason_code, member_ids, has_accepted]
+      properties:
+        id:
+          type: string
+        reason_code:
+          $ref: '#/components/schemas/ConflictReason'
+        member_ids:
+          type: array
           items:
             type: string
-        evidence_refs:
-          type: array
-          items:
-            $ref: '#/components/schemas/EvidenceRef'
-        explanation:
-          $ref: '#/components/schemas/Explanation'
-        temporal_status:
-          type: string
-          enum: [within_bounds, unknown]
-          description: Describes known interval bounds, not objective truth
-        conflict_refs:
-          type: array
-          items:
-            $ref: '#/components/schemas/ConflictRef'
-        related:
-          type: object
-          description: >-
-            Present only on bounded association expansion. Related items follow
-            primary hits, obey exactly the same scope, kind, state, assertion and
-            time filters, and never displace a primary Top-K hit.
-          required: [reason_codes, anchor_memory_ids]
-          properties:
-            reason_codes:
-              type: array
-              items:
-                type: string
-                enum: [fact_group_member, conflict_member]
-            anchor_memory_ids:
-              type: array
-              items:
-                type: string
-                format: uuid
-        cluster:
-          type: object
-          description: >-
-            Present when exact duplicate expressions of the same fact were folded
-            into this display item. member_ids lists every folded memory and
-            evidence_refs contains the union of their evidence. Different
-            negation, conditions, time ranges, kinds, states or assertion status
-            are never folded.
-          required: [member_ids, evidence_count]
-          properties:
-            fact_group_id:
-              type: string
-              format: uuid
-            member_ids:
-              type: array
-              items:
-                type: string
-                format: uuid
-            evidence_count:
-              type: integer
-              minimum: 0
+        has_accepted:
+          type: boolean
 
-    SearchDiagnostics:
+    ConflictMember:
       type: object
-      description: >-
-        Stable, bounded stage counts returned only when explain=true. Counts are
-        candidate counts and never proof of semantic correctness. Filter-exclusion
-        counts come from count-only relaxations that retain scope and other
-        boundaries and never change the returned result set.
-      required: [keyword_candidates, semantic_candidates, semantic_excluded,
-        term_candidates, kind_filter_excluded, state_filter_excluded,
-        time_filter_excluded, ranking_candidates, related_expanded,
-        related_excluded, returned_items, context_budget_truncated]
+      required: [memory_id, version]
       properties:
-        keyword_candidates:
-          type: integer
-          minimum: 0
-        semantic_candidates:
-          type: integer
-          minimum: 0
-        semantic_excluded:
-          type: integer
-          minimum: 0
-        term_candidates:
-          type: integer
-          minimum: 0
-        kind_filter_excluded:
-          type: integer
-          minimum: 0
-          description: >-
-            Additional same-scope term hits excluded by the requested kind filter.
-            It does not assert that memory classification is wrong.
-        state_filter_excluded:
-          type: integer
-          minimum: 0
-        time_filter_excluded:
-          type: integer
-          minimum: 0
-        ranking_candidates:
-          type: integer
-          minimum: 0
-        related_expanded:
-          type: integer
-          minimum: 0
-        related_excluded:
-          type: integer
-          minimum: 0
-        returned_items:
-          type: integer
-          minimum: 0
-        context_budget_truncated:
-          type: integer
-          minimum: 0
-        semantic_degradation:
+        memory_id:
           type: string
-          description: Stable warning code when the semantic branch degraded.
+        version:
+          type: integer
+        current_version:
+          type: integer
+
+    MemberVersion:
+      type: object
+      required: [memory_id, version]
+      properties:
+        memory_id:
+          type: string
+        version:
+          type: integer
+
+    ConflictEvent:
+      type: object
+      required: [id, action, created_at]
+      properties:
+        id:
+          type: string
+        action:
+          type: string
+        memory_id:
+          type: string
+        version:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+
+    Conflict:
+      type: object
+      required: [id, status, reason_code, revision, created_at, updated_at, members]
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [open, resolved]
+        reason_code:
+          $ref: '#/components/schemas/ConflictReason'
+        resolution:
+          type: string
+        revision:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        members:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConflictMember'
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConflictEvent'
+
+    ConflictList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Conflict'
+
+    ConflictResolveRequest:
+      type: object
+      required: [revision, action]
+      properties:
+        revision:
+          type: integer
+          minimum: 1
+        action:
+          type: string
+          enum: [choose, reject_all]
+        member_ids:
+          type: array
+          items:
+            type: string
+        member_versions:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemberVersion'
+        reason:
+          type: string
 
     EmbeddingStatus:
       type: object
@@ -2455,10 +2425,8 @@ components:
           type: string
         endpoint:
           type: string
-          description: Credential-free endpoint identity
         dimensions:
           type: integer
-          minimum: 0
         min_similarity:
           type: number
         profile_id:
@@ -2475,30 +2443,21 @@ components:
           type: boolean
         rebuild_reason:
           type: string
-          description: >-
-            Fixed reason such as profile_changed, profile_registered,
-            index_version_changed, vectors_stale, vectors_missing or jobs_pending.
         rebuild_registered_at:
           type: string
           format: date-time
         documents:
           type: integer
-          minimum: 0
         current_vectors:
           type: integer
-          minimum: 0
         stale_vectors:
           type: integer
-          minimum: 0
         missing_vectors:
           type: integer
-          minimum: 0
         pending_jobs:
           type: integer
-          minimum: 0
         failed_jobs:
           type: integer
-          minimum: 0
         failed_codes:
           type: array
           items:
@@ -2509,7 +2468,6 @@ components:
                 type: string
               count:
                 type: integer
-                minimum: 0
         indexed_profiles:
           type: array
           items:
@@ -2520,11 +2478,8 @@ components:
                 type: string
               vectors:
                 type: integer
-                minimum: 0
         coverage:
           type: number
-          minimum: 0
-          maximum: 1
         ready:
           type: boolean
         reason_code:
@@ -2545,597 +2500,10 @@ components:
           type: boolean
         code:
           type: string
-          description: >-
-            ok, disabled, unauthorized, config_error, rate_limited, timeout,
-            cancelled, invalid_response, unavailable or a sanitized provider code
         dimensions:
           type: integer
         duration_ms:
           type: integer
-          minimum: 0
         checked_at:
           type: string
           format: date-time
-
-    EvidenceRef:
-      type: object
-      required: [id, source_id]
-      properties:
-        id:
-          type: string
-          format: uuid
-        source_id:
-          type: string
-          format: uuid
-
-    Explanation:
-      type: object
-      required: [ranking]
-      properties:
-        ranking:
-          type: string
-          enum: [bm25, rrf]
-        field_weights:
-          type: array
-          description: Present only for keyword-mode BM25 ranking
-          minItems: 2
-          maxItems: 2
-          items:
-            type: integer
-          example: [4, 1]
-        keyword:
-          type: object
-          description: Present when the keyword path recalled this item
-          required: [rank, bm25]
-          properties:
-            rank:
-              type: integer
-              minimum: 1
-            bm25:
-              type: number
-        semantic:
-          type: object
-          description: Present when the semantic path recalled this item
-          required: [rank, cosine]
-          properties:
-            rank:
-              type: integer
-              minimum: 1
-            cosine:
-              type: number
-
-    Source:
-      type: object
-      required: [id, redacted, created_at]
-      properties:
-        id:
-          type: string
-          format: uuid
-        app_id:
-          type: string
-        external_id:
-          type: string
-        scope_key:
-          type: string
-          description: Optional flat source scope label
-        content:
-          description: Original JSON; omitted after redaction
-        redacted:
-          type: boolean
-        redacted_at:
-          type: string
-          format: date-time
-        created_at:
-          type: string
-          format: date-time
-
-    RedactResponse:
-      type: object
-      required: [id, redacted, cancelled_jobs]
-      properties:
-        id:
-          type: string
-          format: uuid
-        redacted:
-          type: boolean
-          enum: [true]
-        cancelled_jobs:
-          type: integer
-          minimum: 0
-
-    ForgetRequest:
-      type: object
-      description: At least one identifier is required.
-      properties:
-        memory_ids:
-          type: array
-          items:
-            type: string
-            format: uuid
-        source_ids:
-          type: array
-          items:
-            type: string
-            format: uuid
-        experience_ids:
-          type: array
-          items:
-            type: string
-            format: uuid
-
-    ForgetResponse:
-      type: object
-      required: [memory_ids, source_ids, experience_ids]
-      description: Sorted identifiers removed by the committed transaction.
-      properties:
-        memory_ids:
-          type: array
-          items:
-            type: string
-            format: uuid
-        source_ids:
-          type: array
-          items:
-            type: string
-            format: uuid
-        experience_ids:
-          type: array
-          items:
-            type: string
-            format: uuid
-        warnings:
-          type: array
-          description: Present when related memories could not be safely deleted.
-          items:
-            type: string
-            enum: [related_memories_retained]
-        retained_related_memory_ids:
-          type: array
-          description: Sorted retained same-group IDs; omitted when none remain.
-          items:
-            type: string
-            format: uuid
-
-    Job:
-      type: object
-      required: [id, source_id, status, attempts, protocol_failures, memory_ids, conflict_ids,
-        pending_memory_ids, warnings, extraction_stats, retention, timings, model_usage,
-        efficiency, diagnostics, convergence, created_at, updated_at]
-      properties:
-        id:
-          type: string
-          format: uuid
-        source_id:
-          type: string
-          format: uuid
-        status:
-          type: string
-          description: |
-            waiting means the task is parked. transient waits resume
-            automatically with bounded backoff; configuration waits are
-            reevaluated after a restart; protocol waits fail after worker.max_attempts
-            consecutive malformed responses (default three), after local repair.
-          enum: [queued, running, waiting, succeeded, failed, cancelled]
-        attempts:
-          type: integer
-          minimum: 0
-        protocol_failures:
-          type: integer
-          minimum: 0
-          description: Consecutive protocol failures for the current input
-        wait_reason:
-          type: string
-          enum: [transient, configuration, protocol]
-          description: Fixed wait reason; never contains source or provider text
-        stage:
-          type: string
-          enum: [source, extraction, extraction_repair, context, decision, decision_repair, commit, processing]
-          description: Stage that caused the wait or failure
-        reason_code:
-          type: string
-          enum: [configuration, transient, protocol, model_timeout, process_budget_exceeded,
-            state_changed, decision_protocol_invalid, decision_repair_failed]
-          description: Stable diagnostic code; independent of the display error
-        next_attempt_at:
-          type: string
-          format: date-time
-        error:
-          type: string
-          description: Sanitized failure summary; never a raw model response
-        memory_ids:
-          type: array
-          description: All memories created or revised by this job
-          items:
-            type: string
-            format: uuid
-        conflict_ids:
-          type: array
-          items:
-            type: string
-            format: uuid
-        pending_memory_ids:
-          type: array
-          items:
-            type: string
-            format: uuid
-        warnings:
-          type: array
-          description: Stable warning codes such as fact_conflict or context_truncated
-          items:
-            type: string
-        quality_outcome:
-          type: string
-          description: |
-            Business result for the latest attempt, separate from scheduling
-            status. empty means the model selected no candidates; complete means
-            every non-excluded candidate was safely handled; partial means some
-            candidates were isolated; unusable means non-empty candidates could
-            not be made safe and the job is retrying or failed.
-          enum: [empty, complete, partial, unusable]
-        extraction_stats:
-          type: object
-          description: |
-            Fixed stage counts for the latest attempt. Counts distinguish raw
-            model candidates, repaired/split candidates and final dispositions.
-          required: [raw_candidates, parsed_candidates, normalized_candidates, normalizations,
-            repair_attempts, repaired_candidates, repair_succeeded, repair_failed,
-            repair_timed_out, repair_invalid_output, excluded_candidates,
-            isolated_candidates, accepted_candidates, skipped_candidates, memory_writes,
-            extraction_chunks, extraction_chunk_failures, dropped_candidates,
-            cross_chunk_duplicates, context_only_candidates]
-          properties:
-            raw_candidates: {type: integer, minimum: 0}
-            parsed_candidates: {type: integer, minimum: 0}
-            normalized_candidates: {type: integer, minimum: 0}
-            normalizations: {type: integer, minimum: 0}
-            repair_attempts: {type: integer, minimum: 0}
-            repaired_candidates: {type: integer, minimum: 0}
-            repair_succeeded: {type: integer, minimum: 0}
-            repair_failed: {type: integer, minimum: 0}
-            repair_timed_out: {type: integer, minimum: 0}
-            repair_invalid_output: {type: integer, minimum: 0}
-            excluded_candidates: {type: integer, minimum: 0}
-            isolated_candidates: {type: integer, minimum: 0}
-            accepted_candidates: {type: integer, minimum: 0}
-            skipped_candidates: {type: integer, minimum: 0}
-            memory_writes: {type: integer, minimum: 0}
-            extraction_chunks: {type: integer, minimum: 0}
-            extraction_chunk_failures: {type: integer, minimum: 0}
-            dropped_candidates: {type: integer, minimum: 0}
-            cross_chunk_duplicates: {type: integer, minimum: 0}
-            context_only_candidates: {type: integer, minimum: 0}
-        retention:
-          type: object
-          description: >-
-            Service-derived retained candidates and fixed non-retention codes:
-            explicit_exclusion, cross_chunk_context, cross_chunk_duplicate,
-            candidate_limit, invalid_candidate, decision_skip, empty_extraction
-            or chunk_failure. This never claims semantic correctness and never
-            triggers automatic deletion or a default TTL.
-          required: [retained, not_retained, by_reason, not_retained_by_reason]
-          properties:
-            retained: {type: integer, minimum: 0}
-            not_retained: {type: integer, minimum: 0}
-            by_reason:
-              type: object
-              additionalProperties: {type: integer, minimum: 0}
-            not_retained_by_reason:
-              type: object
-              additionalProperties: {type: integer, minimum: 0}
-        timings:
-          type: object
-          description: >-
-            Wall-clock stage breakdown in milliseconds. queue_age_ms runs from
-            durable job creation to this attempt and therefore includes earlier
-            waits on a retry; the other fields measure the current attempt.
-          required: [queue_age_ms, extraction_ms, normalization_ms, repair_ms,
-            context_ms, decision_ms, commit_ms, total_ms]
-          properties:
-            queue_age_ms: {type: integer, minimum: 0}
-            extraction_ms: {type: integer, minimum: 0}
-            normalization_ms: {type: integer, minimum: 0}
-            repair_ms: {type: integer, minimum: 0}
-            context_ms: {type: integer, minimum: 0}
-            decision_ms: {type: integer, minimum: 0}
-            commit_ms: {type: integer, minimum: 0}
-            total_ms: {type: integer, minimum: 0}
-        model_usage:
-          type: object
-          required: [calls, input_tokens, output_tokens, total_tokens]
-          properties:
-            calls: {type: integer, minimum: 0}
-            input_tokens: {type: integer, minimum: 0}
-            output_tokens: {type: integer, minimum: 0}
-            total_tokens: {type: integer, minimum: 0}
-        efficiency:
-          type: object
-          description: Per-effective-atom call and token cost for this attempt
-          required: [memories, model_calls, total_tokens, calls_per_memory, tokens_per_memory]
-          properties:
-            memories: {type: integer, minimum: 0}
-            model_calls: {type: integer, minimum: 0}
-            total_tokens: {type: integer, minimum: 0}
-            calls_per_memory: {type: number, minimum: 0}
-            tokens_per_memory: {type: number, minimum: 0}
-        queue_age_seconds:
-          type: integer
-          minimum: 0
-        stale_seconds:
-          type: integer
-          minimum: 0
-        retry_reason:
-          type: string
-        diagnostics:
-          type: array
-          description: |
-            Candidate-level, source-free diagnostics for the latest attempt.
-            Entries contain fixed codes only; never source text or raw model
-            responses.
-          items:
-            $ref: '#/components/schemas/ExtractionDiagnostic'
-        convergence:
-          type: array
-          description: |
-            Fixed reasons why a candidate with an existing scoped identity was
-            not automatically converged. Codes never contain source text.
-          items:
-            $ref: '#/components/schemas/ConvergenceDiagnostic'
-        created_at:
-          type: string
-          format: date-time
-        updated_at:
-          type: string
-          format: date-time
-        started_at:
-          type: string
-          format: date-time
-        finished_at:
-          type: string
-          format: date-time
-
-    ConvergenceDiagnostic:
-      type: object
-      required: [code]
-      properties:
-        candidate_id:
-          type: string
-        group_id:
-          type: string
-          format: uuid
-        code:
-          type: string
-          enum: [identity_ambiguous, missing_update_evidence, time_unknown,
-            cardinality_unknown, context_truncated]
-
-    EvolutionEvent:
-      type: object
-      required: [id, from_memory_id, from_version, to_memory_id, to_version, action, created_at]
-      properties:
-        id:
-          type: string
-          format: uuid
-        fact_group_id:
-          type: string
-          format: uuid
-        from_memory_id:
-          type: string
-          format: uuid
-        from_version:
-          type: integer
-          minimum: 1
-        to_memory_id:
-          type: string
-          format: uuid
-        to_version:
-          type: integer
-          minimum: 1
-        action:
-          type: string
-          enum: [change, correction, reschedule, cancel, supersede]
-        reason_code:
-          type: string
-        created_at:
-          type: string
-          format: date-time
-
-    ExtractionDiagnostic:
-      type: object
-      required: [code, stage, disposition]
-      properties:
-        candidate_id:
-          type: string
-          description: Service-assigned candidate ID; empty for a whole-response failure
-        field:
-          type: string
-          description: Protocol field path such as evidence[0].segment_id
-        code:
-          type: string
-          description: Stable diagnostic code
-        stage:
-          type: string
-          enum: [normalize, validate, repair, isolate, extraction]
-        disposition:
-          type: string
-          enum: [normalized, accepted, repaired, isolated, excluded]
-
-    ConflictMember:
-      type: object
-      required: [memory_id, version]
-      properties:
-        memory_id:
-          type: string
-          format: uuid
-        version:
-          type: integer
-          minimum: 1
-          description: Version detected when the conflict was recorded
-        current_version:
-          type: integer
-          description: Current memory version when the conflict was read
-
-    MemberVersion:
-      type: object
-      required: [memory_id, version]
-      properties:
-        memory_id:
-          type: string
-          format: uuid
-        version:
-          type: integer
-          minimum: 1
-          description: Current version being adjudicated
-
-    ConflictEvent:
-      type: object
-      required: [id, action, created_at]
-      properties:
-        id:
-          type: string
-          format: uuid
-        action:
-          type: string
-          example: detected
-        memory_id:
-          type: string
-          format: uuid
-        version:
-          type: integer
-        created_at:
-          type: string
-          format: date-time
-
-    Conflict:
-      type: object
-      required: [id, status, reason_code, revision, created_at, updated_at, members]
-      properties:
-        id:
-          type: string
-          format: uuid
-        fact_group_id:
-          type: string
-          format: uuid
-        status:
-          type: string
-          enum: [open, resolved]
-        reason_code:
-          type: string
-          enum: [contradictory_value, uncertain_time, ambiguous_scope, complex_timeline]
-        resolution:
-          type: string
-          description: Canonical structured adjudication JSON; never model reasoning
-        revision:
-          type: integer
-          minimum: 1
-        created_at:
-          type: string
-          format: date-time
-        updated_at:
-          type: string
-          format: date-time
-        members:
-          type: array
-          items:
-            $ref: '#/components/schemas/ConflictMember'
-        events:
-          type: array
-          items:
-            $ref: '#/components/schemas/ConflictEvent'
-
-    ConflictSummary:
-      type: object
-      required: [id, reason_code, member_ids, has_accepted]
-      properties:
-        id:
-          type: string
-          format: uuid
-        reason_code:
-          type: string
-          enum: [contradictory_value, uncertain_time, ambiguous_scope, complex_timeline]
-        member_ids:
-          type: array
-          items:
-            type: string
-            format: uuid
-        has_accepted:
-          type: boolean
-        fact_group_id:
-          type: string
-          format: uuid
-
-    ConflictRef:
-      type: object
-      required: [id, reason_code]
-      properties:
-        id:
-          type: string
-          format: uuid
-        reason_code:
-          type: string
-          enum: [contradictory_value, uncertain_time, ambiguous_scope, complex_timeline]
-
-    ConflictList:
-      type: object
-      required: [items]
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/Conflict'
-
-    ConflictResolveRequest:
-      type: object
-      required: [revision, action, member_versions]
-      properties:
-        revision:
-          type: integer
-          minimum: 1
-        action:
-          type: string
-          enum: [choose, timeline, separate_scope, reject_all]
-        member_ids:
-          type: array
-          items:
-            type: string
-            format: uuid
-        member_versions:
-          type: array
-          items:
-            $ref: '#/components/schemas/MemberVersion'
-        separate_group:
-          type: object
-          properties:
-            subject:
-              type: string
-            predicate:
-              type: string
-            scope:
-              type: string
-            cardinality:
-              type: string
-              enum: [single, multiple, unknown]
-        timeline:
-          type: array
-          items:
-            type: object
-            required: [valid_from, valid_to]
-            properties:
-              memory_id:
-                type: string
-                format: uuid
-              content:
-                type: string
-              valid_from:
-                type: string
-                format: date-time
-              valid_to:
-                type: string
-                format: date-time
-        reason:
-          type: string
-
-    Health:
-      type: object
-      required: [status]
-      properties:
-        status:
-          type: string

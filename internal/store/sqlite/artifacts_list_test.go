@@ -14,14 +14,14 @@ func TestArtifactAndTargetListsAreStableAndBounded(t *testing.T) {
 	now := time.Date(2026, 10, 27, 8, 0, 0, 0, time.UTC)
 	ctx := context.Background()
 	if err := store.WithTx(ctx, func(ctx context.Context, tx *Tx) error {
-		if err := tx.CreateArtifact(ctx, artifact.Artifact{
+		if err := tx.CreateArtifact(ctx, artifact.DerivedMemory{
 			ID: "artifact-active", Kind: artifact.KindSkill,
 			TargetKey: task.SkillKey("user", "active"), ScopeKey: "user", Topic: "active",
 			CurrentVersion: 1, State: artifact.StateActive, UpdatedAt: now,
 		}); err != nil {
 			return err
 		}
-		if err := tx.CreateArtifact(ctx, artifact.Artifact{
+		if err := tx.CreateArtifact(ctx, artifact.DerivedMemory{
 			ID: "artifact-disabled", Kind: artifact.KindSkill,
 			TargetKey: task.SkillKey("user", "disabled"), ScopeKey: "user", Topic: "disabled",
 			CurrentVersion: 2, State: artifact.StateDisabled, UpdatedAt: now,
@@ -29,7 +29,7 @@ func TestArtifactAndTargetListsAreStableAndBounded(t *testing.T) {
 			return err
 		}
 		if _, _, err := tx.UpsertJob(ctx, task.UpsertInput{
-			Kind: task.KindBuildSkill, TargetKey: task.SkillKey("user", "queued"),
+			Kind: task.KindBuildGuidance, TargetKey: task.SkillKey("user", "queued"),
 			InputHash: "queued", NextAttemptAt: &now, Now: now,
 		}); err != nil {
 			return err
@@ -83,7 +83,7 @@ func TestArtifactAndTargetListsAreStableAndBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(filtered.Items) != 1 || filtered.Items[0].Artifact != nil ||
+	if len(filtered.Items) != 1 || filtered.Items[0].DerivedMemory != nil ||
 		filtered.Items[0].Job == nil || filtered.Items[0].Job.Status != task.StatusQueued {
 		t.Fatalf("queued targets = %+v", filtered)
 	}

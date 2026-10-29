@@ -10,7 +10,9 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/artifact"
 	"github.com/N0rthHXD/dmemd/internal/governance"
 	"github.com/N0rthHXD/dmemd/internal/ingest"
+	"github.com/N0rthHXD/dmemd/internal/jobs"
 	"github.com/N0rthHXD/dmemd/internal/memory"
+	"github.com/N0rthHXD/dmemd/internal/observation"
 	"github.com/N0rthHXD/dmemd/internal/retrieval"
 	"github.com/N0rthHXD/dmemd/internal/source"
 )
@@ -27,7 +29,6 @@ const (
 const (
 	codeInvalidResolution = "invalid_resolution"
 	codeConflictStale     = "conflict_stale"
-	codeRestoreConflict   = "restore_conflict"
 )
 
 type errorResponse struct {
@@ -72,11 +73,8 @@ func (h *handler) writeServiceError(w http.ResponseWriter, request *http.Request
 		errors.Is(err, governance.ErrInvalidExperience),
 		errors.Is(err, governance.ErrInvalidForget):
 		h.writeBadRequest(w)
-	case errors.Is(err, memory.ErrInvalidResolution),
-		errors.Is(err, memory.ErrInvalidTemporal):
+	case errors.Is(err, memory.ErrInvalidResolution):
 		writeErrorCode(w, http.StatusBadRequest, badRequestMessage, codeInvalidResolution)
-	case errors.Is(err, memory.ErrRestoreConflict):
-		writeErrorCode(w, http.StatusConflict, conflictMessage, codeRestoreConflict)
 	case errors.Is(err, memory.ErrConflictStale):
 		writeErrorCode(w, http.StatusConflict, conflictMessage, codeConflictStale)
 	case errors.Is(err, memory.ErrNotFound),
@@ -84,6 +82,8 @@ func (h *handler) writeServiceError(w http.ResponseWriter, request *http.Request
 		errors.Is(err, artifact.ErrNotFound),
 		errors.Is(err, governance.ErrExperienceNotFound),
 		errors.Is(err, source.ErrNotFound),
+		errors.Is(err, observation.ErrNotFound),
+		errors.Is(err, jobs.ErrTaskNotFound),
 		errors.Is(err, ingest.ErrNotFound):
 		h.writeNotFound(w)
 	default:

@@ -15,15 +15,94 @@ export interface paths {
         put?: never;
         /**
          * Submit arbitrary JSON content for background extraction
-         * @description Accepts strings, objects, arrays or null as content. Saves the source and
-         *     a queued ingest job in one transaction, then returns 202 without waiting
-         *     for a model. app_id and external_id are optional informational source
-         *     fields. scope_key is an optional flat scope label supplied by the calling
-         *     context; the model never invents or promotes it. Job progress is queried
-         *     through GET /v1/ingest-jobs/{id}; classification runs later through the
-         *     persistent governance worker.
+         * @description Saves the source and an extraction job in one transaction and returns
+         *     202. No model is called and no memory is created synchronously. The
+         *     extraction worker later creates L0 observations; governance and
+         *     aggregation continue asynchronously through their own task tables.
          */
         post: operations["createIngestion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/observations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List L0 raw observations
+         * @description Read-only view of the L0 layer. Observations are immutable raw records
+         *     extracted from a source; their content is never editable through HTTP.
+         */
+        get: operations["listObservations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/observations/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Read one L0 observation */
+        get: operations["getObservation"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/observations/{id}/evidence": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Read the code-generated evidence of one observation
+         * @description Evidence is generated only from selected source spans. A model quote,
+         *     offset or identifier is never accepted as evidence.
+         */
+        get: operations["getObservationEvidence"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/observations/{id}/relations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Read typed relations touching one observation */
+        get: operations["getObservationRelations"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -38,11 +117,10 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List current memories
-         * @description Default state set is active+archived; deleted tombstones are returned
-         *     only when states explicitly contains deleted. Default limit is 50.
-         *     All assertion statuses are listed unless filtered. Order is
-         *     updated_at DESC, id ASC. There is no pagination.
+         * List canonical current memories
+         * @description Only the current governed view is returned. There is no raw extraction
+         *     content here; use /v1/observations for L0 records. Default state set is
+         *     active+archived; deleted tombstones require an explicit states filter.
          */
         get: operations["listMemories"];
         put?: never;
@@ -63,26 +141,12 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Unified layered recall for atomic memories and derived artifacts
-         * @description The single recall entry point. layers selects atomic, summary,
-         *     experience and skill partitions; omitting layers selects all four.
-         *     filters.kinds and filters.states only narrow the atomic partition and
-         *     are never applied to derived layers. scope_key filters both atomic
-         *     memories and derived artifacts to the requested scope or the user-global
-         *     scope; omitted scope_key disables that filter. User text is ordinary
-         *     keywords, never FTS syntax. Hybrid and keyword modes use the same
-         *     internal retrieval semantics as atomic search. Explicit filters.as_of
-         *     returns atomic history only: derived partitions stay empty and include
-         *     derived_as_of_unsupported. A derived-index failure degrades to atomic
-         *     results with derived_unavailable and never waits for generation.
-         *     Experiences are application reports, not verified execution results;
-         *     skills are guidance only and carry no execution or safety certification.
-         *     After primary hits, atomic recall may append bounded same-fact and
-         *     unresolved-conflict members with a related marker. Association obeys the
-         *     same scope/kind/state/time filters and only uses remaining top_k room.
-         *     Exact duplicate expressions of one fact are folded into a display
-         *     cluster that preserves every member ID and the union of evidence.
-         *     explain=true adds optional bounded stage counts under diagnostics.
+         * Layered recall for observations, canonical memories and L1-L4
+         * @description Returns independent partitions instead of one mixed ranking. query_mode
+         *     selects a fixed default layer set; explicit layers take precedence.
+         *     Each selected partition receives its own top_k bound. Stale derived
+         *     memories are not returned as current conclusions unless explicitly
+         *     requested through derived_states.
          */
         post: operations["recallMemories"];
         delete?: never;
@@ -98,12 +162,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /**
-         * List current derived artifacts
-         * @description Bounded keyset page of current derived objects. Filters do not change
-         *     recall visibility; stale and disabled objects remain readable for
-         *     management and audit.
-         */
+        /** List current derived memories */
         get: operations["listArtifacts"];
         put?: never;
         post?: never;
@@ -120,12 +179,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /**
-         * List derived generation targets and their state
-         * @description Includes targets that have never produced an artifact. This separates
-         *     "not eligible yet" from a disabled or failed content object, queued,
-         *     running and waiting work, a usable current version and stale content.
-         */
+        /** List derived generation targets */
         get: operations["listArtifactTargets"];
         put?: never;
         post?: never;
@@ -139,10 +193,12 @@ export interface paths {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                id: string;
+            };
             cookie?: never;
         };
-        /** Read one derived artifact and its current revision */
+        /** Read one derived memory, its current revision and dependencies */
         get: operations["getArtifact"];
         put?: never;
         post?: never;
@@ -156,10 +212,13 @@ export interface paths {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                id: string;
+                version: number;
+            };
             cookie?: never;
         };
-        /** Read one historical derived revision */
+        /** Read one historical derived revision and its dependencies */
         get: operations["getArtifactHistoryEntry"];
         put?: never;
         post?: never;
@@ -178,15 +237,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /**
-         * Submit one completed application-reported result
-         * @description Stores the original report as a source and one experience_run, then
-         *     queues experience-case generation. outcome is the application's report
-         *     (success, failure or unknown) and is never upgraded to a verified
-         *     execution result. A supplied run_id is an optional deduplication key:
-         *     repeating it returns the existing receipt without comparing the request
-         *     body, overwriting the stored result or restoring a revoked result.
-         */
+        /** Submit one application-reported result */
         post: operations["createExperience"];
         delete?: never;
         options?: never;
@@ -198,17 +249,14 @@ export interface paths {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                id: string;
+            };
             cookie?: never;
         };
         get?: never;
         put?: never;
-        /**
-         * Revoke one reported result and block dependent use
-         * @description Marks the application report revoked, disables its experience case and
-         *     synchronously removes affected skills from default recall while queuing
-         *     regeneration from the remaining sources. The operation is idempotent.
-         */
+        /** Revoke one application report */
         post: operations["retractExperience"];
         delete?: never;
         options?: never;
@@ -220,17 +268,12 @@ export interface paths {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                id: string;
+            };
             cookie?: never;
         };
-        /**
-         * Read one rendered SKILL.md guidance document
-         * @description By default returns the active current version only; a stale or disabled
-         *     current skill is not served as active advice. An explicit positive
-         *     version reads that immutable revision and returns its owning state.
-         *     The content is guidance only and carries no execution or safety
-         *     certification. Permanently cleared objects are not readable.
-         */
+        /** Read one rendered SKILL.md guidance document */
         get: operations["getSkillContent"];
         put?: never;
         post?: never;
@@ -250,19 +293,15 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Get the current memory snapshot
-         * @description Deleted memories remain readable as tombstones by ID. Relations carry
-         *     decision-time versions and whether either endpoint has since changed.
+         * Read the canonical current view and its references
+         * @description Returns the current governed snapshot plus its observation source IDs,
+         *     typed relation refs, open conflict IDs and directly derived dependents.
+         *     The memory content itself is immutable through this endpoint.
          */
         get: operations["getMemory"];
         put?: never;
         post?: never;
-        /**
-         * Logically delete a memory
-         * @description Writes a deleted tombstone and a new revision. The record, history and
-         *     dedicated evidence remain readable; use POST /purge for permanent
-         *     removal.
-         */
+        /** Logically delete a memory */
         delete: operations["deleteMemory"];
         options?: never;
         head?: never;
@@ -284,12 +323,7 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        /**
-         * Change lifecycle state only
-         * @description Accepts only active or archived. Unknown, missing or unchanged state is
-         *     a no-op returning the current memory. Content fields are ignored; content
-         *     corrections must be submitted through POST /v1/ingestions.
-         */
+        /** Change lifecycle state only */
         patch: operations["setMemoryState"];
         trace?: never;
     };
@@ -304,11 +338,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /**
-         * Permanently purge a memory
-         * @description Permanently removes the current record, history and dedicated evidence;
-         *     shared sources remain. This operation has no request body.
-         */
+        /** Permanently purge one memory and its dedicated data */
         post: operations["purgeMemory"];
         delete?: never;
         options?: never;
@@ -325,10 +355,7 @@ export interface paths {
             };
             cookie?: never;
         };
-        /**
-         * List complete revision history
-         * @description Newest version first; default limit 50; no pagination.
-         */
+        /** List immutable memory revisions */
         get: operations["listMemoryHistory"];
         put?: never;
         post?: never;
@@ -344,12 +371,11 @@ export interface paths {
             header?: never;
             path: {
                 id: components["parameters"]["MemoryID"];
-                /** @example 2 */
                 version: components["parameters"]["Version"];
             };
             cookie?: never;
         };
-        /** Get one complete historical version */
+        /** Read one immutable memory revision */
         get: operations["getMemoryHistoryEntry"];
         put?: never;
         post?: never;
@@ -365,21 +391,13 @@ export interface paths {
             header?: never;
             path: {
                 id: components["parameters"]["MemoryID"];
-                /** @example 2 */
                 version: components["parameters"]["Version"];
             };
             cookie?: never;
         };
         get?: never;
         put?: never;
-        /**
-         * Restore a historical version as a new current version
-         * @description Never overwrites history. Restored state is active; assertion status is
-         *     not promoted, and a pending/rejected historical assertion keeps its
-         *     status. If restoring an accepted assertion would create an unmarked
-         *     conflict in the current fact group, the whole restore returns 409 and
-         *     no version is written. A missing or unknown version returns 404.
-         */
+        /** Restore a historical revision as a new current version */
         post: operations["restoreMemoryVersion"];
         delete?: never;
         options?: never;
@@ -396,12 +414,7 @@ export interface paths {
             };
             cookie?: never;
         };
-        /**
-         * Get the current or a historical version evidence set
-         * @description version absent, 0 or invalid means current. A positive nonexistent
-         *     version returns 404. Redacted evidence keeps its ID and source_id but
-         *     never returns quote or location copies.
-         */
+        /** Read the evidence set of one memory revision */
         get: operations["getMemoryEvidence"];
         put?: never;
         post?: never;
@@ -418,10 +431,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /**
-         * List conflicts
-         * @description Fixed updated_at DESC, id ASC ordering with one result set.
-         */
+        /** List memory conflicts */
         get: operations["listConflicts"];
         put?: never;
         post?: never;
@@ -440,7 +450,7 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Get a conflict with members and audit events */
+        /** Read one conflict with members and events */
         get: operations["getConflict"];
         put?: never;
         post?: never;
@@ -461,13 +471,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /**
-         * Explicitly adjudicate one conflict
-         * @description The client submits the conflict revision and the member versions it
-         *     inspected. A stale conflict or member returns 409; malformed actions or
-         *     timelines return 400. Resolving an already resolved conflict with the
-         *     same payload returns the existing result; a different result returns 409.
-         */
+        /** Explicitly adjudicate one conflict */
         post: operations["resolveConflict"];
         delete?: never;
         options?: never;
@@ -484,24 +488,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /**
-         * Permanently forget atomic memories, sources or application reports
-         * @description Removes every requested leaf and, before any foreign-key cascade runs,
-         *     enumerates and removes dependent derived objects, their history, FTS
-         *     rows and dependency edges. Forgetting a source expands to all
-         *     associated memories and application reports; forgetting a report also
-         *     removes its dedicated source. The whole request is one transaction: an
-         *     unknown identifier or storage failure rolls back every listed target.
-         *     Historical and rendered derived reads return 404 after commit.
-         *     Source association includes evidence in any memory revision, not only
-         *     the current origin. Duplicate closure requires the same non-empty fact
-         *     group, scope, kind and phase, formatting-normalized identical content,
-         *     and equal or overlapping valid time. Deleted copies are included.
-         *     Same-group memories that fail these safeguards are retained and listed
-         *     with related_memories_retained. Dependent conflicts (including resolved
-         *     history) are removed and their review jobs cancelled; derived jobs are
-         *     revision-invalidated and rebuilt from remaining inputs.
-         */
+        /** Permanently forget the requested closure */
         post: operations["forget"];
         delete?: never;
         options?: never;
@@ -518,21 +505,88 @@ export interface paths {
             };
             cookie?: never;
         };
-        /**
-         * Get a submission and its original content
-         * @description Redacted sources retain the ID and status but omit content.
-         */
+        /** Read one source, its stable spans and redaction status */
         get: operations["getSource"];
         put?: never;
         post?: never;
-        /**
-         * Redact original content and cancel unfinished jobs
-         * @description Clears original content and every evidence quote/location copy in one
-         *     transaction, keeps the source ID and redacted status, cancels queued or
-         *     running jobs, scrubs terminal job error summaries that could retain
-         *     original text, and leaves already formed memory text intact.
-         */
+        /** Redact original content and cancel unfinished jobs */
         delete: operations["redactSource"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List extraction jobs
+         * @description Extraction jobs report only their extraction stage. Governance and
+         *     aggregation progress is queried through /v1/governance-jobs.
+         */
+        get: operations["listJobs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/jobs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Read one extraction job */
+        get: operations["getJob"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/governance-jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List governance and aggregation tasks */
+        get: operations["listGovernanceJobs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/governance-jobs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Read one governance or aggregation task */
+        get: operations["getGovernanceJob"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -547,7 +601,7 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Get processing status and result summary */
+        /** Read one extraction job through the historical path */
         get: operations["getIngestJob"];
         put?: never;
         post?: never;
@@ -564,17 +618,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Read semantic configuration and vector coverage diagnostics
-         * @description Reports the configured model, credential-free endpoint, dimensions and
-         *     profile fingerprint alongside durable coverage counts. current_vectors
-         *     only counts vectors matching the active profile, dimensions and current
-         *     document content hash. stale_vectors and missing_vectors are excluded
-         *     from recall and drive rebuild_required. A non-empty index with zero
-         *     current vectors reports index_not_ready instead of implying semantic
-         *     irrelevance. The response never contains an API key, source text, query
-         *     text, vector values or a raw provider response.
-         */
+        /** Read semantic-index status */
         get: operations["getEmbeddingStatus"];
         put?: never;
         post?: never;
@@ -593,13 +637,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /**
-         * Explicitly check the embedding endpoint and response shape
-         * @description Makes one bounded online-model call with a fixed header-free probe text.
-         *     It distinguishes disabled configuration, authorization, rate limiting,
-         *     timeout, network/server failure and an invalid vector response. The result
-         *     is not persisted and never affects readiness or recall.
-         */
+        /** Probe the configured embedding endpoint */
         post: operations["probeEmbedding"];
         delete?: never;
         options?: never;
@@ -631,10 +669,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Database readiness
-         * @description A model outage does not affect readiness.
-         */
+        /** Database readiness */
         get: operations["readyz"];
         put?: never;
         post?: never;
@@ -649,34 +684,16 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         Error: {
-            /** @example 请求体不是有效的 JSON。 */
             error: string;
-            /**
-             * @description Stable code for conflict-specific failures
-             * @example conflict_stale
-             */
             code?: string;
         };
-        /**
-         * @description All fields are optional. content may be any JSON value, including a
-         *     string, object, array, number, boolean or null.
-         */
+        Health: {
+            /** @enum {string} */
+            status: "ok" | "ready" | "unavailable";
+        };
         SubmitRequest: {
-            /**
-             * @description Optional informational source name; no identity or uniqueness
-             * @example desktop-assistant
-             */
             app_id?: string;
-            /**
-             * @description Optional external reference; no uniqueness constraint
-             * @example conversation-42-batch-7
-             */
             external_id?: string;
-            /**
-             * @description Optional flat scope label such as user or project:dmemd. Empty means
-             *     unknown; it is never silently promoted to a global scope.
-             * @example project:dmemd
-             */
             scope_key?: string;
             /** @description Arbitrary JSON content, including null */
             content?: unknown;
@@ -684,189 +701,110 @@ export interface components {
             [key: string]: unknown;
         };
         SubmitResponse: {
-            /** Format: uuid */
             source_id: string;
-            /** Format: uuid */
             job_id: string;
             /** @enum {string} */
             status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
         };
+        /** @description Current canonical memory view produced by governance */
         Memory: {
-            /** Format: uuid */
             id: string;
             /** @enum {string} */
             kind: "fact" | "preference" | "event" | "procedure";
-            /**
-             * @description Lifecycle phase of the assertion; independent from memory state
-             * @enum {string}
-             */
-            phase: "unknown" | "scheduled" | "in_progress" | "completed" | "cancelled" | "postponed";
-            /**
-             * @description Extraction durability metadata; not a truth or lifecycle decision
-             * @enum {string}
-             */
-            durability: "unknown" | "durable" | "episodic" | "temporary";
             title: string;
             content: string;
             /** @enum {string} */
             state: "active" | "archived" | "deleted";
-            /**
-             * @description accepted is system-adopted, pending needs adjudication, rejected is audited but not recalled
-             * @enum {string}
-             */
+            /** @enum {string} */
             assertion_status: "accepted" | "pending" | "rejected";
             version: number;
-            /**
-             * Format: date-time
-             * @description When the source made or observed the statement. A missing value is filled from source receipt time and marked basis=recorded; that fallback is never evidence that the assertion itself happened later.
-             */
-            observed_at: string;
-            /** @enum {string} */
-            observed_at_basis: "explicit" | "inferred" | "unknown" | "recorded";
-            /**
-             * Format: date-time
-             * @description When a scheduled or occurred event happens. Kept separate from fact validity so a future plan remains visible to a current plan query.
-             */
-            event_time?: string | null;
-            /** @enum {string} */
-            event_time_basis: "explicit" | "inferred" | "unknown";
-            /** @enum {string} */
-            event_time_precision: "unknown" | "year" | "month" | "day" | "hour" | "minute" | "second";
-            /**
-             * Format: date-time
-             * @description Half-open interval start; absent means unknown, not "always valid"
-             */
-            valid_from?: string | null;
-            /**
-             * Format: date-time
-             * @description Half-open interval end; absent means unknown
-             */
-            valid_to?: string | null;
-            /** @enum {string} */
-            valid_from_basis: "explicit" | "inferred" | "unknown";
-            /** @enum {string} */
-            valid_to_basis: "explicit" | "inferred" | "unknown";
-            temporal: components["schemas"]["TemporalDetails"];
-            procedure?: components["schemas"]["Procedure"];
-            qualifiers?: components["schemas"]["AssertionQualifiers"];
-            /** Format: uuid */
-            fact_group_id?: string;
+            scope_key?: string;
+            origin_source_id?: string;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
             updated_at: string;
-            /** @description app_id captured at creation; preserved by updates and restores */
-            created_by_app?: string;
-            /** Format: uuid */
-            origin_source_id?: string;
-            /** @description Flat scope label; absent or empty means unknown */
-            scope_key?: string;
-            /**
-             * @description Canonical topic labels including inherited parents; bilingual aliases use taxonomy-v1, unknown labels remain extension leaves
-             * @example [
-             *       "containers",
-             *       "kubernetes",
-             *       "oom"
-             *     ]
-             */
-            topics: string[];
-            /**
-             * @description Original labels before alias and parent expansion, preserved for audit
-             * @example [
-             *       "K8s",
-             *       "节点内存耗尽"
-             *     ]
-             */
-            raw_topics: string[];
-            /**
-             * @description Service-derived retention reason. Informational only; it never deletes the memory or changes assertion status. Temporary context remains stored and visible for review.
-             * @enum {string}
-             */
-            retention_reason?: "explicit_intent" | "future_applicability" | "durable_knowledge" | "episodic_event" | "temporary_context" | "unclassified";
-        };
-        TemporalDetail: {
-            /** @description Source date wording preserved for fidelity */
-            text?: string;
-            /** @enum {string} */
-            precision?: "unknown" | "year" | "month" | "day" | "hour" | "minute" | "second";
-            /** @description False when the source stated a calendar date without a timezone */
-            timezone_known?: boolean;
-        };
-        TemporalDetails: {
-            observed: components["schemas"]["TemporalDetail"];
-            event: components["schemas"]["TemporalDetail"];
-            valid_from: components["schemas"]["TemporalDetail"];
-            valid_to: components["schemas"]["TemporalDetail"];
-        };
-        /** @description Optional structured reusable workflow stored in the immutable revision */
-        Procedure: {
-            goal?: string;
-            steps?: string[];
-            preconditions?: string[];
-            completion_conditions?: string[];
-            failure_branches?: string[];
-        };
-        /** @description General qualifiers retained with an assertion; the content remains authoritative */
-        AssertionQualifiers: {
-            entities?: string[];
-            quantity?: {
-                value: string;
-                unit?: string;
-            };
-            conditions?: string[];
-            /** @enum {string} */
-            polarity?: "unknown" | "positive" | "negative" | "mixed";
-            /** @enum {string} */
-            certainty?: "unknown" | "asserted" | "uncertain" | "reported" | "hypothetical";
-            attribution?: string;
-        };
-        Relation: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            from_memory_id: string;
-            from_version: number;
-            /** Format: uuid */
-            to_memory_id: string;
-            to_version: number;
-            /** @enum {string} */
-            kind: "supersedes";
-            /** Format: date-time */
-            created_at: string;
-            from_version_changed: boolean;
-            to_version_changed: boolean;
-        };
-        MemoryDetail: components["schemas"]["Memory"] & {
-            relations: components["schemas"]["Relation"][];
-            /** @description Deterministic supersession/correction audit touching this memory. */
-            evolution: components["schemas"]["EvolutionEvent"][];
         };
         MemoryList: {
             items: components["schemas"]["Memory"][];
         };
-        /** @description Only active and archived are accepted; other fields are ignored. */
+        /** @description Typed relation between observations and/or memories */
+        Relation: {
+            id: string;
+            /** @enum {string} */
+            kind: "duplicate" | "supports" | "enriches" | "supersedes" | "contradicts" | "separate" | "independent" | "unresolved";
+            /** @enum {string} */
+            from_type: "observation" | "memory";
+            from_id: string;
+            from_version: number;
+            /** @enum {string} */
+            to_type: "observation" | "memory";
+            to_id: string;
+            to_version: number;
+            /** Format: date-time */
+            created_at: string;
+        };
+        RelationList: {
+            items: components["schemas"]["Relation"][];
+        };
+        DerivedDependent: {
+            id: string;
+            /** @enum {string} */
+            layer: "l1" | "l2" | "l3" | "l4";
+            /** @enum {string} */
+            kind: "local_summary" | "topic_summary" | "scope_summary" | "profile" | "experience_case" | "skill" | "guidance";
+            target_key: string;
+            scope_key?: string;
+            topic?: string;
+            version: number;
+            /** @enum {string} */
+            state: "active" | "stale" | "disabled";
+        };
+        MemoryDetail: components["schemas"]["Memory"] & {
+            observation_ids: string[];
+            relations: components["schemas"]["Relation"][];
+            conflict_ids: string[];
+            derived_dependents: components["schemas"]["DerivedDependent"][];
+        };
         StatePatch: {
             /** @enum {string} */
             state?: "active" | "archived";
         };
         DeleteResponse: {
-            /** Format: uuid */
             id: string;
             /** @enum {string} */
             state: "deleted";
         };
         PurgeResponse: {
-            /** Format: uuid */
             id: string;
-            /** @enum {boolean} */
-            purged: true;
+            purged: boolean;
+        };
+        Evidence: {
+            id: string;
+            source_id: string;
+            segment_id?: string;
+            message_id?: string;
+            quote?: string;
+            location?: components["schemas"]["Location"];
+            redacted: boolean;
+            /** Format: date-time */
+            redacted_at?: string;
+            /** Format: date-time */
+            created_at: string;
+        };
+        Location: {
+            field?: string;
+            start: number;
+            end: number;
+        };
+        EvidenceList: {
+            items: components["schemas"]["Evidence"][];
         };
         Revision: {
-            /** Format: uuid */
             memory_id: string;
             version: number;
             /** @enum {string} */
-            operation: "create" | "update" | "add_evidence" | "archive" | "activate" | "delete" | "restore" | "correct" | "change" | "resolve" | "classify";
+            operation: "create" | "update" | "add_evidence" | "archive" | "activate" | "delete" | "restore" | "resolve" | "classify";
             reason?: string;
             snapshot: components["schemas"]["Memory"];
             evidence: components["schemas"]["Evidence"][];
@@ -876,101 +814,230 @@ export interface components {
         RevisionList: {
             items: components["schemas"]["Revision"][];
         };
-        Evidence: {
-            /** Format: uuid */
+        /** @description Immutable L0 raw memory extracted from one source */
+        Observation: {
             id: string;
-            /** Format: uuid */
             source_id: string;
-            message_id?: string;
-            /** @description Absent after source redaction */
-            quote?: string;
-            location?: components["schemas"]["Location"];
-            model_name?: string;
-            redacted: boolean;
-            /** Format: date-time */
-            redacted_at?: string;
+            scope_key?: string;
+            /** @enum {string} */
+            kind: "fact" | "preference" | "event" | "procedure";
+            content: string;
+            /** @enum {string} */
+            content_mode: "extractive" | "normalized";
+            origin_role?: string;
+            /** @enum {string} */
+            status: "observed" | "pending" | "retracted" | "deleted";
+            extraction_version?: string;
             /** Format: date-time */
             created_at: string;
+            /** Format: date-time */
+            updated_at: string;
         };
-        Location: {
-            /** @example messages.0.content */
-            field?: string;
-            start?: number;
-            end?: number;
+        ObservationList: {
+            items: components["schemas"]["Observation"][];
         };
-        EvidenceList: {
-            items: components["schemas"]["Evidence"][];
-        };
-        SearchRequest: {
-            /** @description Keywords or a natural-language question. All keyword paths, including derived layers and the hybrid keyword branch, use the same dictionary segmentation and controlled stopword filtering, preserving negation. Any remaining term may match. Empty, punctuation-only, or stopword-only input returns empty partitions without running retrieval. Keyword mode ranks by BM25 and bounded term coverage without a minimum-coverage filter. Semantic retrieval uses the original query without the document template. */
+        RecallRequest: {
             query?: string;
-            /** @description Optional flat scope. When supplied, atomic and derived results must belong to this scope or the user-global scope. Omitted means no scope filter. Unknown scope values are never promoted to global. */
             scope_key?: string;
-            /** @description Knowledge layers to recall. Omitted selects all four; an explicit list selects only those partitions. values other than the four fixed names return 400. */
-            layers?: ("atomic" | "summary" | "experience" | "skill")[];
+            /** @enum {string} */
+            query_mode?: "overview" | "detail" | "history" | "conflict" | "guidance";
+            layers?: ("observations" | "memories" | "l1" | "l2" | "l3" | "l4")[];
             /**
-             * @description Keyword uses FTS5/BM25 only. Hybrid runs both atomic recall paths and fuses them with RRF; semantic failures degrade to keyword with a warning. Derived layers always use their own FTS index.
              * @default keyword
              * @enum {string}
              */
             mode: "keyword" | "hybrid";
             filters?: components["schemas"]["SearchFilters"];
-            /** @description Default 20 for missing or non-positive values; above 100 is 400. The bound applies per selected layer. */
+            derived_states?: ("active" | "stale")[];
             top_k?: number;
-            /** @description Optional conservative budget using a rune-based estimate, never a model-tokenizer-exact count. Exceeding it truncates later items and emits context_budget_truncated. */
             max_context_tokens?: number;
-            /**
-             * @description Adds per-item explanation and bounded response diagnostics. Stage counts never change the returned result set and contain no content.
-             * @default false
-             */
+            /** @default false */
             explain: boolean;
         };
         SearchFilters: {
-            /** @description Recognized values are fact, preference, event, procedure */
-            kinds?: string[];
-            /** @description Default is [active]; archived is opt-in; deleted is never returned */
-            states?: string[];
-            /**
-             * Format: date-time
-             * @description Fact validity instant, not the system knowledge-time snapshot. Missing pins request start once; an explicit malformed value returns 400. Independent from updated_after/before. A result whose validity bounds are unknown remains visible with temporal_status=unknown and a temporal_uncertain warning on an explicit historical query.
-             */
-            as_of?: string;
-            /**
-             * Format: date-time
-             * @description Event occurrence instant. Matches only events whose stored event_time and precision cover this instant; events with unknown event time are excluded. When provided without as_of, fact validity is not pinned to the current time, so past and scheduled occurrences stay queryable by their own event time.
-             */
-            event_at?: string;
-            created_by_app?: string;
+            kinds?: ("fact" | "preference" | "event" | "procedure")[];
+            states?: ("active" | "archived" | "deleted")[];
             /** Format: date-time */
             updated_after?: string;
             /** Format: date-time */
             updated_before?: string;
         };
-        SearchResponse: {
-            /** @description Atomic fact, preference, event and procedure results. Among primary hits, accepted assertions precede labelled pending alternatives; rejected assertions are never recalled. Bounded related items follow the primary hits and keep their own assertion status and related marker. Pending items emit fact_conflict. */
+        RecallResponse: {
+            query_mode?: string;
+            observations: components["schemas"]["RecallObservationItem"][];
             memories: components["schemas"]["SearchItem"][];
-            /** @description Active topic_summary, scope_summary and profile artifacts. */
-            summaries: components["schemas"]["ArtifactItem"][];
-            /** @description Active experience_case artifacts generated from application-reported results. Outcomes are reports, not verified execution results. */
-            experiences: components["schemas"]["ArtifactItem"][];
-            /** @description Active guidance-only skills with traceable sources. They carry no execution, truth or safety certification. */
-            skills: components["schemas"]["ArtifactItem"][];
-            /** @description Open conflicts touching this atomic query and as_of instant. Pending member text may appear in memories with assertion_status=pending and conflict_refs. */
+            l1: components["schemas"]["RecallDerivedItem"][];
+            l2: components["schemas"]["RecallDerivedItem"][];
+            l3: components["schemas"]["RecallDerivedItem"][];
+            l4: components["schemas"]["RecallDerivedItem"][];
+            relations: components["schemas"]["Relation"][];
             conflicts: components["schemas"]["ConflictSummary"][];
-            /** @description Stable deduplicated warning codes. */
-            warnings: ("semantic_unavailable" | "semantic_timeout" | "semantic_config_error" | "semantic_rate_limited" | "semantic_invalid_response" | "semantic_index_not_ready" | "fact_conflict" | "conflict_results_truncated" | "derived_as_of_unsupported" | "derived_unavailable" | "context_budget_truncated" | "temporal_uncertain")[];
+            warnings: string[];
             diagnostics?: components["schemas"]["SearchDiagnostics"];
+        };
+        SearchItem: {
+            memory: components["schemas"]["Memory"];
+            score: number;
+            snippet: string;
+            matched_terms: string[];
+            evidence_refs: components["schemas"]["EvidenceRef"][];
+            explanation?: components["schemas"]["Explanation"];
+            conflict_refs: components["schemas"]["ConflictRef"][];
+        };
+        RecallObservationItem: {
+            observation: components["schemas"]["Observation"];
+            score: number;
+            snippet: string;
+            matched_terms: string[];
+            evidence_refs: components["schemas"]["EvidenceRef"][];
+            explanation?: components["schemas"]["Explanation"];
+        };
+        RecallDerivedItem: {
+            artifact: components["schemas"]["ArtifactMeta"];
+            revision: components["schemas"]["ArtifactRevision"];
+            score: number;
+            snippet: string;
+            matched_terms: string[];
+            dependencies: components["schemas"]["ArtifactDependency"][];
+            explanation?: components["schemas"]["Explanation"];
+        };
+        ArtifactDependency: {
+            /** @enum {string} */
+            type: "observation" | "memory" | "derived" | "experience";
+            id: string;
+            version: number;
+            required: boolean;
+        };
+        EvidenceRef: {
+            id: string;
+            source_id: string;
+        };
+        KeywordExplanation: {
+            rank: number;
+            bm25: number;
+        };
+        SemanticExplanation: {
+            rank: number;
+            cosine: number;
+        };
+        Explanation: {
+            ranking: string;
+            field_weights?: number[];
+            keyword?: components["schemas"]["KeywordExplanation"];
+            semantic?: components["schemas"]["SemanticExplanation"];
+        };
+        SearchDiagnostics: {
+            keyword_candidates: number;
+            observation_candidates: number;
+            memory_candidates: number;
+            derived_candidates: number;
+            semantic_candidates: number;
+            semantic_excluded: number;
+            term_candidates: number;
+            kind_filter_excluded: number;
+            state_filter_excluded: number;
+            ranking_candidates: number;
+            returned_items: number;
+            context_budget_truncated: number;
+            semantic_degradation?: string;
+        };
+        ArtifactMeta: {
+            id: string;
+            /** @enum {string} */
+            layer: "l1" | "l2" | "l3" | "l4";
+            /** @enum {string} */
+            kind: "local_summary" | "topic_summary" | "scope_summary" | "profile" | "experience_case" | "skill" | "guidance";
+            target_key: string;
+            scope_key?: string;
+            topic?: string;
+            current_version: number;
+            /** @enum {string} */
+            state: "active" | "stale" | "disabled";
+            reason_code?: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        ArtifactRevision: {
+            artifact_id: string;
+            version: number;
+            title: string;
+            content: string;
+            /** @description Structured payload; unknown shapes are read-only JSON */
+            payload?: unknown;
+            content_hash: string;
+            generator: string;
+            protocol_version: string;
+            truncated: boolean;
+            /** Format: date-time */
+            created_at: string;
+        };
+        ArtifactDetail: {
+            artifact: components["schemas"]["ArtifactMeta"];
+            revision?: components["schemas"]["ArtifactRevision"];
+            dependencies: components["schemas"]["ArtifactDependency"][];
+        };
+        ArtifactList: {
+            items: components["schemas"]["ArtifactMeta"][];
+            next_cursor?: string;
+        };
+        ArtifactTargetJob: {
+            /** @enum {string} */
+            status: "queued" | "running" | "waiting" | "succeeded" | "failed" | "cancelled";
+            wait_reason?: string;
+            last_error_code?: string;
+            retry_reason?: string;
+            attempts: number;
+            consecutive_failures: number;
+            age_seconds: number;
+            stale_seconds: number;
+            /** Format: date-time */
+            updated_at?: string;
+            /** Format: date-time */
+            started_at?: string;
+            /** Format: date-time */
+            finished_at?: string;
+        };
+        ArtifactTarget: {
+            /** @enum {string} */
+            kind: "local_summary" | "topic_summary" | "scope_summary" | "profile" | "experience_case" | "skill" | "guidance";
+            target_key: string;
+            scope_key?: string;
+            topic?: string;
+            /** @enum {string} */
+            status: "queued" | "running" | "waiting" | "active" | "stale" | "disabled" | "no_eligible_input" | "model_unavailable" | "generation_failed" | "invalid_output";
+            reason_code?: string;
+            has_usable_version: boolean;
+            artifact?: components["schemas"]["ArtifactMeta"];
+            job?: components["schemas"]["ArtifactTargetJob"];
+            /** Format: date-time */
+            evaluated_at?: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        ArtifactTargetList: {
+            items: components["schemas"]["ArtifactTarget"][];
+            next_cursor?: string;
         };
         ArtifactMemoryRef: {
             memory_id: string;
             version: number;
         };
         ArtifactRunRef: {
-            /** @description Service-internal recorded application result identifier */
             experience_id: string;
         };
+        SkillContent: {
+            id: string;
+            version: number;
+            /** @enum {string} */
+            state: "active" | "stale" | "disabled";
+            name: string;
+            description: string;
+            content: string;
+            truncated: boolean;
+            memory_refs: components["schemas"]["ArtifactMemoryRef"][];
+            run_refs: components["schemas"]["ArtifactRunRef"][];
+        };
         ExperienceSubmit: {
-            /** @description Optional client deduplication key; repeat returns the existing receipt */
             run_id?: string;
             app_id?: string;
             external_id?: string;
@@ -978,18 +1045,12 @@ export interface components {
             goal: string;
             conditions?: string[];
             actions?: string[];
-            /**
-             * @description Application's own report; missing means unknown
-             * @enum {string}
-             */
+            /** @enum {string} */
             outcome?: "success" | "failure" | "unknown" | "partial_success";
-            /** @description Optional exact skill object the run reports against */
             skill_id?: string;
             skill_version?: number;
-            /** @description Optional original report JSON stored as the source payload */
-            content?: {
-                [key: string]: unknown;
-            };
+            /** @description Optional original report JSON */
+            content?: unknown;
         };
         ExperienceReceipt: {
             id: string;
@@ -1004,194 +1065,208 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
-        SkillContent: {
-            id: string;
-            version: number;
-            /** @enum {string} */
-            state: "active" | "stale" | "disabled";
-            name: string;
-            description: string;
-            /** @description Rendered SKILL.md with name/description frontmatter */
-            content: string;
-            truncated: boolean;
-            memory_refs: components["schemas"]["ArtifactMemoryRef"][];
-            run_refs: components["schemas"]["ArtifactRunRef"][];
+        SourceSegment: {
+            segment_id: string;
+            message_id?: string;
+            role?: string;
+            occurred_at?: string;
+            field?: string;
+            start: number;
+            end: number;
+            text: string;
         };
-        ArtifactItem: {
+        Source: {
             id: string;
-            /** @enum {string} */
-            kind: "topic_summary" | "scope_summary" | "profile" | "experience_case" | "skill";
-            version: number;
-            title: string;
-            content: string;
-            /** @description Structured experience/skill payload when the kind has one */
-            payload?: Record<string, never>;
+            app_id?: string;
+            external_id?: string;
             scope_key?: string;
-            topic?: string;
-            /** @enum {string} */
-            state: "active" | "stale" | "disabled";
-            /** @description True when this version covers only a bounded subset of eligible input */
-            truncated: boolean;
-            memory_refs: components["schemas"]["ArtifactMemoryRef"][];
-            run_refs: components["schemas"]["ArtifactRunRef"][];
+            /** @description Original JSON unless the source has been redacted */
+            content?: unknown;
+            segments: components["schemas"]["SourceSegment"][];
+            redacted: boolean;
             /** Format: date-time */
-            updated_at: string;
-            /** @description Derived FTS ranking score; larger is more relevant within this partition */
-            score?: number;
-        };
-        ArtifactMeta: {
-            /** @description Current diagnostic such as no_procedure_input, topic_mismatch, model_generation_failed, invalid_model_output, invalid_profile_content, model_unavailable or no_eligible_input; readable even before a first revision exists */
-            reason_code?: string;
-            id: string;
-            /** @enum {string} */
-            kind: "topic_summary" | "scope_summary" | "profile" | "experience_case" | "skill";
-            target_key: string;
-            scope_key?: string;
-            topic?: string;
-            /** @description Zero only when no usable version has been generated */
-            current_version: number;
-            /** @enum {string} */
-            state: "active" | "stale" | "disabled";
-            /** Format: date-time */
-            updated_at: string;
-        };
-        ArtifactRevision: {
-            artifact_id: string;
-            version: number;
-            title: string;
-            content: string;
-            /** @description Structured payload. Summaries record input_selection (eligible/selected/included/omitted counts and reasons), citation_integrity, semantic_coverage (unknown/subset), validated citations and omitted_inputs; semantic coverage is unknown when the service cannot determine it and subset when omission is known. Profiles additionally record profile_check. Experience cases include the application-reported outcome and verification disclaimer. */
-            payload?: Record<string, never>;
-            /** @description SHA-256 of title, body, serialized payload and immutable provenance, separated by NUL bytes */
-            content_hash: string;
-            generator: string;
-            protocol_version: string;
-            /** @example taxonomy-v1 */
-            taxonomy_version: string;
-            /** @example generator-v2 */
-            generator_version: string;
-            /** @description Generation job ID and revision (not the client experience deduplication key) */
-            run_id: string;
-            /** @description Immutable serialized audit manifest, checked independently against the dependency tables */
-            provenance: {
-                memory_refs: components["schemas"]["ArtifactMemoryRef"][];
-                run_refs: components["schemas"]["ArtifactRunRef"][];
-                run_id: string;
-                taxonomy_version: string;
-                generator_version: string;
-                protocol_version: string;
-                truncated: boolean;
-            };
-            /** @description Fixed code such as input_truncated */
-            reason_code?: string;
-            truncated: boolean;
-            memory_refs: components["schemas"]["ArtifactMemoryRef"][];
-            run_refs: components["schemas"]["ArtifactRunRef"][];
+            redacted_at?: string;
             /** Format: date-time */
             created_at: string;
         };
-        ArtifactDetail: {
-            artifact: components["schemas"]["ArtifactMeta"];
-            revision?: components["schemas"]["ArtifactRevision"];
+        RedactResponse: {
+            id: string;
+            redacted: boolean;
+            cancelled_jobs: number;
+            retracted_observations: number;
+            invalidated_derived_ids: string[];
         };
-        ArtifactList: {
-            items: components["schemas"]["ArtifactMeta"][];
-            next_cursor?: string;
+        ForgetRequest: {
+            memory_ids?: string[];
+            source_ids?: string[];
+            experience_ids?: string[];
         };
-        ArtifactTargetJob: {
+        ForgetResponse: {
+            memory_ids: string[];
+            source_ids: string[];
+            experience_ids: string[];
+        };
+        ExtractionStats: {
+            items: number;
+            observations: number;
+            normalized_observations: number;
+            pending_observations: number;
+            invalid_items: number;
+            duplicate_observations: number;
+            chunks: number;
+            chunk_failures: number;
+        };
+        JobTimings: {
+            queue_age_ms: number;
+            extraction_ms: number;
+            normalization_ms: number;
+            commit_ms: number;
+            total_ms: number;
+        };
+        ModelUsage: {
+            calls: number;
+            input_tokens: number;
+            output_tokens: number;
+            total_tokens: number;
+        };
+        ExtractionDiagnostic: {
+            field?: string;
+            code: string;
+            stage: string;
+            disposition: string;
+        };
+        /** @enum {string} */
+        JobStage: "received" | "extracting" | "observations_saved" | "governance_pending" | "memory_materialized" | "aggregation_pending" | "completed" | "failed";
+        /**
+         * @description Extraction job. Its stage stops at observations_saved/completed; the
+         *     governance and aggregation stages are separate tasks.
+         */
+        Job: {
+            id: string;
+            source_id: string;
             /** @enum {string} */
             status: "queued" | "running" | "waiting" | "succeeded" | "failed" | "cancelled";
-            wait_reason?: string;
-            last_error_code?: string;
-            /** @description Fixed wait or error reason, safe for monitoring */
-            retry_reason?: string;
-            attempts?: number;
-            consecutive_failures?: number;
-            /** @description Age of the durable target, including time deferred by ingest priority */
-            age_seconds?: number;
-            /** @description Time since the queued, running or waiting task last changed state */
-            stale_seconds?: number;
+            stage: components["schemas"]["JobStage"];
+            /** @description Extraction-internal failure stage when one was recorded */
+            diagnostic_stage?: string;
+            attempts: number;
+            protocol_failures: number;
+            /** @enum {string} */
+            wait_reason?: "transient" | "configuration" | "protocol";
+            reason_code?: string;
             /** Format: date-time */
-            updated_at?: string;
+            next_attempt_at?: string;
+            error?: string;
+            observation_ids: string[];
+            warnings: string[];
+            /** @enum {string} */
+            quality_outcome?: "empty" | "complete" | "partial" | "unusable";
+            extraction_stats: components["schemas"]["ExtractionStats"];
+            timings: components["schemas"]["JobTimings"];
+            model_usage: components["schemas"]["ModelUsage"];
+            diagnostics: components["schemas"]["ExtractionDiagnostic"][];
+            queue_age_seconds: number;
+            stale_seconds: number;
+            retry_reason?: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
             /** Format: date-time */
             started_at?: string;
             /** Format: date-time */
             finished_at?: string;
         };
-        ArtifactTarget: {
+        JobList: {
+            items: components["schemas"]["Job"][];
+        };
+        /** @description Governance or aggregation task with its own category and stage */
+        GovernanceJob: {
+            id: string;
             /** @enum {string} */
-            kind: "topic_summary" | "scope_summary" | "profile" | "experience_case" | "skill";
+            category: "governance" | "aggregation";
+            stage: components["schemas"]["JobStage"];
+            /** @enum {string} */
+            kind: "govern_observation" | "classify_observation" | "aggregate_l1" | "aggregate_l2" | "aggregate_l3" | "build_guidance" | "review_conflict" | "invalidate_dependency" | "reconcile";
             target_key: string;
-            scope_key?: string;
-            topic?: string;
+            revision: number;
             /** @enum {string} */
-            status: "queued" | "running" | "waiting" | "active" | "stale" | "disabled" | "no_eligible_input" | "model_unavailable" | "generation_failed" | "invalid_output";
-            /** @description Fixed reason such as no_procedure_input, topic_mismatch, model_generation_failed or invalid_model_output */
-            reason_code?: string;
-            /** @description True when the artifact has at least one immutable revision, even if it is currently stale or disabled */
-            has_usable_version: boolean;
-            artifact?: components["schemas"]["ArtifactMeta"];
-            job?: components["schemas"]["ArtifactTargetJob"];
+            status: "queued" | "running" | "waiting" | "succeeded" | "failed" | "cancelled";
+            attempts: number;
+            consecutive_failures: number;
             /** Format: date-time */
-            evaluated_at?: string;
+            next_attempt_at?: string;
+            last_error_code?: string;
+            wait_reason?: string;
+            /** Format: date-time */
+            created_at: string;
             /** Format: date-time */
             updated_at: string;
+            /** Format: date-time */
+            started_at?: string;
+            /** Format: date-time */
+            finished_at?: string;
         };
-        ArtifactTargetList: {
-            items: components["schemas"]["ArtifactTarget"][];
-            next_cursor?: string;
+        GovernanceJobList: {
+            items: components["schemas"]["GovernanceJob"][];
         };
-        SearchItem: {
-            memory: components["schemas"]["Memory"];
-            /** @description Keyword mode uses a bounded BM25-rank and term-coverage fusion. Hybrid mode uses the RRF score. Accepted assertions precede pending primary assertions regardless of score; scores compare relevance within the same assertion status in this result set. Bounded related items use score 0 because they were expanded by an explicit association rather than matched by the query. */
-            score: number;
-            /** @description Readable original content, never tokenized index text or HTML; long content is truncated around the first match with an ellipsis. */
-            snippet: string;
-            /** @description Keyword query groups actually found in the title or content. Terms use the shared filtered any query. Semantic-only results always return an empty array. */
-            matched_terms: string[];
-            evidence_refs: components["schemas"]["EvidenceRef"][];
-            explanation?: components["schemas"]["Explanation"];
-            /**
-             * @description Describes known interval bounds, not objective truth
-             * @enum {string}
-             */
-            temporal_status: "within_bounds" | "unknown";
-            conflict_refs: components["schemas"]["ConflictRef"][];
-            /** @description Present only on bounded association expansion. Related items follow primary hits, obey exactly the same scope, kind, state, assertion and time filters, and never displace a primary Top-K hit. */
-            related?: {
-                reason_codes: ("fact_group_member" | "conflict_member")[];
-                anchor_memory_ids: string[];
-            };
-            /** @description Present when exact duplicate expressions of the same fact were folded into this display item. member_ids lists every folded memory and evidence_refs contains the union of their evidence. Different negation, conditions, time ranges, kinds, states or assertion status are never folded. */
-            cluster?: {
-                /** Format: uuid */
-                fact_group_id?: string;
-                member_ids: string[];
-                evidence_count: number;
-            };
+        /** @enum {string} */
+        ConflictReason: "contradictory_value" | "uncertain_time" | "ambiguous_scope" | "complex_timeline";
+        ConflictRef: {
+            id: string;
+            reason_code: components["schemas"]["ConflictReason"];
         };
-        /** @description Stable, bounded stage counts returned only when explain=true. Counts are candidate counts and never proof of semantic correctness. Filter-exclusion counts come from count-only relaxations that retain scope and other boundaries and never change the returned result set. */
-        SearchDiagnostics: {
-            keyword_candidates: number;
-            semantic_candidates: number;
-            semantic_excluded: number;
-            term_candidates: number;
-            /** @description Additional same-scope term hits excluded by the requested kind filter. It does not assert that memory classification is wrong. */
-            kind_filter_excluded: number;
-            state_filter_excluded: number;
-            time_filter_excluded: number;
-            ranking_candidates: number;
-            related_expanded: number;
-            related_excluded: number;
-            returned_items: number;
-            context_budget_truncated: number;
-            /** @description Stable warning code when the semantic branch degraded. */
-            semantic_degradation?: string;
+        ConflictSummary: {
+            id: string;
+            reason_code: components["schemas"]["ConflictReason"];
+            member_ids: string[];
+            has_accepted: boolean;
+        };
+        ConflictMember: {
+            memory_id: string;
+            version: number;
+            current_version?: number;
+        };
+        MemberVersion: {
+            memory_id: string;
+            version: number;
+        };
+        ConflictEvent: {
+            id: string;
+            action: string;
+            memory_id?: string;
+            version?: number;
+            /** Format: date-time */
+            created_at: string;
+        };
+        Conflict: {
+            id: string;
+            /** @enum {string} */
+            status: "open" | "resolved";
+            reason_code: components["schemas"]["ConflictReason"];
+            resolution?: string;
+            revision: number;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+            members: components["schemas"]["ConflictMember"][];
+            events?: components["schemas"]["ConflictEvent"][];
+        };
+        ConflictList: {
+            items: components["schemas"]["Conflict"][];
+        };
+        ConflictResolveRequest: {
+            revision: number;
+            /** @enum {string} */
+            action: "choose" | "reject_all";
+            member_ids?: string[];
+            member_versions?: components["schemas"]["MemberVersion"][];
+            reason?: string;
         };
         EmbeddingStatus: {
             enabled: boolean;
             model?: string;
-            /** @description Credential-free endpoint identity */
             endpoint?: string;
             dimensions?: number;
             min_similarity: number;
@@ -1201,7 +1276,6 @@ export interface components {
             registered_index_version?: string;
             config_fingerprint_match: boolean;
             rebuild_required: boolean;
-            /** @description Fixed reason such as profile_changed, profile_registered, index_version_changed, vectors_stale, vectors_missing or jobs_pending. */
             rebuild_reason?: string;
             /** Format: date-time */
             rebuild_registered_at?: string;
@@ -1229,353 +1303,20 @@ export interface components {
         EmbeddingProbe: {
             attempted: boolean;
             success: boolean;
-            /** @description ok, disabled, unauthorized, config_error, rate_limited, timeout, cancelled, invalid_response, unavailable or a sanitized provider code */
             code: string;
             dimensions?: number;
             duration_ms: number;
             /** Format: date-time */
             checked_at: string;
         };
-        EvidenceRef: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            source_id: string;
-        };
-        Explanation: {
-            /** @enum {string} */
-            ranking: "bm25" | "rrf";
-            /**
-             * @description Present only for keyword-mode BM25 ranking
-             * @example [
-             *       4,
-             *       1
-             *     ]
-             */
-            field_weights?: number[];
-            /** @description Present when the keyword path recalled this item */
-            keyword?: {
-                rank: number;
-                bm25: number;
-            };
-            /** @description Present when the semantic path recalled this item */
-            semantic?: {
-                rank: number;
-                cosine: number;
-            };
-        };
-        Source: {
-            /** Format: uuid */
-            id: string;
-            app_id?: string;
-            external_id?: string;
-            /** @description Optional flat source scope label */
-            scope_key?: string;
-            /** @description Original JSON; omitted after redaction */
-            content?: unknown;
-            redacted: boolean;
-            /** Format: date-time */
-            redacted_at?: string;
-            /** Format: date-time */
-            created_at: string;
-        };
-        RedactResponse: {
-            /** Format: uuid */
-            id: string;
-            /** @enum {boolean} */
-            redacted: true;
-            cancelled_jobs: number;
-        };
-        /** @description At least one identifier is required. */
-        ForgetRequest: {
-            memory_ids?: string[];
-            source_ids?: string[];
-            experience_ids?: string[];
-        };
-        /** @description Sorted identifiers removed by the committed transaction. */
-        ForgetResponse: {
-            memory_ids: string[];
-            source_ids: string[];
-            experience_ids: string[];
-            /** @description Present when related memories could not be safely deleted. */
-            warnings?: "related_memories_retained"[];
-            /** @description Sorted retained same-group IDs; omitted when none remain. */
-            retained_related_memory_ids?: string[];
-        };
-        Job: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            source_id: string;
-            /**
-             * @description waiting means the task is parked. transient waits resume
-             *     automatically with bounded backoff; configuration waits are
-             *     reevaluated after a restart; protocol waits fail after worker.max_attempts
-             *     consecutive malformed responses (default three), after local repair.
-             * @enum {string}
-             */
-            status: "queued" | "running" | "waiting" | "succeeded" | "failed" | "cancelled";
-            attempts: number;
-            /** @description Consecutive protocol failures for the current input */
-            protocol_failures: number;
-            /**
-             * @description Fixed wait reason; never contains source or provider text
-             * @enum {string}
-             */
-            wait_reason?: "transient" | "configuration" | "protocol";
-            /**
-             * @description Stage that caused the wait or failure
-             * @enum {string}
-             */
-            stage?: "source" | "extraction" | "extraction_repair" | "context" | "decision" | "decision_repair" | "commit" | "processing";
-            /**
-             * @description Stable diagnostic code; independent of the display error
-             * @enum {string}
-             */
-            reason_code?: "configuration" | "transient" | "protocol" | "model_timeout" | "process_budget_exceeded" | "state_changed" | "decision_protocol_invalid" | "decision_repair_failed";
-            /** Format: date-time */
-            next_attempt_at?: string;
-            /** @description Sanitized failure summary; never a raw model response */
-            error?: string;
-            /** @description All memories created or revised by this job */
-            memory_ids: string[];
-            conflict_ids: string[];
-            pending_memory_ids: string[];
-            /** @description Stable warning codes such as fact_conflict or context_truncated */
-            warnings: string[];
-            /**
-             * @description Business result for the latest attempt, separate from scheduling
-             *     status. empty means the model selected no candidates; complete means
-             *     every non-excluded candidate was safely handled; partial means some
-             *     candidates were isolated; unusable means non-empty candidates could
-             *     not be made safe and the job is retrying or failed.
-             * @enum {string}
-             */
-            quality_outcome?: "empty" | "complete" | "partial" | "unusable";
-            /**
-             * @description Fixed stage counts for the latest attempt. Counts distinguish raw
-             *     model candidates, repaired/split candidates and final dispositions.
-             */
-            extraction_stats: {
-                raw_candidates: number;
-                parsed_candidates: number;
-                normalized_candidates: number;
-                normalizations: number;
-                repair_attempts: number;
-                repaired_candidates: number;
-                repair_succeeded: number;
-                repair_failed: number;
-                repair_timed_out: number;
-                repair_invalid_output: number;
-                excluded_candidates: number;
-                isolated_candidates: number;
-                accepted_candidates: number;
-                skipped_candidates: number;
-                memory_writes: number;
-                extraction_chunks: number;
-                extraction_chunk_failures: number;
-                dropped_candidates: number;
-                cross_chunk_duplicates: number;
-                context_only_candidates: number;
-            };
-            /** @description Service-derived retained candidates and fixed non-retention codes: explicit_exclusion, cross_chunk_context, cross_chunk_duplicate, candidate_limit, invalid_candidate, decision_skip, empty_extraction or chunk_failure. This never claims semantic correctness and never triggers automatic deletion or a default TTL. */
-            retention: {
-                retained: number;
-                not_retained: number;
-                by_reason: {
-                    [key: string]: number;
-                };
-                not_retained_by_reason: {
-                    [key: string]: number;
-                };
-            };
-            /** @description Wall-clock stage breakdown in milliseconds. queue_age_ms runs from durable job creation to this attempt and therefore includes earlier waits on a retry; the other fields measure the current attempt. */
-            timings: {
-                queue_age_ms: number;
-                extraction_ms: number;
-                normalization_ms: number;
-                repair_ms: number;
-                context_ms: number;
-                decision_ms: number;
-                commit_ms: number;
-                total_ms: number;
-            };
-            model_usage: {
-                calls: number;
-                input_tokens: number;
-                output_tokens: number;
-                total_tokens: number;
-            };
-            /** @description Per-effective-atom call and token cost for this attempt */
-            efficiency: {
-                memories: number;
-                model_calls: number;
-                total_tokens: number;
-                calls_per_memory: number;
-                tokens_per_memory: number;
-            };
-            queue_age_seconds?: number;
-            stale_seconds?: number;
-            retry_reason?: string;
-            /**
-             * @description Candidate-level, source-free diagnostics for the latest attempt.
-             *     Entries contain fixed codes only; never source text or raw model
-             *     responses.
-             */
-            diagnostics: components["schemas"]["ExtractionDiagnostic"][];
-            /**
-             * @description Fixed reasons why a candidate with an existing scoped identity was
-             *     not automatically converged. Codes never contain source text.
-             */
-            convergence: components["schemas"]["ConvergenceDiagnostic"][];
-            /** Format: date-time */
-            created_at: string;
-            /** Format: date-time */
-            updated_at: string;
-            /** Format: date-time */
-            started_at?: string;
-            /** Format: date-time */
-            finished_at?: string;
-        };
-        ConvergenceDiagnostic: {
-            candidate_id?: string;
-            /** Format: uuid */
-            group_id?: string;
-            /** @enum {string} */
-            code: "identity_ambiguous" | "missing_update_evidence" | "time_unknown" | "cardinality_unknown" | "context_truncated";
-        };
-        EvolutionEvent: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            fact_group_id?: string;
-            /** Format: uuid */
-            from_memory_id: string;
-            from_version: number;
-            /** Format: uuid */
-            to_memory_id: string;
-            to_version: number;
-            /** @enum {string} */
-            action: "change" | "correction" | "reschedule" | "cancel" | "supersede";
-            reason_code?: string;
-            /** Format: date-time */
-            created_at: string;
-        };
-        ExtractionDiagnostic: {
-            /** @description Service-assigned candidate ID; empty for a whole-response failure */
-            candidate_id?: string;
-            /** @description Protocol field path such as evidence[0].segment_id */
-            field?: string;
-            /** @description Stable diagnostic code */
-            code: string;
-            /** @enum {string} */
-            stage: "normalize" | "validate" | "repair" | "isolate" | "extraction";
-            /** @enum {string} */
-            disposition: "normalized" | "accepted" | "repaired" | "isolated" | "excluded";
-        };
-        ConflictMember: {
-            /** Format: uuid */
-            memory_id: string;
-            /** @description Version detected when the conflict was recorded */
-            version: number;
-            /** @description Current memory version when the conflict was read */
-            current_version?: number;
-        };
-        MemberVersion: {
-            /** Format: uuid */
-            memory_id: string;
-            /** @description Current version being adjudicated */
-            version: number;
-        };
-        ConflictEvent: {
-            /** Format: uuid */
-            id: string;
-            /** @example detected */
-            action: string;
-            /** Format: uuid */
-            memory_id?: string;
-            version?: number;
-            /** Format: date-time */
-            created_at: string;
-        };
-        Conflict: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            fact_group_id?: string;
-            /** @enum {string} */
-            status: "open" | "resolved";
-            /** @enum {string} */
-            reason_code: "contradictory_value" | "uncertain_time" | "ambiguous_scope" | "complex_timeline";
-            /** @description Canonical structured adjudication JSON; never model reasoning */
-            resolution?: string;
-            revision: number;
-            /** Format: date-time */
-            created_at: string;
-            /** Format: date-time */
-            updated_at: string;
-            members: components["schemas"]["ConflictMember"][];
-            events?: components["schemas"]["ConflictEvent"][];
-        };
-        ConflictSummary: {
-            /** Format: uuid */
-            id: string;
-            /** @enum {string} */
-            reason_code: "contradictory_value" | "uncertain_time" | "ambiguous_scope" | "complex_timeline";
-            member_ids: string[];
-            has_accepted: boolean;
-            /** Format: uuid */
-            fact_group_id?: string;
-        };
-        ConflictRef: {
-            /** Format: uuid */
-            id: string;
-            /** @enum {string} */
-            reason_code: "contradictory_value" | "uncertain_time" | "ambiguous_scope" | "complex_timeline";
-        };
-        ConflictList: {
-            items: components["schemas"]["Conflict"][];
-        };
-        ConflictResolveRequest: {
-            revision: number;
-            /** @enum {string} */
-            action: "choose" | "timeline" | "separate_scope" | "reject_all";
-            member_ids?: string[];
-            member_versions: components["schemas"]["MemberVersion"][];
-            separate_group?: {
-                subject?: string;
-                predicate?: string;
-                scope?: string;
-                /** @enum {string} */
-                cardinality?: "single" | "multiple" | "unknown";
-            };
-            timeline?: {
-                /** Format: uuid */
-                memory_id?: string;
-                content?: string;
-                /** Format: date-time */
-                valid_from: string;
-                /** Format: date-time */
-                valid_to: string;
-            }[];
-            reason?: string;
-        };
-        Health: {
-            status: string;
-        };
     };
     responses: {
-        /** @description Request body is not valid JSON */
+        /** @description Request body or query value is invalid */
         BadRequest: {
             headers: {
                 [name: string]: unknown;
             };
             content: {
-                /**
-                 * @example {
-                 *       "error": "请求体不是有效的 JSON。"
-                 *     }
-                 */
                 "application/json": components["schemas"]["Error"];
             };
         };
@@ -1585,11 +1326,6 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                /**
-                 * @example {
-                 *       "error": "资源不存在。"
-                 *     }
-                 */
                 "application/json": components["schemas"]["Error"];
             };
         };
@@ -1599,26 +1335,15 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                /**
-                 * @example {
-                 *       "error": "内部执行失败。"
-                 *     }
-                 */
                 "application/json": components["schemas"]["Error"];
             };
         };
-        /** @description The conflict, member versions or current accepted facts changed */
+        /** @description Conflict revision or member versions changed */
         ConflictStale: {
             headers: {
                 [name: string]: unknown;
             };
             content: {
-                /**
-                 * @example {
-                 *       "error": "冲突或版本已变化，请重新读取。",
-                 *       "code": "conflict_stale"
-                 *     }
-                 */
                 "application/json": components["schemas"]["Error"];
             };
         };
@@ -1628,18 +1353,12 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                /**
-                 * @example {
-                 *       "error": "服务暂不可用。"
-                 *     }
-                 */
                 "application/json": components["schemas"]["Error"];
             };
         };
     };
     parameters: {
         MemoryID: string;
-        /** @example 2 */
         Version: number;
     };
     requestBodies: never;
@@ -1661,19 +1380,12 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Source and queued job persisted */
+            /** @description Source and extraction job persisted */
             202: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    /**
-                     * @example {
-                     *       "source_id": "22222222-2222-4222-8222-222222222222",
-                     *       "job_id": "33333333-3333-4333-8333-333333333333",
-                     *       "status": "queued"
-                     *     }
-                     */
                     "application/json": components["schemas"]["SubmitResponse"];
                 };
             };
@@ -1682,42 +1394,13 @@ export interface operations {
             503: components["responses"]["Unavailable"];
         };
     };
-    listMemories: {
+    listObservations: {
         parameters: {
             query?: {
-                /**
-                 * @description Comma-separated fact,preference,event,procedure
-                 * @example fact,preference
-                 */
-                kinds?: string;
-                /**
-                 * @description Comma-separated active,archived,deleted
-                 * @example active,archived
-                 */
-                states?: string;
-                /**
-                 * @description Comma-separated accepted,pending,rejected
-                 * @example pending
-                 */
-                assertion_status?: string;
-                /**
-                 * @description Filter by fact group id
-                 * @example 55555555-5555-4555-8555-555555555555
-                 */
-                fact_group_id?: string;
-                /**
-                 * @description Filter by the app_id captured when the memory was created
-                 * @example desktop-assistant
-                 */
-                created_by_app?: string;
-                /** @description Inclusive RFC 3339 lower bound; invalid values are ignored */
-                updated_after?: string;
-                /** @description Inclusive RFC 3339 upper bound; invalid values are ignored */
-                updated_before?: string;
-                /**
-                 * @description Positive result limit; missing or invalid values use 50
-                 * @example 50
-                 */
+                source_id?: string;
+                scope_key?: string;
+                kind?: "fact" | "preference" | "event" | "procedure";
+                status?: "observed" | "pending" | "retracted" | "deleted";
                 limit?: number;
             };
             header?: never;
@@ -1726,34 +1409,124 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description One filtered result set */
+            /** @description Observation page */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    /**
-                     * @example {
-                     *       "items": [
-                     *         {
-                     *           "id": "11111111-1111-4111-8111-111111111111",
-                     *           "kind": "preference",
-                     *           "title": "回答语言",
-                     *           "content": "用户希望默认使用中文回答。",
-                     *           "state": "active",
-                     *           "version": 3,
-                     *           "observed_at": "2026-10-20T02:00:00Z",
-                     *           "created_at": "2026-10-20T02:00:01Z",
-                     *           "updated_at": "2026-10-20T03:00:00Z",
-                     *           "created_by_app": "desktop-assistant",
-                     *           "origin_source_id": "22222222-2222-4222-8222-222222222222"
-                     *         }
-                     *       ]
-                     *     }
-                     */
+                    "application/json": components["schemas"]["ObservationList"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getObservation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Observation record */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Observation"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getObservationEvidence: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Evidence list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvidenceList"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getObservationRelations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Typed relation list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RelationList"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listMemories: {
+        parameters: {
+            query?: {
+                /** @description Comma-separated fact,preference,event,procedure */
+                kinds?: string;
+                /** @description Comma-separated active,archived,deleted */
+                states?: string;
+                /** @description Comma-separated accepted,pending,rejected */
+                assertion_status?: string;
+                updated_after?: string;
+                updated_before?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current memory page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
                     "application/json": components["schemas"]["MemoryList"];
                 };
             };
+            400: components["responses"]["BadRequest"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];
         };
@@ -1767,87 +1540,17 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["SearchRequest"];
+                "application/json": components["schemas"]["RecallRequest"];
             };
         };
         responses: {
-            /** @description One partitioned recall result */
+            /** @description Layered recall result */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    /**
-                     * @example {
-                     *       "memories": [
-                     *         {
-                     *           "memory": {
-                     *             "id": "11111111-1111-4111-8111-111111111111",
-                     *             "kind": "preference",
-                     *             "title": "回答语言",
-                     *             "content": "用户希望默认使用中文回答。",
-                     *             "state": "active",
-                     *             "version": 3,
-                     *             "observed_at": "2026-10-20T02:00:00Z",
-                     *             "created_at": "2026-10-20T02:00:01Z",
-                     *             "updated_at": "2026-10-20T03:00:00Z",
-                     *             "created_by_app": "desktop-assistant",
-                     *             "origin_source_id": "22222222-2222-4222-8222-222222222222"
-                     *           },
-                     *           "score": 0.03252247,
-                     *           "snippet": "用户希望默认使用中文回答。",
-                     *           "matched_terms": [
-                     *             "回答",
-                     *             "语言"
-                     *           ],
-                     *           "evidence_refs": [
-                     *             {
-                     *               "id": "44444444-4444-4444-8444-444444444444",
-                     *               "source_id": "22222222-2222-4222-8222-222222222222"
-                     *             }
-                     *           ],
-                     *           "explanation": {
-                     *             "ranking": "rrf",
-                     *             "keyword": {
-                     *               "rank": 1,
-                     *               "bm25": -0.0000042
-                     *             },
-                     *             "semantic": {
-                     *               "rank": 2,
-                     *               "cosine": 0.93
-                     *             }
-                     *           },
-                     *           "temporal_status": "unknown",
-                     *           "conflict_refs": []
-                     *         }
-                     *       ],
-                     *       "summaries": [
-                     *         {
-                     *           "id": "66666666-6666-4666-8666-666666666666",
-                     *           "kind": "topic_summary",
-                     *           "version": 1,
-                     *           "title": "回答偏好",
-                     *           "content": "用户希望默认使用中文回答。",
-                     *           "scope_key": "user",
-                     *           "topic": "language",
-                     *           "state": "active",
-                     *           "truncated": false,
-                     *           "memory_refs": [
-                     *             {
-                     *               "memory_id": "11111111-1111-4111-8111-111111111111",
-                     *               "version": 3
-                     *             }
-                     *           ],
-                     *           "updated_at": "2026-10-20T03:10:00Z"
-                     *         }
-                     *       ],
-                     *       "experiences": [],
-                     *       "skills": [],
-                     *       "conflicts": [],
-                     *       "warnings": []
-                     *     }
-                     */
-                    "application/json": components["schemas"]["SearchResponse"];
+                    "application/json": components["schemas"]["RecallResponse"];
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -1859,7 +1562,7 @@ export interface operations {
         parameters: {
             query?: {
                 scope_key?: string;
-                kind?: "topic_summary" | "scope_summary" | "profile" | "experience_case" | "skill";
+                kind?: "local_summary" | "topic_summary" | "scope_summary" | "profile" | "experience_case" | "skill" | "guidance";
                 state?: "active" | "stale" | "disabled";
                 reason_code?: string;
                 cursor?: string;
@@ -1871,7 +1574,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Current artifacts in stable target order */
+            /** @description Derived-memory page */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1889,7 +1592,7 @@ export interface operations {
         parameters: {
             query?: {
                 scope_key?: string;
-                kind?: "topic_summary" | "scope_summary" | "profile" | "experience_case" | "skill";
+                kind?: "local_summary" | "topic_summary" | "scope_summary" | "profile" | "experience_case" | "skill" | "guidance";
                 status?: "queued" | "running" | "waiting" | "active" | "stale" | "disabled" | "no_eligible_input" | "model_unavailable" | "generation_failed" | "invalid_output";
                 reason_code?: string;
                 cursor?: string;
@@ -1901,7 +1604,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Generation targets in stable target order */
+            /** @description Target page */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1926,7 +1629,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Artifact state and current revision when one exists */
+            /** @description Derived memory detail */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1952,7 +1655,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Historical revision with owning artifact state */
+            /** @description Historical derived detail */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1975,28 +1678,11 @@ export interface operations {
         };
         requestBody: {
             content: {
-                /**
-                 * @example {
-                 *       "run_id": "run-2026-10-22-1",
-                 *       "scope_key": "project:dmemd",
-                 *       "goal": "修改 dmemd 后验证",
-                 *       "conditions": [
-                 *         "依赖已安装"
-                 *       ],
-                 *       "actions": [
-                 *         "运行 go test",
-                 *         "执行构建检查"
-                 *       ],
-                 *       "outcome": "success",
-                 *       "skill_id": "88888888-8888-4888-8888-888888888888",
-                 *       "skill_version": 2
-                 *     }
-                 */
                 "application/json": components["schemas"]["ExperienceSubmit"];
             };
         };
         responses: {
-            /** @description Saved result receipt; duplicate run_id returns the existing receipt */
+            /** @description Saved application report receipt */
             202: {
                 headers: {
                     [name: string]: unknown;
@@ -2021,7 +1707,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Updated receipt with state=revoked */
+            /** @description Revoked receipt */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2048,7 +1734,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Rendered SKILL.md plus exact version, state and sources */
+            /** @description Rendered skill content */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2074,27 +1760,12 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Current snapshot and relations */
+            /** @description Canonical memory detail */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    /**
-                     * @example {
-                     *       "id": "11111111-1111-4111-8111-111111111111",
-                     *       "kind": "preference",
-                     *       "title": "回答语言",
-                     *       "content": "用户希望默认使用中文回答。",
-                     *       "state": "active",
-                     *       "version": 3,
-                     *       "observed_at": "2026-10-20T02:00:00Z",
-                     *       "created_at": "2026-10-20T02:00:01Z",
-                     *       "updated_at": "2026-10-20T03:00:00Z",
-                     *       "created_by_app": "desktop-assistant",
-                     *       "origin_source_id": "22222222-2222-4222-8222-222222222222"
-                     *     }
-                     */
                     "application/json": components["schemas"]["MemoryDetail"];
                 };
             };
@@ -2120,12 +1791,6 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    /**
-                     * @example {
-                     *       "id": "11111111-1111-4111-8111-111111111111",
-                     *       "state": "deleted"
-                     *     }
-                     */
                     "application/json": components["schemas"]["DeleteResponse"];
                 };
             };
@@ -2145,11 +1810,6 @@ export interface operations {
         };
         requestBody: {
             content: {
-                /**
-                 * @example {
-                 *       "state": "archived"
-                 *     }
-                 */
                 "application/json": components["schemas"]["StatePatch"];
             };
         };
@@ -2160,21 +1820,6 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    /**
-                     * @example {
-                     *       "id": "11111111-1111-4111-8111-111111111111",
-                     *       "kind": "preference",
-                     *       "title": "回答语言",
-                     *       "content": "用户希望默认使用中文回答。",
-                     *       "state": "archived",
-                     *       "version": 4,
-                     *       "observed_at": "2026-10-20T02:00:00Z",
-                     *       "created_at": "2026-10-20T02:00:01Z",
-                     *       "updated_at": "2026-10-20T04:00:00Z",
-                     *       "created_by_app": "desktop-assistant",
-                     *       "origin_source_id": "22222222-2222-4222-8222-222222222222"
-                     *     }
-                     */
                     "application/json": components["schemas"]["Memory"];
                 };
             };
@@ -2195,18 +1840,12 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Purge result */
+            /** @description Purge confirmation */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    /**
-                     * @example {
-                     *       "id": "11111111-1111-4111-8111-111111111111",
-                     *       "purged": true
-                     *     }
-                     */
                     "application/json": components["schemas"]["PurgeResponse"];
                 };
             };
@@ -2218,10 +1857,6 @@ export interface operations {
     listMemoryHistory: {
         parameters: {
             query?: {
-                /**
-                 * @description Positive result limit; missing or invalid values use 50
-                 * @example 50
-                 */
                 limit?: number;
             };
             header?: never;
@@ -2232,54 +1867,12 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Version list */
+            /** @description Revision list */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    /**
-                     * @example {
-                     *       "items": [
-                     *         {
-                     *           "memory_id": "11111111-1111-4111-8111-111111111111",
-                     *           "version": 3,
-                     *           "operation": "update",
-                     *           "reason": "用户更正回答语言",
-                     *           "snapshot": {
-                     *             "id": "11111111-1111-4111-8111-111111111111",
-                     *             "kind": "preference",
-                     *             "title": "回答语言",
-                     *             "content": "用户希望默认使用中文回答。",
-                     *             "state": "active",
-                     *             "version": 3,
-                     *             "observed_at": "2026-10-20T02:00:00Z",
-                     *             "created_at": "2026-10-20T02:00:01Z",
-                     *             "updated_at": "2026-10-20T03:00:00Z",
-                     *             "created_by_app": "desktop-assistant",
-                     *             "origin_source_id": "22222222-2222-4222-8222-222222222222"
-                     *           },
-                     *           "evidence": [
-                     *             {
-                     *               "id": "44444444-4444-4444-8444-444444444444",
-                     *               "source_id": "22222222-2222-4222-8222-222222222222",
-                     *               "message_id": "msg-1",
-                     *               "quote": "以后请默认使用中文回答。",
-                     *               "location": {
-                     *                 "field": "messages.0.content",
-                     *                 "start": 0,
-                     *                 "end": 12
-                     *               },
-                     *               "model_name": "example-model",
-                     *               "redacted": false,
-                     *               "created_at": "2026-10-20T02:00:01Z"
-                     *             }
-                     *           ],
-                     *           "created_at": "2026-10-20T03:00:00Z"
-                     *         }
-                     *       ]
-                     *     }
-                     */
                     "application/json": components["schemas"]["RevisionList"];
                 };
             };
@@ -2294,14 +1887,13 @@ export interface operations {
             header?: never;
             path: {
                 id: components["parameters"]["MemoryID"];
-                /** @example 2 */
                 version: components["parameters"]["Version"];
             };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Version snapshot and complete evidence set */
+            /** @description Revision snapshot and evidence */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2321,39 +1913,22 @@ export interface operations {
             header?: never;
             path: {
                 id: components["parameters"]["MemoryID"];
-                /** @example 2 */
                 version: components["parameters"]["Version"];
             };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Restored current memory */
+            /** @description New current memory */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    /**
-                     * @example {
-                     *       "id": "11111111-1111-4111-8111-111111111111",
-                     *       "kind": "preference",
-                     *       "title": "回答语言",
-                     *       "content": "用户希望默认使用中文回答。",
-                     *       "state": "active",
-                     *       "version": 4,
-                     *       "observed_at": "2026-10-20T02:00:00Z",
-                     *       "created_at": "2026-10-20T02:00:01Z",
-                     *       "updated_at": "2026-10-20T05:00:00Z",
-                     *       "created_by_app": "desktop-assistant",
-                     *       "origin_source_id": "22222222-2222-4222-8222-222222222222"
-                     *     }
-                     */
                     "application/json": components["schemas"]["Memory"];
                 };
             };
             404: components["responses"]["NotFound"];
-            409: components["responses"]["ConflictStale"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];
         };
@@ -2361,10 +1936,6 @@ export interface operations {
     getMemoryEvidence: {
         parameters: {
             query?: {
-                /**
-                 * @description Target version; absent/0/invalid means current version
-                 * @example 2
-                 */
                 version?: number;
             };
             header?: never;
@@ -2375,32 +1946,12 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Complete evidence set */
+            /** @description Evidence list */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    /**
-                     * @example {
-                     *       "items": [
-                     *         {
-                     *           "id": "44444444-4444-4444-8444-444444444444",
-                     *           "source_id": "22222222-2222-4222-8222-222222222222",
-                     *           "message_id": "msg-1",
-                     *           "quote": "以后请默认使用中文回答。",
-                     *           "location": {
-                     *             "field": "messages.0.content",
-                     *             "start": 0,
-                     *             "end": 12
-                     *           },
-                     *           "model_name": "example-model",
-                     *           "redacted": false,
-                     *           "created_at": "2026-10-20T02:00:01Z"
-                     *         }
-                     *       ]
-                     *     }
-                     */
                     "application/json": components["schemas"]["EvidenceList"];
                 };
             };
@@ -2412,9 +1963,7 @@ export interface operations {
     listConflicts: {
         parameters: {
             query?: {
-                /** @description open or resolved; default open */
                 status?: "open" | "resolved";
-                /** @description Positive result limit; missing or invalid values use 50 */
                 limit?: number;
             };
             header?: never;
@@ -2423,7 +1972,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description One filtered conflict set */
+            /** @description Conflict list */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2477,7 +2026,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Resolved conflict */
+            /** @description Updated conflict */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2502,39 +2051,16 @@ export interface operations {
         };
         requestBody: {
             content: {
-                /**
-                 * @example {
-                 *       "source_ids": [
-                 *         "22222222-2222-4222-8222-222222222222"
-                 *       ],
-                 *       "experience_ids": [
-                 *         "33333333-3333-4333-8333-333333333333"
-                 *       ]
-                 *     }
-                 */
                 "application/json": components["schemas"]["ForgetRequest"];
             };
         };
         responses: {
-            /** @description Identifiers removed by the committed transaction */
+            /** @description Actually removed identifiers */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    /**
-                     * @example {
-                     *       "memory_ids": [
-                     *         "11111111-1111-4111-8111-111111111111"
-                     *       ],
-                     *       "source_ids": [
-                     *         "22222222-2222-4222-8222-222222222222"
-                     *       ],
-                     *       "experience_ids": [
-                     *         "33333333-3333-4333-8333-333333333333"
-                     *       ]
-                     *     }
-                     */
                     "application/json": components["schemas"]["ForgetResponse"];
                 };
             };
@@ -2555,7 +2081,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Source record */
+            /** @description Source record with stable spans */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -2580,20 +2106,118 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Redaction result */
+            /** @description Redaction and invalidation result */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    /**
-                     * @example {
-                     *       "id": "22222222-2222-4222-8222-222222222222",
-                     *       "redacted": true,
-                     *       "cancelled_jobs": 1
-                     *     }
-                     */
                     "application/json": components["schemas"]["RedactResponse"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listJobs: {
+        parameters: {
+            query?: {
+                status?: "queued" | "running" | "waiting" | "succeeded" | "failed" | "cancelled";
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Extraction job list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobList"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getJob: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Extraction job */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listGovernanceJobs: {
+        parameters: {
+            query?: {
+                category?: "governance" | "aggregation";
+                kind?: "govern_observation" | "classify_observation" | "aggregate_l1" | "aggregate_l2" | "aggregate_l3" | "build_guidance" | "review_conflict" | "invalidate_dependency" | "reconcile";
+                status?: "queued" | "running" | "waiting" | "succeeded" | "failed" | "cancelled";
+                target_key?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Task list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GovernanceJobList"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getGovernanceJob: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Governance or aggregation task */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GovernanceJob"];
                 };
             };
             404: components["responses"]["NotFound"];
@@ -2612,85 +2236,12 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Job state */
+            /** @description Extraction job */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    /**
-                     * @example {
-                     *       "id": "33333333-3333-4333-8333-333333333333",
-                     *       "source_id": "22222222-2222-4222-8222-222222222222",
-                     *       "status": "succeeded",
-                     *       "attempts": 1,
-                     *       "quality_outcome": "complete",
-                     *       "extraction_stats": {
-                     *         "raw_candidates": 1,
-                     *         "parsed_candidates": 1,
-                     *         "normalized_candidates": 0,
-                     *         "normalizations": 0,
-                     *         "repair_attempts": 0,
-                     *         "repaired_candidates": 0,
-                     *         "repair_succeeded": 0,
-                     *         "repair_failed": 0,
-                     *         "repair_timed_out": 0,
-                     *         "repair_invalid_output": 0,
-                     *         "excluded_candidates": 0,
-                     *         "isolated_candidates": 0,
-                     *         "accepted_candidates": 1,
-                     *         "skipped_candidates": 0,
-                     *         "memory_writes": 1,
-                     *         "extraction_chunks": 1,
-                     *         "extraction_chunk_failures": 0,
-                     *         "dropped_candidates": 0,
-                     *         "cross_chunk_duplicates": 0,
-                     *         "context_only_candidates": 0
-                     *       },
-                     *       "retention": {
-                     *         "retained": 1,
-                     *         "not_retained": 0,
-                     *         "by_reason": {
-                     *           "explicit_intent": 1
-                     *         },
-                     *         "not_retained_by_reason": {}
-                     *       },
-                     *       "timings": {
-                     *         "queue_age_ms": 1000,
-                     *         "extraction_ms": 900,
-                     *         "normalization_ms": 3,
-                     *         "repair_ms": 0,
-                     *         "context_ms": 20,
-                     *         "decision_ms": 0,
-                     *         "commit_ms": 15,
-                     *         "total_ms": 938
-                     *       },
-                     *       "model_usage": {
-                     *         "calls": 1,
-                     *         "input_tokens": 120,
-                     *         "output_tokens": 40,
-                     *         "total_tokens": 160
-                     *       },
-                     *       "efficiency": {
-                     *         "memories": 1,
-                     *         "model_calls": 1,
-                     *         "total_tokens": 160,
-                     *         "calls_per_memory": 1,
-                     *         "tokens_per_memory": 160
-                     *       },
-                     *       "queue_age_seconds": 1,
-                     *       "stale_seconds": 0,
-                     *       "diagnostics": [],
-                     *       "convergence": [],
-                     *       "memory_ids": [
-                     *         "11111111-1111-4111-8111-111111111111"
-                     *       ],
-                     *       "created_at": "2026-10-20T02:00:01Z",
-                     *       "updated_at": "2026-10-20T02:00:03Z",
-                     *       "started_at": "2026-10-20T02:00:02Z",
-                     *       "finished_at": "2026-10-20T02:00:03Z"
-                     *     }
-                     */
                     "application/json": components["schemas"]["Job"];
                 };
             };
@@ -2708,44 +2259,12 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Embedding diagnostics */
+            /** @description Embedding status */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    /**
-                     * @example {
-                     *       "enabled": true,
-                     *       "model": "embedding-model",
-                     *       "endpoint": "http://127.0.0.1:9999/v1",
-                     *       "dimensions": 1024,
-                     *       "min_similarity": 0.25,
-                     *       "profile_id": "6f2a2f8b1d9e4c3a8b7f6e5d4c3b2a19",
-                     *       "index_version": "dmemd-embedding-v1",
-                     *       "registered_profile_id": "6f2a2f8b1d9e4c3a8b7f6e5d4c3b2a19",
-                     *       "registered_index_version": "dmemd-embedding-v1",
-                     *       "config_fingerprint_match": true,
-                     *       "rebuild_required": false,
-                     *       "documents": 120,
-                     *       "current_vectors": 120,
-                     *       "stale_vectors": 0,
-                     *       "missing_vectors": 0,
-                     *       "pending_jobs": 0,
-                     *       "failed_jobs": 0,
-                     *       "failed_codes": [],
-                     *       "indexed_profiles": [
-                     *         {
-                     *           "profile_id": "6f2a2f8b1d9e4c3a8b7f6e5d4c3b2a19",
-                     *           "vectors": 120
-                     *         }
-                     *       ],
-                     *       "coverage": 1,
-                     *       "ready": true,
-                     *       "reason_code": "ready",
-                     *       "checked_at": "2026-10-27T04:00:00Z"
-                     *     }
-                     */
                     "application/json": components["schemas"]["EmbeddingStatus"];
                 };
             };
@@ -2768,19 +2287,10 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    /**
-                     * @example {
-                     *       "attempted": true,
-                     *       "success": true,
-                     *       "code": "ok",
-                     *       "dimensions": 1024,
-                     *       "duration_ms": 42,
-                     *       "checked_at": "2026-10-27T04:00:00Z"
-                     *     }
-                     */
                     "application/json": components["schemas"]["EmbeddingProbe"];
                 };
             };
+            500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];
         };
     };
@@ -2793,17 +2303,12 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Process alive */
+            /** @description Process is alive */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    /**
-                     * @example {
-                     *       "status": "ok"
-                     *     }
-                     */
                     "application/json": components["schemas"]["Health"];
                 };
             };
@@ -2818,31 +2323,21 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Database ready */
+            /** @description Database is usable */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    /**
-                     * @example {
-                     *       "status": "ready"
-                     *     }
-                     */
                     "application/json": components["schemas"]["Health"];
                 };
             };
-            /** @description Database not ready */
+            /** @description Database is not usable */
             503: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    /**
-                     * @example {
-                     *       "status": "unavailable"
-                     *     }
-                     */
                     "application/json": components["schemas"]["Health"];
                 };
             };

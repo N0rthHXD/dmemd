@@ -23,22 +23,6 @@ export const memoryKindLabels = define({
   procedure: { label: '流程', tone: 'processing' },
 });
 
-export const memoryPhaseLabels = define({
-  unknown: { label: '未知' },
-  scheduled: { label: '计划中', tone: 'processing' },
-  in_progress: { label: '进行中', tone: 'processing' },
-  completed: { label: '已完成', tone: 'success' },
-  cancelled: { label: '已取消', tone: 'error' },
-  postponed: { label: '已推迟', tone: 'warning' },
-});
-
-export const durabilityLabels = define({
-  unknown: { label: '未知' },
-  durable: { label: '长期适用', tone: 'blue' },
-  episodic: { label: '一次性事件', tone: 'cyan' },
-  temporary: { label: '临时', tone: 'default' },
-});
-
 export const memoryStateLabels = define({
   active: { label: '使用中', tone: 'success' },
   archived: { label: '已归档', tone: 'warning' },
@@ -53,47 +37,6 @@ export const assertionLabels = define({
   },
   pending: { label: '待确认', tone: 'warning' },
   rejected: { label: '已否定', tone: 'error' },
-});
-
-export const retentionLabels = define({
-  explicit_intent: { label: '明确意图' },
-  future_applicability: { label: '未来适用' },
-  durable_knowledge: { label: '持久知识' },
-  episodic_event: { label: '一次性事件' },
-  temporary_context: { label: '临时上下文' },
-  unclassified: { label: '未分类' },
-});
-
-export const basisLabels = define({
-  explicit: { label: '明确' },
-  inferred: { label: '推断' },
-  unknown: { label: '未知' },
-  recorded: { label: '接收时间回填' },
-});
-
-export const precisionLabels = define({
-  unknown: { label: '未知' },
-  year: { label: '年' },
-  month: { label: '月' },
-  day: { label: '日' },
-  hour: { label: '时' },
-  minute: { label: '分' },
-  second: { label: '秒' },
-});
-
-export const polarityLabels = define({
-  unknown: { label: '未知' },
-  positive: { label: '肯定', tone: 'success' },
-  negative: { label: '否定', tone: 'error' },
-  mixed: { label: '混合', tone: 'warning' },
-});
-
-export const certaintyLabels = define({
-  unknown: { label: '未知' },
-  asserted: { label: '断言', tone: 'blue' },
-  uncertain: { label: '不确定', tone: 'warning' },
-  reported: { label: '转述', tone: 'cyan' },
-  hypothetical: { label: '假设', tone: 'default' },
 });
 
 export const conflictStatusLabels = define({
@@ -131,14 +74,50 @@ export const waitReasonLabels = define({
 });
 
 export const jobStageLabels = define({
-  source: { label: '读取来源' },
-  extraction: { label: '提取' },
-  extraction_repair: { label: '提取修复' },
-  context: { label: '上下文整理' },
-  decision: { label: '决策' },
-  decision_repair: { label: '决策修复' },
-  commit: { label: '提交' },
-  processing: { label: '处理中' },
+  received: { label: '已接收', tone: 'default' },
+  extracting: { label: '提取中', tone: 'processing' },
+  observations_saved: { label: '原始观察已保存', tone: 'success' },
+  governance_pending: { label: '等待治理', tone: 'warning' },
+  memory_materialized: { label: '当前记忆已形成', tone: 'success' },
+  aggregation_pending: { label: '等待聚合', tone: 'warning' },
+  completed: { label: '已完成', tone: 'success' },
+  failed: { label: '失败', tone: 'error' },
+});
+
+export const jobCategoryLabels = define({
+  extraction: { label: '提取', tone: 'blue' },
+  governance: { label: '治理', tone: 'purple' },
+  aggregation: { label: '聚合', tone: 'cyan' },
+});
+
+export const observationStatusLabels = define({
+  observed: { label: '已观察', tone: 'success' },
+  pending: { label: '待处理', tone: 'warning' },
+  retracted: { label: '已撤回', tone: 'default' },
+  deleted: { label: '已删除', tone: 'error' },
+});
+
+export const observationContentModeLabels = define({
+  extractive: { label: '原文摘取' },
+  normalized: { label: '规范化表达' },
+});
+
+export const relationKindLabels = define({
+  duplicate: { label: '重复' },
+  supports: { label: '支持' },
+  enriches: { label: '补充' },
+  supersedes: { label: '替代' },
+  contradicts: { label: '冲突' },
+  separate: { label: '相互独立' },
+  independent: { label: '独立新增' },
+  unresolved: { label: '暂无法判断' },
+});
+
+export const artifactLayerLabels = define({
+  l1: { label: 'L1 局部聚合', tone: 'blue' },
+  l2: { label: 'L2 领域聚合', tone: 'purple' },
+  l3: { label: 'L3 全局聚合', tone: 'cyan' },
+  l4: { label: 'L4 指导', tone: 'success' },
 });
 
 export const qualityOutcomeLabels = define({
@@ -161,11 +140,13 @@ export const qualityOutcomeLabels = define({
 });
 
 export const artifactKindLabels = define({
+  local_summary: { label: '局部聚合', tone: 'blue' },
   topic_summary: { label: '主题摘要', tone: 'blue' },
   scope_summary: { label: '范围概览', tone: 'cyan' },
   profile: { label: '偏好与习惯', tone: 'purple' },
   experience_case: { label: '经验案例', tone: 'processing' },
   skill: { label: '操作指南', tone: 'success' },
+  guidance: { label: '指导', tone: 'success' },
 });
 
 export const artifactStateLabels = define({
@@ -185,14 +166,6 @@ export const targetStatusLabels = define({
   model_unavailable: { label: '模型不可用', tone: 'error' },
   generation_failed: { label: '生成失败', tone: 'error' },
   invalid_output: { label: '整理结果不符合要求', tone: 'error' },
-});
-
-export const evolutionActionLabels = define({
-  change: { label: '变化' },
-  correction: { label: '更正' },
-  reschedule: { label: '改期' },
-  cancel: { label: '取消' },
-  supersede: { label: '替代' },
 });
 
 export const revisionOperationLabels = define({
@@ -250,8 +223,6 @@ export const reasonCodeLabels = define({
   model_timeout: { label: '模型超时' },
   process_budget_exceeded: { label: '处理预算超时' },
   state_changed: { label: '状态已变化' },
-  decision_protocol_invalid: { label: '决策协议无效' },
-  decision_repair_failed: { label: '决策修复失败' },
   no_procedure_input: { label: '尚无可用于编写指南的操作步骤' },
   topic_mismatch: { label: '主题不匹配' },
   model_generation_failed: { label: '模型生成失败' },
@@ -268,22 +239,10 @@ export const reasonCodeLabels = define({
   jobs_pending: { label: '存在待处理任务' },
   related_memories_retained: { label: '相关记忆被保留' },
   explicit_exclusion: { label: '明确排除' },
-  cross_chunk_context: { label: '跨块上下文' },
-  cross_chunk_duplicate: { label: '跨块重复' },
-  candidate_limit: { label: '候选数量达到上限' },
-  candidate_limit_exceeded: { label: '候选数量超出上限' },
-  invalid_candidate: { label: '候选无效' },
-  decision_skip: { label: '决策跳过' },
   empty_extraction: { label: '提取为空' },
   chunk_failure: { label: '分块失败' },
   extraction_chunk_oversized: { label: '提取分块过大' },
-  identity_ambiguous: { label: '事实身份不明确' },
-  missing_update_evidence: { label: '缺少更新证据' },
-  time_unknown: { label: '时间未知' },
-  cardinality_unknown: { label: '尚不明确是否允许多个结果' },
-  context_truncated: { label: '上下文已截断' },
   conflict_results_truncated: { label: '冲突结果已截断' },
-  topic_mismatch_input: { label: '主题输入不匹配' },
 });
 
 export const warningLabels = define({
@@ -298,38 +257,29 @@ export const warningLabels = define({
   semantic_index_not_ready: { label: '语义索引尚未就绪', tone: 'warning' },
   fact_conflict: { label: '部分记忆的说法不一致，需要进一步核对。', tone: 'warning' },
   conflict_results_truncated: { label: '冲突结果已达到上限', tone: 'warning' },
-  derived_as_of_unsupported: {
-    label: '按过去的适用时间搜索时，只返回记忆，不包含自动整理内容。',
-    tone: 'warning',
-  },
   derived_unavailable: { label: '暂时无法搜索自动整理内容，已保留记忆搜索结果。', tone: 'warning' },
   context_budget_truncated: { label: '上下文预算导致后续结果被截断', tone: 'warning' },
-  temporal_uncertain: { label: '部分结果的有效时间边界未知', tone: 'warning' },
-  context_truncated: { label: '输入上下文已截断', tone: 'warning' },
 });
 
 const maps: Record<string, Record<string, CodeDefinition>> = {
   memoryKind: memoryKindLabels,
-  memoryPhase: memoryPhaseLabels,
-  durability: durabilityLabels,
   memoryState: memoryStateLabels,
   assertion: assertionLabels,
-  retention: retentionLabels,
-  basis: basisLabels,
-  precision: precisionLabels,
-  polarity: polarityLabels,
-  certainty: certaintyLabels,
   conflictStatus: conflictStatusLabels,
   conflictReason: conflictReasonLabels,
   conflictAction: conflictActionLabels,
   jobStatus: jobStatusLabels,
   waitReason: waitReasonLabels,
   jobStage: jobStageLabels,
+  jobCategory: jobCategoryLabels,
+  observationStatus: observationStatusLabels,
+  observationContentMode: observationContentModeLabels,
+  relationKind: relationKindLabels,
+  artifactLayer: artifactLayerLabels,
   qualityOutcome: qualityOutcomeLabels,
   artifactKind: artifactKindLabels,
   artifactState: artifactStateLabels,
   targetStatus: targetStatusLabels,
-  evolutionAction: evolutionActionLabels,
   revisionOperation: revisionOperationLabels,
   experienceOutcome: experienceOutcomeLabels,
   experienceState: experienceStateLabels,
@@ -359,14 +309,4 @@ export function reasonText(code: string | undefined): string | undefined {
     return undefined;
   }
   return reasonCodeLabels[code]?.label ?? '暂无法确认原因，可查看技术详情。';
-}
-
-export function relatedReasonText(code: string): string {
-  if (code === 'fact_group_member') {
-    return '同一事项的相关记忆';
-  }
-  if (code === 'conflict_member') {
-    return '需要一起核对的记忆';
-  }
-  return '其他相关记忆';
 }

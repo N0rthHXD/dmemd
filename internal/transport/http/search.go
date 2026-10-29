@@ -3,6 +3,7 @@ package httptransport
 import (
 	"net/http"
 
+	"github.com/N0rthHXD/dmemd/internal/artifact"
 	"github.com/N0rthHXD/dmemd/internal/memory"
 	"github.com/N0rthHXD/dmemd/internal/retrieval"
 )
@@ -27,6 +28,11 @@ func (h *handler) recallMemories(w http.ResponseWriter, request *http.Request) {
 		h.writeBadRequest(w)
 		return
 	}
+	queryMode := retrieval.QueryMode(rawString(object, "query_mode"))
+	if !queryMode.Known() {
+		h.writeBadRequest(w)
+		return
+	}
 	topK, _ := rawInt(object, "top_k")
 	if topK > retrieval.MaxTopK {
 		h.writeBadRequest(w)
@@ -43,33 +49,31 @@ func (h *handler) recallMemories(w http.ResponseWriter, request *http.Request) {
 		}
 		layers = append(layers, layer)
 	}
+	derivedStates := make([]artifact.State, 0)
+	for _, value := range rawStringSlice(object, "derived_states") {
+		state := artifact.State(value)
+		if state != artifact.StateActive && state != artifact.StateStale {
+			h.writeBadRequest(w)
+			return
+		}
+		derivedStates = append(derivedStates, state)
+	}
 	recallRequest := retrieval.RecallRequest{
 		Query:            rawString(object, "query"),
 		ScopeKey:         rawString(object, "scope_key"),
+		QueryMode:        queryMode,
 		Layers:           layers,
 		LayersSpecified:  layersSpecified,
 		Mode:             mode,
+		DerivedStates:    derivedStates,
 		TopK:             topK,
 		Explain:          rawBool(object, "explain"),
 		MaxContextTokens: maxContextTokens,
 	}
 	if filters, ok := rawObject(object, "filters"); ok {
-		asOf, valid := rawTimeStrict(filters, "as_of")
-		if !valid {
-			h.writeBadRequest(w)
-			return
-		}
-		eventAt, eventValid := rawTimeStrict(filters, "event_at")
-		if !eventValid {
-			h.writeBadRequest(w)
-			return
-		}
 		recallRequest.Filters = retrieval.Filters{
 			Kinds:         searchKinds(rawStringSlice(filters, "kinds")),
 			States:        searchStates(rawStringSlice(filters, "states")),
-			AsOf:          asOf,
-			EventAt:       eventAt,
-			CreatedByApp:  rawString(filters, "created_by_app"),
 			UpdatedAfter:  rawTime(filters, "updated_after"),
 			UpdatedBefore: rawTime(filters, "updated_before"),
 		}

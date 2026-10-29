@@ -15,8 +15,6 @@ function listQuery(filters: MemoryListFilters) {
     states: filters.states.length > 0 ? filters.states.join(',') : undefined,
     assertion_status:
       filters.assertionStatuses.length > 0 ? filters.assertionStatuses.join(',') : undefined,
-    fact_group_id: filters.factGroupId.trim() || undefined,
-    created_by_app: filters.createdByApp.trim() || undefined,
     updated_after: filters.updatedAfter || undefined,
     updated_before: filters.updatedBefore || undefined,
     limit: filters.limit,
@@ -33,8 +31,13 @@ function checkedMemory(value: unknown): MemoryDetail {
     throw protocolError('记忆详情', '缺少 id 或 version');
   }
   const detail = value as MemoryDetail;
-  if (!Array.isArray(detail.relations) || !Array.isArray(detail.evolution)) {
-    throw protocolError('记忆详情', 'relations 或 evolution 不是数组');
+  if (
+    !Array.isArray(detail.relations) ||
+    !Array.isArray(detail.observation_ids) ||
+    !Array.isArray(detail.conflict_ids) ||
+    !Array.isArray(detail.derived_dependents)
+  ) {
+    throw protocolError('记忆详情', '引用字段不是数组');
   }
   return detail;
 }

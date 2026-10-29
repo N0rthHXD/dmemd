@@ -23,132 +23,114 @@ CREATE TABLE schema_meta (
     value TEXT NOT NULL
 );
 
-INSERT INTO schema_meta(key, value) VALUES ('contract', 'dmemd-p5-2026-10-27');
+INSERT INTO schema_meta(key, value) VALUES ('contract', 'dmemd-p16-2026-10-30-layer-recall');
 
+-- L0 observations. Every row is extracted from exactly one source; identity,
+-- scope, origin role and status are service-owned. Observations never carry
+-- temporal roles, fact groups, topics, procedure structures or qualifiers.
+CREATE TABLE observations (
+    id                 TEXT NOT NULL PRIMARY KEY,
+    source_id          TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+    scope_key          TEXT NOT NULL DEFAULT '',
+    kind               TEXT NOT NULL DEFAULT 'fact',
+    content            TEXT NOT NULL,
+    content_mode       TEXT NOT NULL CHECK (content_mode IN ('extractive', 'normalized')),
+    origin_role        TEXT NOT NULL DEFAULT '',
+    status             TEXT NOT NULL CHECK (status IN ('observed', 'pending', 'retracted', 'deleted')),
+    extraction_version TEXT NOT NULL DEFAULT '',
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL
+);
+
+CREATE INDEX idx_observations_scope_status
+    ON observations(scope_key, status, updated_at, id);
+CREATE INDEX idx_observations_source
+    ON observations(source_id, created_at, id);
+
+-- Evidence is generated only by code from a selected source segment. Quote,
+-- message and location are copied from the source view; the model never
+-- supplies them. Redaction clears the copied content while keeping the link.
+CREATE TABLE evidence (
+    id             TEXT NOT NULL PRIMARY KEY,
+    source_id      TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+    segment_id     TEXT NOT NULL DEFAULT '',
+    message_id     TEXT NOT NULL DEFAULT '',
+    quote          TEXT,
+    location_field TEXT,
+    location_start INTEGER,
+    location_end   INTEGER,
+    redacted       INTEGER NOT NULL DEFAULT 0 CHECK (redacted IN (0, 1)),
+    redacted_at    TEXT,
+    created_at     TEXT NOT NULL
+);
+
+CREATE INDEX idx_evidence_source_id ON evidence(source_id);
+
+CREATE TABLE observation_evidence (
+    observation_id TEXT NOT NULL REFERENCES observations(id) ON DELETE CASCADE,
+    evidence_id    TEXT NOT NULL REFERENCES evidence(id) ON DELETE CASCADE,
+    PRIMARY KEY (observation_id, evidence_id)
+);
+
+CREATE INDEX idx_observation_evidence_evidence
+    ON observation_evidence(evidence_id);
+
+-- Canonical memory is the current governed view, not the first extraction
+-- result. Revisions are complete, immutable snapshots of that view.
 CREATE TABLE memories (
-    id                TEXT NOT NULL PRIMARY KEY,
-    kind              TEXT NOT NULL,
-    phase             TEXT NOT NULL DEFAULT 'unknown'
-                      CHECK (phase IN ('unknown', 'scheduled', 'in_progress', 'completed', 'cancelled', 'postponed')),
-    durability        TEXT NOT NULL DEFAULT 'unknown'
-                      CHECK (durability IN ('unknown', 'durable', 'episodic', 'temporary')),
-    title             TEXT NOT NULL DEFAULT '',
-    content           TEXT NOT NULL DEFAULT '',
-    state             TEXT NOT NULL CHECK (state IN ('active', 'archived', 'deleted')),
-    assertion_status  TEXT NOT NULL DEFAULT 'accepted'
-                      CHECK (assertion_status IN ('accepted', 'pending', 'rejected')),
-    version           INTEGER NOT NULL,
-    observed_at       TEXT NOT NULL,
-    observed_at_basis TEXT NOT NULL DEFAULT 'recorded'
-                      CHECK (observed_at_basis IN ('explicit', 'inferred', 'unknown', 'recorded')),
-    event_time        TEXT,
-    event_time_basis  TEXT NOT NULL DEFAULT 'unknown'
-                      CHECK (event_time_basis IN ('explicit', 'inferred', 'unknown')),
-    event_time_precision TEXT NOT NULL DEFAULT 'unknown'
-                      CHECK (event_time_precision IN ('unknown', 'year', 'month', 'day', 'hour', 'minute', 'second')),
-    valid_from        TEXT,
-    valid_to          TEXT,
-    valid_from_basis  TEXT NOT NULL DEFAULT 'unknown'
-                      CHECK (valid_from_basis IN ('explicit', 'inferred', 'unknown')),
-    valid_to_basis    TEXT NOT NULL DEFAULT 'unknown'
-                      CHECK (valid_to_basis IN ('explicit', 'inferred', 'unknown')),
-    temporal_json     TEXT NOT NULL DEFAULT '{}',
-    procedure_json    TEXT NOT NULL DEFAULT '',
-    qualifiers_json   TEXT NOT NULL DEFAULT '',
-    fact_group_id     TEXT REFERENCES memory_fact_groups(id) ON DELETE SET NULL,
-    created_at        TEXT NOT NULL,
-    updated_at        TEXT NOT NULL,
-    created_by_app    TEXT NOT NULL DEFAULT '',
-    origin_source_id  TEXT REFERENCES sources(id) ON DELETE SET NULL,
-    scope_key         TEXT NOT NULL DEFAULT '',
-    topics_json       TEXT NOT NULL DEFAULT '[]',
-    raw_topics_json   TEXT NOT NULL DEFAULT '[]',
-    CHECK (version >= 1),
-    CHECK ((valid_from IS NULL) = (valid_from_basis = 'unknown')),
-    CHECK ((valid_to IS NULL) = (valid_to_basis = 'unknown')),
-    CHECK ((event_time IS NULL) = (event_time_basis = 'unknown')),
-    CHECK (valid_from IS NULL OR valid_to IS NULL OR valid_from < valid_to)
+    id               TEXT NOT NULL PRIMARY KEY,
+    kind             TEXT NOT NULL DEFAULT 'fact',
+    title            TEXT NOT NULL DEFAULT '',
+    content          TEXT NOT NULL,
+    state            TEXT NOT NULL CHECK (state IN ('active', 'archived', 'deleted')),
+    assertion_status TEXT NOT NULL CHECK (assertion_status IN ('accepted', 'pending', 'rejected')),
+    version          INTEGER NOT NULL CHECK (version >= 1),
+    scope_key        TEXT NOT NULL DEFAULT '',
+    origin_source_id TEXT REFERENCES sources(id) ON DELETE SET NULL,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
 );
 
 CREATE INDEX idx_memories_updated_at ON memories(updated_at, id);
 CREATE INDEX idx_memories_state ON memories(state);
 CREATE INDEX idx_memories_kind ON memories(kind);
-CREATE INDEX idx_memories_created_by_app ON memories(created_by_app);
 CREATE INDEX idx_memories_assertion_status ON memories(assertion_status);
-CREATE INDEX idx_memories_fact_group ON memories(fact_group_id);
-CREATE INDEX idx_memories_valid_range ON memories(valid_from, valid_to);
-CREATE INDEX idx_memories_event_time ON memories(event_time);
 CREATE INDEX idx_memories_scope_key ON memories(scope_key);
 
--- A revision stores a complete snapshot. Evidence is linked separately so one
--- version can own a complete, immutable evidence set without copying quotes
--- into the revision row.
 CREATE TABLE memory_revisions (
-    memory_id         TEXT NOT NULL,
-    version           INTEGER NOT NULL,
-    operation         TEXT NOT NULL,
-    reason            TEXT NOT NULL DEFAULT '',
-    kind              TEXT NOT NULL,
-    phase             TEXT NOT NULL DEFAULT 'unknown'
-                      CHECK (phase IN ('unknown', 'scheduled', 'in_progress', 'completed', 'cancelled', 'postponed')),
-    durability        TEXT NOT NULL DEFAULT 'unknown'
-                      CHECK (durability IN ('unknown', 'durable', 'episodic', 'temporary')),
-    title             TEXT NOT NULL DEFAULT '',
-    content           TEXT NOT NULL DEFAULT '',
-    state             TEXT NOT NULL CHECK (state IN ('active', 'archived', 'deleted')),
-    assertion_status  TEXT NOT NULL DEFAULT 'accepted'
-                      CHECK (assertion_status IN ('accepted', 'pending', 'rejected')),
-    observed_at       TEXT NOT NULL,
-    observed_at_basis TEXT NOT NULL DEFAULT 'recorded'
-                      CHECK (observed_at_basis IN ('explicit', 'inferred', 'unknown', 'recorded')),
-    event_time        TEXT,
-    event_time_basis  TEXT NOT NULL DEFAULT 'unknown'
-                      CHECK (event_time_basis IN ('explicit', 'inferred', 'unknown')),
-    event_time_precision TEXT NOT NULL DEFAULT 'unknown'
-                      CHECK (event_time_precision IN ('unknown', 'year', 'month', 'day', 'hour', 'minute', 'second')),
-    valid_from        TEXT,
-    valid_to          TEXT,
-    valid_from_basis  TEXT NOT NULL DEFAULT 'unknown'
-                      CHECK (valid_from_basis IN ('explicit', 'inferred', 'unknown')),
-    valid_to_basis    TEXT NOT NULL DEFAULT 'unknown'
-                      CHECK (valid_to_basis IN ('explicit', 'inferred', 'unknown')),
-    temporal_json     TEXT NOT NULL DEFAULT '{}',
-    procedure_json    TEXT NOT NULL DEFAULT '',
-    qualifiers_json   TEXT NOT NULL DEFAULT '',
-    fact_group_id     TEXT REFERENCES memory_fact_groups(id) ON DELETE SET NULL,
-    created_at        TEXT NOT NULL,
-    updated_at        TEXT NOT NULL,
-    created_by_app    TEXT NOT NULL DEFAULT '',
-    origin_source_id  TEXT,
-    scope_key         TEXT NOT NULL DEFAULT '',
-    topics_json       TEXT NOT NULL DEFAULT '[]',
-    raw_topics_json   TEXT NOT NULL DEFAULT '[]',
-    PRIMARY KEY (memory_id, version),
-    FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE,
-    CHECK ((valid_from IS NULL) = (valid_from_basis = 'unknown')),
-    CHECK ((valid_to IS NULL) = (valid_to_basis = 'unknown')),
-    CHECK ((event_time IS NULL) = (event_time_basis = 'unknown')),
-    CHECK (valid_from IS NULL OR valid_to IS NULL OR valid_from < valid_to)
-);
-
-CREATE TABLE evidence (
-    id               TEXT NOT NULL PRIMARY KEY,
-    source_id        TEXT NOT NULL,
-    message_id       TEXT NOT NULL DEFAULT '',
-    quote            TEXT,
-    location_present INTEGER NOT NULL DEFAULT 0 CHECK (location_present IN (0, 1)),
-    location_field   TEXT,
-    location_start   INTEGER,
-    location_end     INTEGER,
-    model_name       TEXT NOT NULL DEFAULT '',
-    redacted         INTEGER NOT NULL DEFAULT 0 CHECK (redacted IN (0, 1)),
-    redacted_at      TEXT,
+    memory_id        TEXT NOT NULL,
+    version          INTEGER NOT NULL CHECK (version >= 1),
+    operation        TEXT NOT NULL,
+    reason           TEXT NOT NULL DEFAULT '',
+    kind             TEXT NOT NULL,
+    title            TEXT NOT NULL DEFAULT '',
+    content          TEXT NOT NULL,
+    state            TEXT NOT NULL,
+    assertion_status TEXT NOT NULL,
+    scope_key        TEXT NOT NULL DEFAULT '',
+    origin_source_id TEXT,
     created_at       TEXT NOT NULL,
-    FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE RESTRICT
+    PRIMARY KEY (memory_id, version),
+    FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_evidence_source_id ON evidence(source_id);
+-- Observations supporting one exact canonical revision. A memory can be
+-- supported by several observations and later revisions keep their own set.
+CREATE TABLE memory_observation_refs (
+    memory_id      TEXT NOT NULL,
+    memory_version INTEGER NOT NULL,
+    observation_id TEXT NOT NULL REFERENCES observations(id) ON DELETE RESTRICT,
+    PRIMARY KEY (memory_id, memory_version, observation_id),
+    FOREIGN KEY (memory_id, memory_version)
+        REFERENCES memory_revisions(memory_id, version) ON DELETE CASCADE
+);
 
+CREATE INDEX idx_memory_observation_refs_observation
+    ON memory_observation_refs(observation_id);
+
+-- Interim revision-level evidence link used by the current materializer until
+-- observation refs are the only memory source. Evidence itself is always
+-- generated by code and observation_evidence remains the L0 link.
 CREATE TABLE revision_evidence (
     memory_id   TEXT NOT NULL,
     version     INTEGER NOT NULL,
@@ -172,18 +154,14 @@ CREATE TABLE ingest_jobs (
 	reason_code     TEXT NOT NULL DEFAULT '',
     next_attempt_at TEXT,
     error           TEXT NOT NULL DEFAULT '',
-    memory_ids      TEXT NOT NULL DEFAULT '[]',
-    conflict_ids    TEXT NOT NULL DEFAULT '[]',
-    pending_memory_ids TEXT NOT NULL DEFAULT '[]',
+    observation_ids TEXT NOT NULL DEFAULT '[]',
     warnings        TEXT NOT NULL DEFAULT '[]',
     quality_outcome TEXT NOT NULL DEFAULT '' CHECK (quality_outcome IN
                     ('', 'empty', 'complete', 'partial', 'unusable')),
     extraction_stats TEXT NOT NULL DEFAULT '{}',
-    retention_stats TEXT NOT NULL DEFAULT '{}',
     timings         TEXT NOT NULL DEFAULT '{}',
     model_usage     TEXT NOT NULL DEFAULT '{}',
     diagnostics     TEXT NOT NULL DEFAULT '[]',
-    convergence_diagnostics TEXT NOT NULL DEFAULT '[]',
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     started_at      TEXT,

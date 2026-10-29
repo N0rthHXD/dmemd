@@ -7,6 +7,7 @@ import (
 
 	"github.com/N0rthHXD/dmemd/internal/governance/task"
 	"github.com/N0rthHXD/dmemd/internal/ingest"
+	"github.com/N0rthHXD/dmemd/internal/jobs"
 )
 
 func TestClaimNextJobOrdersDueJobsAndCountsAttempts(t *testing.T) {
@@ -94,20 +95,16 @@ func TestUpdateJobPersistsTerminalResultAndError(t *testing.T) {
 	}
 
 	claimed.Status = ingest.JobSucceeded
-	claimed.MemoryIDs = []string{"memory-1", "memory-2"}
+	claimed.ObservationIDs = []string{"observation-1", "observation-2"}
 	claimed.Error = ""
 	claimed.QualityOutcome = ingest.QualityPartial
 	claimed.ExtractionStats = ingest.ExtractionStats{
-		RawCandidates: 3, ParsedCandidates: 3, NormalizedCandidates: 1, Normalizations: 2,
-		RepairAttempts: 1, RepairedCandidates: 1, RepairSucceeded: 1,
-		ExcludedCandidates: 1, IsolatedCandidates: 1, AcceptedCandidates: 2, MemoryWrites: 2,
+		Items: 3, Observations: 2, NormalizedObservations: 1, PendingObservations: 1,
+		InvalidItems: 1, DuplicateObservations: 1, Chunks: 2, ChunkFailures: 0,
 	}
 	claimed.Diagnostics = []ingest.ExtractionDiagnostic{{
-		CandidateID: "c2", Field: "evidence[0]", Code: "evidence_quote_ambiguous",
-		Stage: "validate", Disposition: "isolated",
-	}}
-	claimed.Convergence = []ingest.ConvergenceDiagnostic{{
-		CandidateID: "c1", GroupID: "group-1", Code: ingest.ConvergenceMissingUpdateEvidence,
+		Field: "span_ids", Code: "observation_evidence_unbound",
+		Stage: "validate", Disposition: "pending",
 	}}
 	claimed.FinishedAt = &base
 	claimed.UpdatedAt = base
@@ -121,13 +118,14 @@ func TestUpdateJobPersistsTerminalResultAndError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Status != ingest.JobSucceeded || len(loaded.MemoryIDs) != 2 || loaded.MemoryIDs[1] != "memory-2" {
+	if loaded.Status != ingest.JobSucceeded || len(loaded.ObservationIDs) != 2 ||
+		loaded.ObservationIDs[1] != "observation-2" {
 		t.Fatalf("loaded job = %+v", loaded)
 	}
-	if loaded.QualityOutcome != ingest.QualityPartial || loaded.ExtractionStats.RepairSucceeded != 1 ||
-		loaded.ExtractionStats.MemoryWrites != 2 || len(loaded.Diagnostics) != 1 ||
-		loaded.Diagnostics[0].CandidateID != "c2" || len(loaded.Convergence) != 1 ||
-		loaded.Convergence[0].Code != ingest.ConvergenceMissingUpdateEvidence {
+	if loaded.QualityOutcome != ingest.QualityPartial || loaded.ExtractionStats.Observations != 2 ||
+		loaded.ExtractionStats.PendingObservations != 1 ||
+		loaded.ExtractionStats.DuplicateObservations != 1 || len(loaded.Diagnostics) != 1 ||
+		loaded.Diagnostics[0].Field != "span_ids" {
 		t.Fatalf("loaded quality = %+v", loaded)
 	}
 	if loaded.FinishedAt == nil || !loaded.FinishedAt.Equal(base) {
@@ -169,8 +167,8 @@ func TestUpdateJobPersistsFailedErrorSummary(t *testing.T) {
 	if loaded.Status != ingest.JobFailed || loaded.Attempts != 3 || loaded.Error != "model timeout after 60s" {
 		t.Fatalf("failed job = %+v", loaded)
 	}
-	if loaded.MemoryIDs == nil || len(loaded.MemoryIDs) != 0 {
-		t.Fatalf("failed job memory_ids = %#v", loaded.MemoryIDs)
+	if loaded.ObservationIDs == nil || len(loaded.ObservationIDs) != 0 {
+		t.Fatalf("failed job observation_ids = %#v", loaded.ObservationIDs)
 	}
 	if claimed, ok, err := claimJob(store, ctx, base.Add(time.Hour)); err != nil || ok {
 		t.Fatalf("failed job reclaimed: %+v ok=%v err=%v", claimed, ok, err)
@@ -335,6 +333,53 @@ func claimJob(store *Store, ctx context.Context, now time.Time) (ingest.Job, boo
 	return claimed, ok, err
 }
 
+func TestScopedGovernanceRecoveryOnlyRequeuesOwnKinds(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := testTime(0)
+	observationKey := task.ObservationKey("obs-scoped-recovery")
+	aggregateKey := task.L1TargetKey("project:dmemd", "bucket")
+	for _, input := range []task.UpsertInput{
+		{Kind: task.KindGovernObservation, TargetKey: observationKey, InputHash: "govern", Now: now},
+		{Kind: task.KindAggregateL1, TargetKey: aggregateKey, InputHash: "aggregate", Now: now},
+	} {
+		if err := store.WithTx(ctx, func(ctx context.Context, tx *Tx) error {
+			_, _, err := tx.UpsertJob(ctx, input)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if err := store.WithTx(ctx, func(ctx context.Context, tx *Tx) error {
+			_, ok, err := tx.ClaimNextGovernanceJob(ctx, now)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				t.Fatal("expected a claimable task")
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.WithTx(ctx, func(ctx context.Context, tx *Tx) error {
+		_, err := tx.RequeueRunningGovernanceJobsForKinds(ctx, now, []task.Kind{task.KindAggregateL1})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	aggregate, err := store.GetGovernanceJobByTarget(ctx, task.KindAggregateL1, aggregateKey)
+	if err != nil || aggregate.Status != task.StatusQueued {
+		t.Fatalf("aggregate job = %+v err=%v", aggregate, err)
+	}
+	governance, err := store.GetGovernanceJobByTarget(ctx, task.KindGovernObservation, observationKey)
+	if err != nil || governance.Status != task.StatusRunning {
+		t.Fatalf("governance job = %+v err=%v", governance, err)
+	}
+}
+
 func TestGovernanceFairnessBypassesContinuousIngestOnlyWhenOld(t *testing.T) {
 	store := newTestStore(t)
 	sourceID := "source-fairness"
@@ -352,7 +397,7 @@ func TestGovernanceFairnessBypassesContinuousIngestOnlyWhenOld(t *testing.T) {
 		t.Helper()
 		if err := store.WithTx(ctx, func(ctx context.Context, tx *Tx) error {
 			_, _, err := tx.UpsertJob(ctx, task.UpsertInput{
-				Kind: task.KindClassify, TargetKey: target, InputHash: target,
+				Kind: task.KindClassifyObservation, TargetKey: target, InputHash: target,
 				NextAttemptAt: &base, Now: createdAt,
 			})
 			return err
@@ -378,5 +423,76 @@ func TestGovernanceFairnessBypassesContinuousIngestOnlyWhenOld(t *testing.T) {
 		return err
 	}); err != nil || !ok || claimed.TargetKey != "old" {
 		t.Fatalf("stale governance not claimed: job=%+v ok=%v err=%v", claimed, ok, err)
+	}
+}
+
+func TestListJobsAndGovernanceJobsAreBoundedAndFiltered(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	sourceID := "source-list-jobs"
+	seedSource(t, store, sourceID)
+	base := testTime(0)
+	insertTestJob(t, store, ingest.Job{
+		ID: "job-old", SourceID: sourceID, Status: ingest.JobSucceeded,
+		CreatedAt: base.Add(-time.Minute), UpdatedAt: base.Add(-time.Minute),
+	})
+	insertTestJob(t, store, ingest.Job{
+		ID: "job-new", SourceID: sourceID, Status: ingest.JobSucceeded,
+		CreatedAt: base, UpdatedAt: base,
+	})
+	items, err := store.ListJobs(ctx, ingest.JobSucceeded, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].ID != "job-new" {
+		t.Fatalf("jobs = %+v", items)
+	}
+
+	if err := store.WithTx(ctx, func(ctx context.Context, tx *Tx) error {
+		for _, input := range []task.UpsertInput{
+			{Kind: task.KindGovernObservation, TargetKey: task.ObservationKey("observation-1"), Now: base},
+			{Kind: task.KindAggregateL1, TargetKey: task.L1TargetKey("scope", "bucket-1"), Now: base.Add(time.Second)},
+		} {
+			if _, _, err := tx.UpsertJob(ctx, input); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := store.ListGovernanceJobs(ctx, jobs.TaskListOptions{
+		Kind: task.KindAggregateL1, Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || tasks[0].Kind != task.KindAggregateL1 {
+		t.Fatalf("tasks = %+v", tasks)
+	}
+	tasks, err = store.ListGovernanceJobs(ctx, jobs.TaskListOptions{Status: task.StatusQueued, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("queued tasks = %+v", tasks)
+	}
+	tasks, err = store.ListGovernanceJobs(ctx, jobs.TaskListOptions{
+		Category: jobs.CategoryAggregation, Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || tasks[0].Kind != task.KindAggregateL1 {
+		t.Fatalf("aggregation tasks = %+v", tasks)
+	}
+	tasks, err = store.ListGovernanceJobs(ctx, jobs.TaskListOptions{
+		Category: jobs.CategoryGovernance, Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || tasks[0].Kind != task.KindGovernObservation {
+		t.Fatalf("governance tasks = %+v", tasks)
 	}
 }

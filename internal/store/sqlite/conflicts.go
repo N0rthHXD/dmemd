@@ -10,8 +10,7 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/memory"
 )
 
-const conflictColumns = `id, COALESCE(fact_group_id, ''), status, reason_code,
-	resolution, revision, created_at, updated_at`
+const conflictColumns = `id, status, reason_code, resolution, revision, created_at, updated_at`
 
 // GetConflict reads one conflict with members and immutable audit events.
 func (s *Store) GetConflict(ctx context.Context, id string) (memory.Conflict, error) {
@@ -25,6 +24,33 @@ func (t *Tx) GetConflict(ctx context.Context, id string) (memory.Conflict, error
 // ListConflicts returns the management list without audit events.
 func (s *Store) ListConflicts(ctx context.Context, options memory.ConflictListOptions) ([]memory.Conflict, error) {
 	return listConflicts(ctx, s.reader, options)
+}
+
+// ListConflictIDsForMemory returns every open conflict that names the memory.
+// It is a bounded reference list used by the canonical detail view; resolution
+// still requires the explicit management endpoints.
+func (s *Store) ListConflictIDsForMemory(ctx context.Context, memoryID string) ([]string, error) {
+	rows, err := s.reader.QueryContext(ctx, `SELECT DISTINCT c.id
+		FROM memory_conflicts c
+		JOIN memory_conflict_members m ON m.conflict_id = c.id
+		WHERE m.memory_id = ? AND c.status = ?
+		ORDER BY c.updated_at DESC, c.id ASC`, memoryID, string(memory.ConflictOpen))
+	if err != nil {
+		return nil, fmt.Errorf("读取记忆 %s 的冲突引用: %w", memoryID, err)
+	}
+	defer rows.Close()
+	result := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("读取记忆 %s 的冲突引用: %w", memoryID, err)
+		}
+		result = append(result, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("读取记忆 %s 的冲突引用: %w", memoryID, err)
+	}
+	return result, nil
 }
 
 type conflictQueryer interface {
@@ -98,7 +124,7 @@ func listConflicts(ctx context.Context, q conflictQueryer, options memory.Confli
 func scanConflict(row rowScanner) (memory.Conflict, error) {
 	var conflict memory.Conflict
 	var status, reason, createdAt, updatedAt string
-	if err := row.Scan(&conflict.ID, &conflict.FactGroupID, &status, &reason,
+	if err := row.Scan(&conflict.ID, &status, &reason,
 		&conflict.Resolution, &conflict.Revision, &createdAt, &updatedAt); err != nil {
 		return memory.Conflict{}, err
 	}
@@ -170,9 +196,9 @@ func listConflictEvents(ctx context.Context, q conflictQueryer, conflictID strin
 // InsertConflict writes a conflict and its initial members.
 func (t *Tx) InsertConflict(ctx context.Context, conflict memory.Conflict) error {
 	_, err := t.tx.ExecContext(ctx, `INSERT INTO memory_conflicts(
-		id, fact_group_id, status, reason_code, resolution, revision, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		conflict.ID, nullableString(conflict.FactGroupID), string(conflict.Status),
+		id, status, reason_code, resolution, revision, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		conflict.ID, string(conflict.Status),
 		string(conflict.ReasonCode), conflict.Resolution, conflict.Revision,
 		formatTime(conflict.CreatedAt), formatTime(conflict.UpdatedAt))
 	if err != nil {
@@ -192,10 +218,9 @@ func (t *Tx) InsertConflict(ctx context.Context, conflict memory.Conflict) error
 // UpdateConflict persists status, resolution text and revision.
 func (t *Tx) UpdateConflict(ctx context.Context, conflict memory.Conflict) error {
 	result, err := t.tx.ExecContext(ctx, `UPDATE memory_conflicts SET
-		fact_group_id = ?, status = ?, reason_code = ?, resolution = ?, revision = ?, updated_at = ?
+		status = ?, reason_code = ?, resolution = ?, revision = ?, updated_at = ?
 		WHERE id = ?`,
-		nullableString(conflict.FactGroupID), string(conflict.Status),
-		string(conflict.ReasonCode), conflict.Resolution, conflict.Revision,
+		string(conflict.Status), string(conflict.ReasonCode), conflict.Resolution, conflict.Revision,
 		formatTime(conflict.UpdatedAt), conflict.ID)
 	if err != nil {
 		return fmt.Errorf("更新冲突 %s: %w", conflict.ID, err)
@@ -247,6 +272,12 @@ func (t *Tx) InsertConflictEvent(ctx context.Context, event memory.ConflictEvent
 // the supplied memories. It is used by retrieval conflict discovery.
 func (t *Tx) ListOpenConflictsForMemories(ctx context.Context, memoryIDs []string) ([]memory.Conflict, error) {
 	return listOpenConflictsForMemories(ctx, t.tx, memoryIDs)
+}
+
+// ListOpenConflictsForMemories is the read-pool variant used by governance
+// input selection before a model call.
+func (s *Store) ListOpenConflictsForMemories(ctx context.Context, memoryIDs []string) ([]memory.Conflict, error) {
+	return listOpenConflictsForMemories(ctx, s.reader, memoryIDs)
 }
 
 func listOpenConflictsForMemories(ctx context.Context, q conflictQueryer, memoryIDs []string) ([]memory.Conflict, error) {

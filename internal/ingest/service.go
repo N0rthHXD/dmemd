@@ -69,13 +69,13 @@ func (s *Service) Submit(ctx context.Context, submission Submission) (Receipt, e
 		CreatedAt:  now,
 	}
 	job := Job{
-		ID:        idgen.NewUUID(),
-		SourceID:  src.ID,
-		Status:    JobQueued,
-		Attempts:  0,
-		MemoryIDs: []string{},
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:             idgen.NewUUID(),
+		SourceID:       src.ID,
+		Status:         JobQueued,
+		Attempts:       0,
+		ObservationIDs: []string{},
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 	if err := s.store.WithTx(ctx, func(ctx context.Context, tx Tx) error {
 		if err := tx.InsertSource(ctx, src); err != nil {

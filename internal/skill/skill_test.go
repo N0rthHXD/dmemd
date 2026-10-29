@@ -61,7 +61,7 @@ func TestServiceServesOnlyActiveCurrentByDefault(t *testing.T) {
 		Payload: []byte(`{"description":"修改后的验证"}`),
 	}
 	reader := &fakeReader{detail: artifact.Detail{
-		Artifact: artifact.Artifact{
+		DerivedMemory: artifact.DerivedMemory{
 			ID: "skill-1", Kind: artifact.KindSkill, State: artifact.StateStale, CurrentVersion: 2,
 		},
 		Revision: revision,
@@ -79,7 +79,7 @@ func TestServiceServesOnlyActiveCurrentByDefault(t *testing.T) {
 		t.Fatalf("content = %+v", content)
 	}
 
-	reader.detail.Artifact.State = artifact.StateActive
+	reader.detail.DerivedMemory.State = artifact.StateActive
 	content, err = service.Get(context.Background(), "skill-1", 0)
 	if err != nil || content.State != "active" {
 		t.Fatalf("active content = %+v err=%v", content, err)

@@ -9,7 +9,9 @@ import (
 	"github.com/N0rthHXD/dmemd/internal/embedding"
 	"github.com/N0rthHXD/dmemd/internal/governance"
 	"github.com/N0rthHXD/dmemd/internal/ingest"
+	"github.com/N0rthHXD/dmemd/internal/jobs"
 	"github.com/N0rthHXD/dmemd/internal/memory"
+	"github.com/N0rthHXD/dmemd/internal/observation"
 	"github.com/N0rthHXD/dmemd/internal/retrieval"
 	"github.com/N0rthHXD/dmemd/internal/skill"
 	"github.com/N0rthHXD/dmemd/internal/source"
@@ -18,22 +20,26 @@ import (
 // Services is the complete business capability set used by the local HTTP API.
 // A nil service is treated as unavailable rather than silently succeeding.
 type Services struct {
-	Ingest      ingest.IngestService
-	Memories    memory.MemoryService
-	Conflicts   memory.ConflictService
-	Sources     source.SourceService
-	Search      retrieval.RecallService
-	Artifacts   artifact.ServiceAPI
-	Experiences governance.ExperienceService
-	Skills      skill.ContentService
-	Forget      governance.ForgetService
-	Embedding   embedding.DiagnosticAPI
+	Ingest       ingest.IngestService
+	Observations observation.ServiceAPI
+	Memories     memory.MemoryService
+	Conflicts    memory.ConflictService
+	Relations    governance.RelationService
+	Sources      source.SourceService
+	Search       retrieval.RecallService
+	Derived      artifact.ServiceAPI
+	Experiences  governance.ExperienceService
+	Skills       skill.ContentService
+	Forget       governance.ForgetService
+	Jobs         jobs.ServiceAPI
+	Embedding    embedding.DiagnosticAPI
 }
 
 func (s Services) configured() bool {
-	return s.Ingest != nil || s.Memories != nil || s.Conflicts != nil || s.Sources != nil ||
-		s.Search != nil || s.Artifacts != nil || s.Experiences != nil || s.Skills != nil ||
-		s.Forget != nil || s.Embedding != nil
+	return s.Ingest != nil || s.Observations != nil || s.Memories != nil || s.Conflicts != nil ||
+		s.Relations != nil || s.Sources != nil || s.Search != nil || s.Derived != nil ||
+		s.Experiences != nil || s.Skills != nil || s.Forget != nil || s.Jobs != nil ||
+		s.Embedding != nil
 }
 
 // Options configures the HTTP transport. Ready checks database readiness before
@@ -80,6 +86,10 @@ func (h *handler) businessRoutes() http.Handler {
 	mux.HandleFunc("POST /v1/experiences", h.createExperience)
 	mux.HandleFunc("POST /v1/experiences/{id}/retract", h.retractExperience)
 	mux.HandleFunc("POST /v1/forget", h.forget)
+	mux.HandleFunc("GET /v1/observations", h.listObservations)
+	mux.HandleFunc("GET /v1/observations/{id}", h.getObservation)
+	mux.HandleFunc("GET /v1/observations/{id}/evidence", h.getObservationEvidence)
+	mux.HandleFunc("GET /v1/observations/{id}/relations", h.getObservationRelations)
 	mux.HandleFunc("GET /v1/memories", h.listMemories)
 	mux.HandleFunc("POST /v1/memories/recall", h.recallMemories)
 	mux.HandleFunc("GET /v1/artifacts", h.listArtifacts)
@@ -100,6 +110,12 @@ func (h *handler) businessRoutes() http.Handler {
 	mux.HandleFunc("POST /v1/memory-conflicts/{id}/resolve", h.resolveConflict)
 	mux.HandleFunc("GET /v1/sources/{id}", h.getSource)
 	mux.HandleFunc("DELETE /v1/sources/{id}", h.redactSource)
+	mux.HandleFunc("GET /v1/jobs", h.listJobs)
+	mux.HandleFunc("GET /v1/jobs/{id}", h.getJob)
+	mux.HandleFunc("GET /v1/governance-jobs", h.listGovernanceJobs)
+	mux.HandleFunc("GET /v1/governance-jobs/{id}", h.getGovernanceJob)
+	// The historical path is kept as an alias for existing local scripts; it
+	// resolves through the same Jobs service and never reports another stage.
 	mux.HandleFunc("GET /v1/ingest-jobs/{id}", h.getJob)
 	mux.HandleFunc("GET /v1/embedding/status", h.embeddingStatus)
 	mux.HandleFunc("POST /v1/embedding/probe", h.embeddingProbe)
@@ -140,6 +156,30 @@ func (h *handler) requireMemories(w http.ResponseWriter) (memory.MemoryService, 
 	return h.services.Memories, true
 }
 
+func (h *handler) requireObservations(w http.ResponseWriter) (observation.ServiceAPI, bool) {
+	if h.services.Observations == nil {
+		h.writeUnavailable(w)
+		return nil, false
+	}
+	return h.services.Observations, true
+}
+
+func (h *handler) requireRelations(w http.ResponseWriter) (governance.RelationService, bool) {
+	if h.services.Relations == nil {
+		h.writeUnavailable(w)
+		return nil, false
+	}
+	return h.services.Relations, true
+}
+
+func (h *handler) requireJobs(w http.ResponseWriter) (jobs.ServiceAPI, bool) {
+	if h.services.Jobs == nil {
+		h.writeUnavailable(w)
+		return nil, false
+	}
+	return h.services.Jobs, true
+}
+
 func (h *handler) requireConflicts(w http.ResponseWriter) (memory.ConflictService, bool) {
 	if h.services.Conflicts == nil {
 		h.writeUnavailable(w)
@@ -165,11 +205,11 @@ func (h *handler) requireRecall(w http.ResponseWriter) (retrieval.RecallService,
 }
 
 func (h *handler) requireArtifacts(w http.ResponseWriter) (artifact.ServiceAPI, bool) {
-	if h.services.Artifacts == nil {
+	if h.services.Derived == nil {
 		h.writeUnavailable(w)
 		return nil, false
 	}
-	return h.services.Artifacts, true
+	return h.services.Derived, true
 }
 
 func (h *handler) requireExperiences(w http.ResponseWriter) (governance.ExperienceService, bool) {

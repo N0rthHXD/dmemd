@@ -7,7 +7,7 @@ import (
 )
 
 // syncMemoryChanged invalidates direct derived dependencies and registers the
-// affected summary/profile targets in the caller's transaction. Evidence-only
+// affected derived targets in the caller's transaction. Evidence-only
 // revisions pass semantic=false and leave usable derived text untouched.
 func (s *Service) syncMemoryChanged(ctx context.Context, tx Tx, old *Memory, next *Memory, semantic bool) error {
 	if s.artifacts == nil || !semantic {
@@ -86,7 +86,6 @@ func memorySnapshot(item Memory) artifact.MemorySnapshot {
 		Version:  item.Version,
 		Kind:     string(item.Kind),
 		ScopeKey: item.ScopeKey,
-		Topics:   CanonicalTopics(item.Topics),
 		State:    string(item.State),
 	}
 }

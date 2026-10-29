@@ -21,17 +21,17 @@ type ClassificationWriter interface {
 	Classify(ctx context.Context, tx memory.Tx, input memory.ClassificationInput) (memory.Memory, error)
 }
 
-// ClassifyHandler normalizes existing extraction labels and, when they are
-// missing, asks the classification model for labels; the writer applies taxonomy.
+// ClassifyHandler is retained as a task-completion boundary while topics move
+// to an independent classification result. It never writes labels into the
+// canonical memory.
 type ClassifyHandler struct {
-	reader   MemoryReader
-	store    Store
-	writer   ClassificationWriter
-	suggest  TopicSuggester
-	limiter  *Limiter
-	now      func() time.Time
-	timeout  time.Duration
-	maxRunes int
+	reader  MemoryReader
+	store   Store
+	writer  ClassificationWriter
+	suggest TopicSuggester
+	limiter *Limiter
+	now     func() time.Time
+	timeout time.Duration
 }
 
 // ClassifyOption customizes the classify handler.
@@ -55,20 +55,12 @@ func WithClassifyTimeout(timeout time.Duration) ClassifyOption {
 	}
 }
 
-// NewClassifyHandler assembles the classify processor. A nil suggester keeps
-// deterministic classification only; missing topics remain empty and the task
-// still succeeds, so reconcile does not loop on the same input.
+// NewClassifyHandler assembles the classify processor.
 func NewClassifyHandler(reader MemoryReader, store Store, writer ClassificationWriter,
 	suggester TopicSuggester, limiter *Limiter, options ...ClassifyOption) *ClassifyHandler {
 	handler := &ClassifyHandler{
-		reader:   reader,
-		store:    store,
-		writer:   writer,
-		suggest:  suggester,
-		limiter:  limiter,
-		now:      time.Now,
-		timeout:  time.Minute,
-		maxRunes: 8000,
+		reader: reader, store: store, writer: writer,
+		suggest: suggester, limiter: limiter, now: time.Now, timeout: time.Minute,
 	}
 	for _, option := range options {
 		option(handler)
@@ -76,12 +68,14 @@ func NewClassifyHandler(reader MemoryReader, store Store, writer ClassificationW
 	return handler
 }
 
-// Process implements Handler.
+// Process implements Handler. Classification output is independent of the
+// canonical memory, so an absent classification pipeline completes the task
+// rather than mutating a memory body or scope.
 func (h *ClassifyHandler) Process(ctx context.Context, job task.Job) error {
-	if job.Kind != task.KindClassify {
+	if job.Kind != task.KindClassifyObservation {
 		return fmt.Errorf("classify handler received kind %s", job.Kind)
 	}
-	if h.reader == nil || h.store == nil || h.writer == nil {
+	if h.reader == nil || h.store == nil {
 		return errors.New("governance: classify handler dependencies not configured")
 	}
 	current, err := h.reader.GetMemory(ctx, job.TargetKey)
@@ -94,54 +88,9 @@ func (h *ClassifyHandler) Process(ctx context.Context, job task.Job) error {
 	if current.State == memory.StateDeleted {
 		return CancelMissingTask(ctx, h.store, job, h.now().UTC())
 	}
-
-	topics := current.RawTopics
-	if topics == nil {
-		topics = current.Topics
-	}
-	if len(topics) == 0 && h.suggest != nil {
-		allowed, next := h.limiter.Acquire(h.now().UTC())
-		if !allowed {
-			return &RetryError{At: next, Code: task.ErrorRateLimited, Reason: task.WaitRateLimited}
-		}
-		callCtx := ctx
-		cancel := func() {}
-		if h.timeout > 0 {
-			callCtx, cancel = context.WithTimeout(ctx, h.timeout)
-		}
-		started := time.Now()
-		suggested, suggestErr := h.suggest(callCtx, current.Title, truncateRunes(current.Content, h.maxRunes), current.ScopeKey)
-		cancel()
-		h.limiter.Record("classify", 1, len(current.Title)+len(current.Content), started, suggestErr)
-		if suggestErr != nil {
-			return suggestErr
-		}
-		topics = suggested
-	}
-
 	now := h.now().UTC()
-	err = h.store.WithTx(ctx, func(ctx context.Context, tx Tx) error {
+	return h.store.WithTx(ctx, func(ctx context.Context, tx Tx) error {
 		if err := checkedJob(ctx, tx, job); err != nil {
-			return err
-		}
-		latest, err := tx.GetMemory(ctx, job.TargetKey)
-		if errors.Is(err, memory.ErrNotFound) {
-			return ErrRevisionChanged
-		}
-		if err != nil {
-			return err
-		}
-		if latest.State == memory.StateDeleted {
-			return ErrRevisionChanged
-		}
-		if latest.Version != current.Version {
-			return ErrRevisionChanged
-		}
-		if _, err := h.writer.Classify(ctx, tx, memory.ClassificationInput{
-			MemoryID: latest.ID,
-			ScopeKey: latest.ScopeKey,
-			Topics:   topics,
-		}); err != nil {
 			return err
 		}
 		ok, err := tx.FinishJob(ctx, job.ID, job.Revision, now)
@@ -153,10 +102,6 @@ func (h *ClassifyHandler) Process(ctx context.Context, job task.Job) error {
 		}
 		return nil
 	})
-	if err != nil {
-		return err
-	}
-	return nil
 }
 
 func truncateRunes(value string, limit int) string {

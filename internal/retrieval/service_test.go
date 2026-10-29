@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/N0rthHXD/dmemd/internal/artifact"
@@ -83,22 +82,21 @@ func TestEveryTextQueryUsesSameFilteredAnyTerms(t *testing.T) {
 			if _, err := service.Recall(ctx, RecallRequest{Query: query, Mode: mode}); err != nil {
 				t.Fatal(err)
 			}
-			if len(backend.queries) != 2 {
-				t.Fatalf("atomic and conflict query count = %d, want 2", len(backend.queries))
-			}
-			if _, err := service.RelatedContext(ctx, "", query, 10); err != nil {
-				t.Fatal(err)
-			}
-			if len(backend.queries) != 3 {
-				t.Fatalf("related context did not query backend: %+v", backend.queries)
+			if len(backend.queries) < 1 {
+				t.Fatalf("memory query count = %d", len(backend.queries))
 			}
 			for _, plan := range backend.queries {
 				if !reflect.DeepEqual(GroupTexts(plan.Groups), wantTerms) || plan.Expression != wantExpression {
 					t.Fatalf("keyword query plan = %+v", plan)
 				}
 			}
-			if len(artifacts.queries) != 3 {
-				t.Fatalf("derived query count = %d, want summary, experience and skill", len(artifacts.queries))
+			if len(artifacts.queries) < 4 {
+				t.Fatalf("derived query count = %d, want l1-l4", len(artifacts.queries))
+			}
+			for _, plan := range artifacts.queries {
+				if len(plan.Layers) != 1 || !plan.Layers[0].Known() {
+					t.Fatalf("derived query layer = %+v", plan)
+				}
 			}
 			for _, plan := range artifacts.queries {
 				if plan.Expression != wantExpression {
@@ -127,27 +125,14 @@ func TestQueriesWithoutEffectiveTermsNeverAccessBackends(t *testing.T) {
 					t.Fatalf("empty search = %+v, %v", result, err)
 				}
 				recall, err := service.Recall(ctx, RecallRequest{Query: query, Mode: mode})
-				if err != nil || recall.Memories == nil || recall.Summaries == nil || recall.Experiences == nil || recall.Skills == nil ||
-					len(recall.Memories)+len(recall.Summaries)+len(recall.Experiences)+len(recall.Skills)+len(recall.Conflicts)+len(recall.Warnings) != 0 {
+				if err != nil || recall.Observations == nil || recall.Memories == nil ||
+					recall.L1 == nil || recall.L2 == nil || recall.L3 == nil || recall.L4 == nil ||
+					len(recall.Observations)+len(recall.Memories)+len(recall.L1)+len(recall.L2)+
+						len(recall.L3)+len(recall.L4)+len(recall.Conflicts)+len(recall.Warnings) != 0 {
 					t.Fatalf("empty recall = %+v, %v", recall, err)
-				}
-				related, err := service.RelatedContext(ctx, "", query, 10)
-				if err != nil || related.Memories == nil || len(related.Memories) != 0 || !related.Complete {
-					t.Fatalf("empty related context = %+v, %v", related, err)
 				}
 			})
 		}
-	}
-}
-
-func TestRelatedQueryFiltersBeforeApplyingTermLimit(t *testing.T) {
-	backend := &queryRecordingBackend{}
-	service := NewService(backend, nil)
-	if _, err := service.RelatedContext(context.Background(), "", englishQueryStopwords+" 过敏 "+strings.Repeat("过敏 ", 40), 10); err != nil {
-		t.Fatal(err)
-	}
-	if len(backend.queries) != 1 || !reflect.DeepEqual(GroupTexts(backend.queries[0].Groups), []string{"过敏"}) {
-		t.Fatalf("stopwords or duplicates exhausted the term budget: %+v", backend.queries)
 	}
 }
 

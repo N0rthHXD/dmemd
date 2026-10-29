@@ -48,20 +48,17 @@ func (s stubArtifacts) ListTargets(ctx context.Context, query artifact.TargetQue
 func TestArtifactReadRoutesReturnCurrentAndHistoricalRevisions(t *testing.T) {
 	created := time.Date(2026, 10, 22, 8, 0, 0, 0, time.UTC)
 	detail := artifact.Detail{
-		Artifact: artifact.Artifact{
+		DerivedMemory: artifact.DerivedMemory{
 			ID: "artifact-1", Kind: artifact.KindTopicSummary, TargetKey: "summary:x:y",
 			ScopeKey: "project:dmemd", Topic: "go", CurrentVersion: 2,
 			State: artifact.StateActive, UpdatedAt: created,
 		},
 		Revision: &artifact.Revision{
 			ArtifactID: "artifact-1", Version: 2, Title: "摘要", Content: "内容",
-			MemoryRefs:      []artifact.MemoryRef{{MemoryID: "memory-1", Version: 3}},
-			TaxonomyVersion: "taxonomy-v1", GeneratorVersion: "generator-v2", RunID: "job:1",
-			Provenance: json.RawMessage(`{"memory_refs":[{"memory_id":"memory-1","version":3}]}`),
-			CreatedAt:  created,
+			CreatedAt: created,
 		},
 	}
-	services := Services{Artifacts: stubArtifacts{
+	services := Services{Derived: stubArtifacts{
 		get: func(_ context.Context, id string) (artifact.Detail, error) {
 			if id != "artifact-1" {
 				t.Fatalf("id = %q", id)
@@ -73,7 +70,7 @@ func TestArtifactReadRoutesReturnCurrentAndHistoricalRevisions(t *testing.T) {
 				t.Fatalf("history = %q@%d", id, version)
 			}
 			history := detail
-			history.Revision = &artifact.Revision{ArtifactID: id, Version: 1, Content: "旧内容", MemoryRefs: []artifact.MemoryRef{}}
+			history.Revision = &artifact.Revision{ArtifactID: id, Version: 1, Content: "旧内容"}
 			return history, nil
 		},
 	}}
@@ -85,12 +82,8 @@ func TestArtifactReadRoutesReturnCurrentAndHistoricalRevisions(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Artifact.State != "active" || decoded.Revision == nil || decoded.Revision.Version != 2 ||
-		len(decoded.Revision.MemoryRefs) != 1 || decoded.Revision.MemoryRefs[0].Version != 3 {
+	if decoded.Artifact.State != "active" || decoded.Revision == nil || decoded.Revision.Version != 2 {
 		t.Fatalf("current detail = %+v", decoded)
-	}
-	if decoded.Revision.TaxonomyVersion != "taxonomy-v1" || decoded.Revision.GeneratorVersion != "generator-v2" || decoded.Revision.RunID != "job:1" || len(decoded.Revision.Provenance) == 0 {
-		t.Fatalf("audit metadata = %+v", decoded.Revision)
 	}
 
 	response = serve(t, services, nil, httptest.NewRequest(http.MethodGet, "/v1/artifacts/artifact-1/history/1", nil))
@@ -98,7 +91,7 @@ func TestArtifactReadRoutesReturnCurrentAndHistoricalRevisions(t *testing.T) {
 		t.Fatalf("history = %d %q", response.Code, response.Body.String())
 	}
 
-	missing := Services{Artifacts: stubArtifacts{
+	missing := Services{Derived: stubArtifacts{
 		get: func(context.Context, string) (artifact.Detail, error) {
 			return artifact.Detail{}, artifact.ErrNotFound
 		},
@@ -117,8 +110,8 @@ func TestArtifactReadRoutesReturnCurrentAndHistoricalRevisions(t *testing.T) {
 }
 
 func TestArtifactDisabledDiagnosticWithoutRevision(t *testing.T) {
-	services := Services{Artifacts: stubArtifacts{get: func(context.Context, string) (artifact.Detail, error) {
-		return artifact.Detail{Artifact: artifact.Artifact{ID: "skill-1", Kind: artifact.KindSkill, State: artifact.StateDisabled, ReasonCode: "no_procedure_input"}}, nil
+	services := Services{Derived: stubArtifacts{get: func(context.Context, string) (artifact.Detail, error) {
+		return artifact.Detail{DerivedMemory: artifact.DerivedMemory{ID: "skill-1", Kind: artifact.KindSkill, State: artifact.StateDisabled, ReasonCode: "no_procedure_input"}}, nil
 	}}}
 	response := serve(t, services, nil, httptest.NewRequest(http.MethodGet, "/v1/artifacts/skill-1", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"reason_code":"no_procedure_input"`) {
@@ -129,13 +122,13 @@ func TestArtifactDisabledDiagnosticWithoutRevision(t *testing.T) {
 func TestArtifactListAndTargetRoutesExposeLifecycleState(t *testing.T) {
 	updated := time.Date(2026, 10, 22, 8, 0, 0, 0, time.UTC)
 	evaluated := updated.Add(time.Minute)
-	services := Services{Artifacts: stubArtifacts{
+	services := Services{Derived: stubArtifacts{
 		list: func(_ context.Context, query artifact.ListQuery) (artifact.ListPage, error) {
 			if query.ScopeKey != "project:dmemd" || query.Kind != artifact.KindScopeSummary ||
 				query.State != artifact.StateActive || query.Limit != 10 {
 				t.Fatalf("list query = %+v", query)
 			}
-			return artifact.ListPage{Items: []artifact.Artifact{{
+			return artifact.ListPage{Items: []artifact.DerivedMemory{{
 				ID: "scope-1", Kind: artifact.KindScopeSummary,
 				TargetKey: "scope_summary:x", ScopeKey: "project:dmemd",
 				CurrentVersion: 1, State: artifact.StateActive, UpdatedAt: updated,

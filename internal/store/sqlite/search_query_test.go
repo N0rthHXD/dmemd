@@ -20,27 +20,27 @@ func TestSearchChineseTermsFiltersRankingAndLimits(t *testing.T) {
 	late := testTime(10 * time.Minute)
 	titleMatch := seedIndexedMemory(t, store, sourceID, memory.Memory{
 		Title: "回答", Content: "无关正文", Kind: memory.KindPreference,
-		CreatedByApp: "app-title", UpdatedAt: late,
+		UpdatedAt: late,
 	})
 	contentMatch := seedIndexedMemory(t, store, sourceID, memory.Memory{
 		Title: "无关标题", Content: "回答内容", Kind: memory.KindFact,
-		CreatedByApp: "app-content", UpdatedAt: late.Add(time.Minute),
+		UpdatedAt: late.Add(time.Minute),
 	})
 	archived := seedIndexedMemory(t, store, sourceID, memory.Memory{
 		Title: "回答归档", Content: "归档回答", Kind: memory.KindPreference,
-		State: memory.StateArchived, CreatedByApp: "app-title", UpdatedAt: late.Add(2 * time.Minute),
+		State: memory.StateArchived, UpdatedAt: late.Add(2 * time.Minute),
 	})
 	deleted := seedIndexedMemory(t, store, sourceID, memory.Memory{
 		Title: "回答删除", Content: "删除回答", Kind: memory.KindFact,
-		State: memory.StateDeleted, CreatedByApp: "app-title", UpdatedAt: late.Add(3 * time.Minute),
+		State: memory.StateDeleted, UpdatedAt: late.Add(3 * time.Minute),
 	})
 	other := seedIndexedMemory(t, store, sourceID, memory.Memory{
 		Title: "记忆", Content: "中文记忆检索", Kind: memory.KindFact,
-		CreatedByApp: "app-other", UpdatedAt: early,
+		UpdatedAt: early,
 	})
 	scattered := seedIndexedMemory(t, store, sourceID, memory.Memory{
 		Title: "水果", Content: "苹果内容留白香蕉", Kind: memory.KindFact,
-		CreatedByApp: "app-other", UpdatedAt: early,
+		UpdatedAt: early,
 	})
 
 	expression, err := retrieval.Compile(retrieval.Groups("回答"))
@@ -68,11 +68,6 @@ func TestSearchChineseTermsFiltersRankingAndLimits(t *testing.T) {
 		States: []memory.State{memory.StateActive}, Kinds: []memory.Kind{memory.KindPreference},
 	}, 20); len(hits) != 1 || hits[0].MemoryID != titleMatch.ID {
 		t.Fatalf("kind filter hits = %+v", hits)
-	}
-	if hits := storeHits(t, store, expression, retrieval.Filters{
-		States: []memory.State{memory.StateActive}, CreatedByApp: "app-content",
-	}, 20); len(hits) != 1 || hits[0].MemoryID != contentMatch.ID {
-		t.Fatalf("app filter hits = %+v", hits)
 	}
 	after := late.Add(30 * time.Second)
 	if hits := storeHits(t, store, expression, retrieval.Filters{
@@ -257,9 +252,6 @@ func seedIndexedMemory(t *testing.T, store *Store, sourceID string, item memory.
 	}
 	if item.UpdatedAt.IsZero() {
 		item.UpdatedAt = item.CreatedAt
-	}
-	if item.ObservedAt.IsZero() {
-		item.ObservedAt = item.CreatedAt
 	}
 	if item.OriginSourceID == "" {
 		item.OriginSourceID = sourceID

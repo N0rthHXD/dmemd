@@ -157,62 +157,15 @@ func NormalizeQuery(text string) string {
 }
 
 // DocumentText renders the fixed embedding input template. FTS tokenization
-// must never be sent to the model. Structured procedure and qualifier fields
-// are part of the input contract so a revision changing them also changes the
-// content hash.
+// must never be sent to the model. The canonical view contains only the fields
+// that are part of its identity and current content.
 func DocumentText(item memory.Memory) string {
 	parts := []string{
 		"kind: " + string(item.Kind),
 		"title: " + NormalizeDocument(item.Title),
 		"content: " + NormalizeDocument(item.Content),
 	}
-	if item.Procedure != nil {
-		procedure := []string{}
-		if item.Procedure.Goal != "" {
-			procedure = append(procedure, "goal="+NormalizeDocument(item.Procedure.Goal))
-		}
-		procedure = appendList(procedure, "steps", item.Procedure.Steps)
-		procedure = appendList(procedure, "preconditions", item.Procedure.Preconditions)
-		procedure = appendList(procedure, "completion_conditions", item.Procedure.CompletionConditions)
-		procedure = appendList(procedure, "failure_branches", item.Procedure.FailureBranches)
-		parts = append(parts, "procedure: "+strings.Join(procedure, "; "))
-	}
-	if item.Qualifiers != nil {
-		qualifiers := []string{}
-		if len(item.Qualifiers.Entities) > 0 {
-			qualifiers = append(qualifiers, "entities="+strings.Join(item.Qualifiers.Entities, "|"))
-		}
-		if item.Qualifiers.Quantity != nil {
-			qualifiers = append(qualifiers, "quantity="+item.Qualifiers.Quantity.Value+" "+item.Qualifiers.Quantity.Unit)
-		}
-		if len(item.Qualifiers.Conditions) > 0 {
-			qualifiers = append(qualifiers, "conditions="+strings.Join(item.Qualifiers.Conditions, "|"))
-		}
-		if item.Qualifiers.Polarity != "" {
-			qualifiers = append(qualifiers, "polarity="+string(item.Qualifiers.Polarity))
-		}
-		if item.Qualifiers.Certainty != "" {
-			qualifiers = append(qualifiers, "certainty="+string(item.Qualifiers.Certainty))
-		}
-		if item.Qualifiers.Attribution != "" {
-			qualifiers = append(qualifiers, "attribution="+NormalizeDocument(item.Qualifiers.Attribution))
-		}
-		if len(qualifiers) > 0 {
-			parts = append(parts, "qualifiers: "+strings.Join(qualifiers, "; "))
-		}
-	}
 	return strings.Join(parts, "\n")
-}
-
-func appendList(target []string, name string, values []string) []string {
-	if len(values) == 0 {
-		return target
-	}
-	normalized := make([]string, 0, len(values))
-	for _, value := range values {
-		normalized = append(normalized, NormalizeDocument(value))
-	}
-	return append(target, name+"="+strings.Join(normalized, "|"))
 }
 
 // DocumentHash hashes the input contract version and the exact document bytes.

@@ -14,14 +14,13 @@ import (
 
 func TestDocumentTemplateAndHash(t *testing.T) {
 	item := memory.Memory{
-		ID:         "m1",
-		Kind:       memory.KindPreference,
-		Title:      "  饮食偏好 ",
-		Content:    " 用户偏好清淡饮食。 ",
-		State:      memory.StateActive,
-		Version:    3,
-		ObservedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		UpdatedAt:  time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+		ID:        "m1",
+		Kind:      memory.KindPreference,
+		Title:     "  饮食偏好 ",
+		Content:   " 用户偏好清淡饮食。 ",
+		State:     memory.StateActive,
+		Version:   3,
+		UpdatedAt: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
 	}
 	text := DocumentText(item)
 	want := "kind: preference\ntitle: 饮食偏好\ncontent: 用户偏好清淡饮食。"
@@ -40,8 +39,7 @@ func TestDocumentTemplateAndHash(t *testing.T) {
 	for _, mutate := range []func(*memory.Memory){
 		func(value *memory.Memory) { value.State = memory.StateArchived },
 		func(value *memory.Memory) { value.Version = 99 },
-		func(value *memory.Memory) { value.ObservedAt = value.ObservedAt.Add(time.Hour) },
-		func(value *memory.Memory) { value.CreatedByApp = "app" },
+		func(value *memory.Memory) { value.ScopeKey = "user" },
 		func(value *memory.Memory) { value.OriginSourceID = "source" },
 	} {
 		candidate := item

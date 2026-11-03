@@ -9,12 +9,17 @@ import (
 )
 
 func TestRunVersionExitsWithoutConfig(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
 	var stdout, stderr bytes.Buffer
 	if err := run([]string{"--version"}, &stdout, &stderr); err != nil {
 		t.Fatalf("run --version: %v", err)
 	}
 	if !strings.Contains(stdout.String(), "dmemd") {
 		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if _, err := os.Stat(filepath.Join(configHome, "dmemd", "config.json")); !os.IsNotExist(err) {
+		t.Fatalf("--version must not create a config file: %v", err)
 	}
 }
 
@@ -38,11 +43,38 @@ func TestRunCheckConfig(t *testing.T) {
 	}
 }
 
-func TestRunRejectsMissingExplicitConfig(t *testing.T) {
+func TestRunCreatesDefaultConfigAndExplainsHowToEdit(t *testing.T) {
+	root := t.TempDir()
+	configHome := filepath.Join(root, "config")
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(root, "cache"))
 	var stdout, stderr bytes.Buffer
-	err := run([]string{"--check-config", "--config", filepath.Join(t.TempDir(), "missing.json")}, &stdout, &stderr)
+	if err := run([]string{"--check-config"}, &stdout, &stderr); err != nil {
+		t.Fatalf("run --check-config: %v (stderr %s)", err, stderr.String())
+	}
+	configPath := filepath.Join(configHome, "dmemd", "config.json")
+	if !strings.Contains(stderr.String(), configPath) || !strings.Contains(stderr.String(), "model.base_url") {
+		t.Fatalf("stderr does not explain the generated config: %q", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "configuration valid: "+configPath) {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestRunRejectsMissingExplicitConfig(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	missingPath := filepath.Join(t.TempDir(), "missing.json")
+	var stdout, stderr bytes.Buffer
+	err := run([]string{"--check-config", "--config", missingPath}, &stdout, &stderr)
 	if err == nil {
 		t.Fatal("run accepted missing explicit config")
+	}
+	for _, path := range []string{missingPath, filepath.Join(configHome, "dmemd", "config.json")} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("missing explicit config must not create %s: %v", path, err)
+		}
 	}
 }
 

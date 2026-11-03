@@ -47,6 +47,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if loaded.Created {
+		fmt.Fprintf(stderr, "已创建默认配置文件（模型尚未配置）：%s\n请编辑 model.base_url、model.name 及需要的任务模型名称；按需配置 model.api_key。\n", loaded.Path)
+	}
 	level, err := appruntime.ParseLogLevel(loaded.Config.Log.Level)
 	if err != nil {
 		return err

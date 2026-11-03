@@ -199,11 +199,12 @@ type Config struct {
 	Log         LogConfig         `json:"log"`
 }
 
-// LoadedConfig records the effective config and the file it came from. Path is
-// empty when built-in defaults were used.
+// LoadedConfig records the effective config, its file, and whether that file
+// was created from defaults during this load.
 type LoadedConfig struct {
-	Config Config
-	Path   string
+	Config  Config
+	Path    string
+	Created bool
 }
 
 // DefaultDataDir returns ${XDG_DATA_HOME:-$HOME/.local/share}/dmemd.
@@ -303,10 +304,11 @@ func defaultDatabasePath(dataDir string) string {
 	return filepath.Join(dataDir, "dmemd.db")
 }
 
-// LoadConfig applies this precedence: explicit path, default path if it exists,
-// built-in defaults. A missing explicit path is an error; a missing default
-// path is not. Existing config files must not be group/world-accessible because
-// they may contain the remote model credential.
+// LoadConfig applies this precedence: explicit path, then the default user
+// config path. A missing explicit path is an error. If the default config is
+// missing, it is created with private permissions from built-in defaults.
+// Existing config files must not be group/world-accessible because they may
+// contain the remote model credential.
 func LoadConfig(explicitPath string) (LoadedConfig, error) {
 	cfg := DefaultConfig()
 	// The built-in database path is derived from the effective data directory.
@@ -315,12 +317,20 @@ func LoadConfig(explicitPath string) (LoadedConfig, error) {
 	cfg.Database.Path = ""
 	path := explicitPath
 	required := path != ""
+	created := false
 	if path == "" {
 		path = DefaultConfigPath()
 	}
 
 	if path != "" {
 		info, statErr := os.Stat(path)
+		if errors.Is(statErr, os.ErrNotExist) && !required {
+			created, statErr = createDefaultConfig(path)
+			if statErr != nil {
+				return LoadedConfig{}, statErr
+			}
+			info, statErr = os.Stat(path)
+		}
 		switch {
 		case statErr == nil:
 			if info.IsDir() {
@@ -342,8 +352,6 @@ func LoadConfig(explicitPath string) (LoadedConfig, error) {
 			if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 				return LoadedConfig{}, fmt.Errorf("解析配置 %s: 文件只能包含一个 JSON 对象", path)
 			}
-		case errors.Is(statErr, os.ErrNotExist) && !required:
-			path = ""
 		case errors.Is(statErr, os.ErrNotExist):
 			return LoadedConfig{}, fmt.Errorf("配置文件 %s 不存在", path)
 		default:
@@ -355,7 +363,49 @@ func LoadConfig(explicitPath string) (LoadedConfig, error) {
 	if err := cfg.Validate(); err != nil {
 		return LoadedConfig{}, err
 	}
-	return LoadedConfig{Config: cfg, Path: path}, nil
+	return LoadedConfig{Config: cfg, Path: path, Created: created}, nil
+}
+
+func createDefaultConfig(path string) (bool, error) {
+	dir := filepath.Dir(path)
+	if err := EnsurePrivateDir(dir); err != nil {
+		return false, err
+	}
+	config := DefaultConfig()
+	// Keep environment-derived paths dynamic, just like the built-in defaults.
+	config.DataDir = ""
+	config.Database.Path = ""
+	config.Log.File = ""
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return false, fmt.Errorf("序列化默认配置: %w", err)
+	}
+	data = append(data, '\n')
+	file, err := os.CreateTemp(dir, ".dmemd-config-*")
+	if err != nil {
+		return false, fmt.Errorf("准备默认配置 %s: %w", path, err)
+	}
+	tempPath := file.Name()
+	defer os.Remove(tempPath)
+	writeErr := file.Chmod(0o600)
+	if writeErr == nil {
+		_, writeErr = file.Write(data)
+	}
+	if writeErr == nil {
+		writeErr = file.Sync()
+	}
+	closeErr := file.Close()
+	if err := errors.Join(writeErr, closeErr); err != nil {
+		return false, fmt.Errorf("写入默认配置 %s: %w", path, err)
+	}
+	// Publish only after all content is written. A concurrent process either
+	// sees the complete file or wins the same no-overwrite race itself.
+	if err := os.Link(tempPath, path); errors.Is(err, os.ErrExist) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("创建默认配置 %s: %w", path, err)
+	}
+	return true, nil
 }
 
 func (cfg *Config) applyDefaults() {

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -147,6 +148,108 @@ func TestLoadConfigPartialFileUsesDefaults(t *testing.T) {
 	}
 	if !loaded.Config.Governance.IsEnabled() || loaded.Config.Governance.MaxInputs != 64 {
 		t.Fatalf("governance defaults = %+v", loaded.Config.Governance)
+	}
+}
+
+func TestLoadConfigCreatesPrivateDefaultConfigOnlyWhenMissing(t *testing.T) {
+	root := t.TempDir()
+	configHome := filepath.Join(root, "config")
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(root, "cache"))
+
+	loaded, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	wantPath := filepath.Join(configHome, "dmemd", "config.json")
+	if loaded.Path != wantPath || !loaded.Created {
+		t.Fatalf("Path=%q Created=%v, want %q and true", loaded.Path, loaded.Created, wantPath)
+	}
+	if loaded.Config.Model.BaseURL != "" {
+		t.Fatalf("default model endpoint = %q, want empty", loaded.Config.Model.BaseURL)
+	}
+	info, err := os.Stat(wantPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("config mode = %04o, want 0600", got)
+	}
+	initial, err := os.ReadFile(wantPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(initial), `"base_url": ""`) {
+		t.Fatalf("generated config should leave the model endpoint unset: %s", initial)
+	}
+	loaded, err = LoadConfig("")
+	if err != nil || loaded.Created {
+		t.Fatalf("reload generated config: Created=%v err=%v", loaded.Created, err)
+	}
+	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "other-data"))
+	loaded, err = LoadConfig("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(root, "other-data", "dmemd", "dmemd.db"); loaded.Config.Database.Path != want {
+		t.Fatalf("generated config pinned an environment-derived database path: %q", loaded.Config.Database.Path)
+	}
+
+	writeConfigFile(t, wantPath, `{"model":{"name":"user-model"}}`)
+	loaded, err = LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig existing config: %v", err)
+	}
+	if loaded.Created || loaded.Config.Model.Name != "user-model" {
+		t.Fatalf("existing config was not preserved: Created=%v model=%q", loaded.Created, loaded.Config.Model.Name)
+	}
+	current, err := os.ReadFile(wantPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(current) != `{"model":{"name":"user-model"}}` {
+		t.Fatalf("existing config was modified: %s", current)
+	}
+}
+
+func TestConcurrentDefaultConfigCreation(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(root, "cache"))
+	const callers = 8
+	results := make(chan LoadedConfig, callers)
+	errors := make(chan error, callers)
+	var workers sync.WaitGroup
+	for range callers {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			loaded, err := LoadConfig("")
+			results <- loaded
+			errors <- err
+		}()
+	}
+	workers.Wait()
+	close(results)
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatalf("concurrent load: %v", err)
+		}
+	}
+	created := 0
+	for loaded := range results {
+		if loaded.Created {
+			created++
+		}
+		if loaded.Path != DefaultConfigPath() {
+			t.Fatalf("config path = %q", loaded.Path)
+		}
+	}
+	if created != 1 {
+		t.Fatalf("created count = %d, want exactly one", created)
 	}
 }
 

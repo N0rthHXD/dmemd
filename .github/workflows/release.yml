@@ -38,7 +38,7 @@ jobs:
       - name: Set up exact npm version
         run: npm install --global "npm@$(node -p 'require("./web/package.json").engines.npm')"
 
-      - name: Build and verify release archive
+      - name: Build and verify release binaries
         id: build
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -81,5 +81,5 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         shell: bash
         run: |
-          gh release create "$RELEASE_TAG" dist/*.tar.gz dist/SHA256SUMS \
+          gh release create "$RELEASE_TAG" dist/dmemd_*_linux_* dist/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "dmemd $RELEASE_TAG"

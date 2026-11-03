@@ -13,7 +13,7 @@ version=${VERSION:-dev}
 if [[ ! $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
     fail 'VERSION 必须为语义化版本号 MAJOR.MINOR.PATCH，例如 1.2.3'
 fi
-[[ ! -e dist/$version && ! -L dist/$version ]] || fail "dist/$version 已存在，请先移走原产物；不会覆盖已有发行包"
+[[ ! -e dist/$version && ! -L dist/$version ]] || fail "dist/$version 已存在，请先移走原产物；不会覆盖已有发行产物"
 
 GO=${GO:-go}
 NPM=${NPM:-npm}
@@ -31,9 +31,6 @@ expected_npm=$(node -p 'require("./web/package.json").engines.npm')
 [[ $(<web/.node-version) == "$expected_node" ]] || fail 'web/.node-version 与 package.json 不一致'
 [[ $("$NPM" --version) == "$expected_npm" ]] || fail "需要 npm $expected_npm"
 
-epoch=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct)}
-[[ $epoch =~ ^[0-9]+$ ]] || fail 'SOURCE_DATE_EPOCH 必须是非负整数时间戳'
-
 "$MAKE" fmt-check vet test test-quality
 # Separate invocations also preserve this ordering under make -j.
 "$MAKE" web-install
@@ -47,28 +44,19 @@ trap 'rm -rf -- "$stage"' EXIT
 install -d -m 0755 "$stage/output"
 for arch in amd64 arm64; do
     name="dmemd_${version}_linux_${arch}"
-    payload="$stage/$name"
-    install -d -m 0755 "$payload/configs"
+    # Ship the executable itself: no archive wrapper, local config, database or credentials.
     GOARCH="$arch" "$GO" build -trimpath -buildvcs=false -tags webui \
         -ldflags "-s -w -buildid= -X main.version=$version" \
-        -o "$payload/dmemd" ./cmd/dmemd
-    chmod 0755 "$payload/dmemd"
-    # Explicit allowlist: never ship local config, databases, credentials or node_modules.
-    install -m 0644 README.md "$payload/README.md"
-    install -m 0644 LICENSE "$payload/LICENSE"
-    install -m 0644 configs/dmemd.example.json "$payload/configs/dmemd.example.json"
-
-    # Normalize archive metadata and omit the gzip filename/time header.
-    tar --sort=name --format=ustar --mtime="@$epoch" --owner=0 --group=0 --numeric-owner \
-        -cf - -C "$stage" "$name" | gzip -n > "$stage/output/$name.tar.gz"
+        -o "$stage/output/$name" ./cmd/dmemd
+    chmod 0755 "$stage/output/$name"
 done
 (
     cd -- "$stage/output"
-    sha256sum dmemd_"$version"_linux_*.tar.gz > SHA256SUMS
+    sha256sum dmemd_"$version"_linux_* > SHA256SUMS
 )
 
-# Verify both archives, then run the native binary against isolated temp data.
+# Verify both binaries, then run the native binary against isolated temp data.
 DMEMD_RELEASE_DIR="$stage/output" DMEMD_RELEASE_VERSION="$version" \
     "$GO" test -count=1 -v ./tests/release
 mv -T -- "$stage/output" "$root/dist/$version"
-echo "发行产物：dist/$version/dmemd_${version}_linux_{amd64,arm64}.tar.gz 和 dist/$version/SHA256SUMS"
+echo "发行产物：dist/$version/dmemd_${version}_linux_{amd64,arm64} 和 dist/$version/SHA256SUMS"

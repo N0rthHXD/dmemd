@@ -70,12 +70,14 @@ make test-integration # 当前启用的集成测试
 make test-race        # 可选，需 CGO
 ```
 
-发行构建会生成带 UI 的 `linux/amd64` 和 `linux/arm64` 独立压缩包，并为两者生成统一的
+发行构建会生成带 UI 的 `linux/amd64` 和 `linux/arm64` 独立可执行二进制文件，并为两者生成统一的
 `SHA256SUMS`：
 
 ```sh
 make release VERSION=1.2.3
 ```
+
+产物位于 `dist/1.2.3/`，下载后为二进制文件（例如 `dmemd_1.2.3_linux_amd64`），赋予执行权限即可运行。
 
 当前质量/容量旧套件带 `legacy` 标签；`make test-quality` 会报告跳过，`make test-capacity`
 不能运行现有旧版容量套件，不代表新架构通过。一万条旧架构数据不得外推 v2 性能；真实模型质量

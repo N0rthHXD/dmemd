@@ -1,11 +1,9 @@
-// Package release_test verifies the actual archive produced by make release.
-// Normal Go tests skip it; release.sh supplies an archive directory and version.
+// Package release_test verifies the actual binaries produced by make release.
+// Normal Go tests skip it; release.sh supplies an artifact directory and version.
 package release_test
 
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"debug/elf"
@@ -25,26 +23,36 @@ import (
 	"time"
 )
 
-func TestReleaseArchive(t *testing.T) {
+func TestReleaseArtifacts(t *testing.T) {
 	dir := os.Getenv("DMEMD_RELEASE_DIR")
 	if dir == "" {
-		t.Skip("run make release VERSION=1.2.3 to verify a release archive")
+		t.Skip("run make release VERSION=1.2.3 to verify release binaries")
 	}
 	version := os.Getenv("DMEMD_RELEASE_VERSION")
 	if version == "" {
 		t.Fatal("DMEMD_RELEASE_VERSION is required")
 	}
 	wantSums := make([]string, 0, 2)
+	wantFiles := map[string]bool{"SHA256SUMS": true}
 	for _, arch := range []string{"amd64", "arm64"} {
-		name := "dmemd_" + version + "_linux_" + arch + ".tar.gz"
-		archive, err := os.ReadFile(filepath.Join(dir, name))
+		name := "dmemd_" + version + "_linux_" + arch
+		wantFiles[name] = true
+		path := filepath.Join(dir, name)
+		info, err := os.Stat(path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		digest := sha256.Sum256(archive)
+		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o755 {
+			t.Fatalf("%s mode = %s, want regular executable 0755", name, info.Mode())
+		}
+		binary, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(binary)
 		wantSums = append(wantSums, hex.EncodeToString(digest[:])+"  "+name+"\n")
 		t.Run(arch, func(t *testing.T) {
-			verifyReleaseArchive(t, dir, version, arch)
+			verifyReleaseBinary(t, dir, version, arch)
 		})
 	}
 	sums, err := os.ReadFile(filepath.Join(dir, "SHA256SUMS"))
@@ -54,79 +62,24 @@ func TestReleaseArchive(t *testing.T) {
 	if string(sums) != strings.Join(wantSums, "") {
 		t.Fatalf("SHA256SUMS = %q, want %q", sums, strings.Join(wantSums, ""))
 	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !wantFiles[entry.Name()] {
+			t.Fatalf("unexpected release artifact: %s", entry.Name())
+		}
+		delete(wantFiles, entry.Name())
+	}
+	if len(wantFiles) != 0 {
+		t.Fatalf("release is missing artifacts: %v", wantFiles)
+	}
 }
 
-func verifyReleaseArchive(t *testing.T, dir, version, arch string) {
+func verifyReleaseBinary(t *testing.T, dir, version, arch string) {
 	t.Helper()
-	name := "dmemd_" + version + "_linux_" + arch
-	archive, err := os.ReadFile(filepath.Join(dir, name+".tar.gz"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	extracted := t.TempDir()
-	gunzip, err := gzip.NewReader(bytes.NewReader(archive))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer gunzip.Close()
-	reader := tar.NewReader(gunzip)
-	// Verify an exact allowlist, including permissions; reject extra files and links.
-	want := map[string]int64{
-		name + "/":                           0o755,
-		name + "/dmemd":                      0o755,
-		name + "/README.md":                  0o644,
-		name + "/LICENSE":                    0o644,
-		name + "/configs/":                   0o755,
-		name + "/configs/dmemd.example.json": 0o644,
-	}
-	for {
-		header, err := reader.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		mode, ok := want[header.Name]
-		if !ok {
-			t.Fatalf("unexpected or duplicate archive member: %s", header.Name)
-		}
-		delete(want, header.Name)
-		if header.Mode != mode || header.Uid != 0 || header.Gid != 0 {
-			t.Fatalf("unexpected metadata for %s: mode=%o uid=%d gid=%d", header.Name, header.Mode, header.Uid, header.Gid)
-		}
-		destination := filepath.Join(extracted, filepath.FromSlash(header.Name))
-		switch header.Typeflag {
-		case tar.TypeDir:
-			err = os.MkdirAll(destination, os.FileMode(mode))
-		case tar.TypeReg:
-			var file *os.File
-			file, err = os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, os.FileMode(mode))
-			if err == nil {
-				_, err = io.Copy(file, reader)
-				closeErr := file.Close()
-				if err == nil {
-					err = closeErr
-				}
-			}
-		default:
-			t.Fatalf("unexpected entry type for %s: %d", header.Name, header.Typeflag)
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	if len(want) != 0 {
-		t.Fatalf("archive is missing entries: %v", want)
-	}
-	// Read through the gzip trailer to verify its checksum as well.
-	if _, err := io.Copy(io.Discard, gunzip); err != nil {
-		t.Fatal(err)
-	}
-
-	payload := filepath.Join(extracted, name)
-	binary := filepath.Join(payload, "dmemd")
+	binary := filepath.Join(dir, "dmemd_"+version+"_linux_"+arch)
 	executable, err := elf.Open(binary)
 	if err != nil {
 		t.Fatal(err)
@@ -151,7 +104,7 @@ func verifyReleaseArchive(t *testing.T, dir, version, arch string) {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(private, "data"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(private, "cache"))
 	if runtime.GOOS != "linux" || runtime.GOARCH != arch {
-		t.Logf("archive verified; skipping execution on %s/%s host", runtime.GOOS, runtime.GOARCH)
+		t.Logf("binary verified; skipping execution on %s/%s host", runtime.GOOS, runtime.GOARCH)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -159,17 +112,6 @@ func verifyReleaseArchive(t *testing.T, dir, version, arch string) {
 	output, err := exec.CommandContext(ctx, binary, "--version").CombinedOutput()
 	if err != nil || string(output) != "dmemd "+version+"\n" {
 		t.Fatalf("--version: %v, output=%q", err, output)
-	}
-	example, err := os.ReadFile(filepath.Join(payload, "configs", "dmemd.example.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	configPath := filepath.Join(private, "example.json")
-	if err := os.WriteFile(configPath, example, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if output, err := exec.CommandContext(ctx, binary, "--config", configPath, "--check-config").CombinedOutput(); err != nil {
-		t.Fatalf("example config rejected: %v\n%s", err, output)
 	}
 	verifyService(t, binary, private)
 }

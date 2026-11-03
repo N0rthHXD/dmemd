@@ -33,6 +33,9 @@ make web-check        # OpenAPI 生成类型一致性、tsc、lint
 make build-ui         # 构建前端并嵌入 Go 二进制
 ```
 
+发行版本使用 `MAJOR.MINOR.PATCH` 语义化版本号，例如 `make release VERSION=1.2.3`；
+GitHub 发布标签使用 `v` 前缀，例如 `v1.2.3`。
+
 不手工修改 `web/src/shared/api/schema.gen.ts`；OpenAPI 类型变更由前端生成脚本检查。
 默认 Go 验证不隐式安装 Node，也不运行真实模型或前端构建。
 

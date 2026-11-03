@@ -57,4 +57,4 @@ jobs:
         run: npm install --global "npm@$(node -p 'require("./web/package.json").engines.npm')"
 
       - name: Rehearse release without publishing
-        run: make release VERSION="$(date -u +%y.%m.%d)"
+        run: make release VERSION=0.0.0

@@ -27,7 +27,7 @@ import (
 func TestReleaseArchive(t *testing.T) {
 	dir := os.Getenv("DMEMD_RELEASE_DIR")
 	if dir == "" {
-		t.Skip("run make release VERSION=YY.MM.DD to verify a release archive")
+		t.Skip("run make release VERSION=1.2.3 to verify a release archive")
 	}
 	version := os.Getenv("DMEMD_RELEASE_VERSION")
 	if version == "" {

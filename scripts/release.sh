@@ -10,12 +10,9 @@ fail() {
 }
 
 version=${VERSION:-dev}
-if [[ ! $version =~ ^[0-9]{2}\.[0-9]{2}\.[0-9]{2}$ ]]; then
-    fail 'VERSION 必须为 YY.MM.DD，例如 26.11.03'
+if [[ ! $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+    fail 'VERSION 必须为语义化版本号 MAJOR.MINOR.PATCH，例如 1.2.3'
 fi
-IFS=. read -r year month day <<< "$version"
-valid_date=$(date -d "20${year}-${month}-${day}" +%y.%m.%d 2>/dev/null) || fail 'VERSION 不是有效日期'
-[[ $valid_date == "$version" ]] || fail 'VERSION 不是有效日期'
 [[ ! -e dist/$version && ! -L dist/$version ]] || fail "dist/$version 已存在，请先移走原产物；不会覆盖已有发行包"
 
 GO=${GO:-go}

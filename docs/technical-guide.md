@@ -56,7 +56,7 @@ Source 是原始依据，Observation 是首次记忆形成，Memory 是治理物
 
 ## 环境
 
-- Go 使用 [`.go-version`](../.go-version) 固定的 `1.27.3`；当前验证平台为 linux/amd64。
+- Go 使用 [`.go-version`](../.go-version) 固定的 `1.27.3`；发行版本提供 linux/amd64 和 linux/arm64 产物，发布构建在 linux/amd64 上执行。
 - 生产构建使用纯 Go SQLite 驱动，不需要 CGO 或系统 SQLite；首次下载模块需要网络。
 - 管理台构建使用 [`web/package.json`](../web/package.json) 固定的 Node `24.15.0`、npm `11.12.1`。
 - 默认测试用本地假模型与临时数据库，不需要生产凭据。竞争检测才需要 CGO 工具链。
@@ -68,6 +68,13 @@ make build            # 纯 Go，输出 bin/dmemd
 make check            # 格式检查、vet、默认测试、质量入口和构建
 make test-integration # 当前启用的集成测试
 make test-race        # 可选，需 CGO
+```
+
+发行构建会生成带 UI 的 `linux/amd64` 和 `linux/arm64` 独立压缩包，并为两者生成统一的
+`SHA256SUMS`：
+
+```sh
+make release VERSION=1.2.3
 ```
 
 当前质量/容量旧套件带 `legacy` 标签；`make test-quality` 会报告跳过，`make test-capacity`

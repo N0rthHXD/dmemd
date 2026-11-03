@@ -7,6 +7,7 @@
 ## 1. 环境与隔离
 
 - Go 使用 `.go-version` 固定的 `1.27.3`；首次下载锁定模块需要网络，默认测试不访问真实模型。
+- 发行构建在 linux/amd64 runner 上交叉编译并校验 linux/amd64、linux/arm64 两种 ELF 产物；服务冒烟测试只在匹配的本机架构执行。
 - 生产构建与默认测试不需要 CGO；race 检测需要 CGO 工具链。
 - 测试用 `testing.T.TempDir()`、临时真实 SQLite、本地 httptest/FakeModel，不访问生产数据或凭据。
 - 配置文件权限 `0600`；默认 XDG 目录通过环境变量指向临时目录，不改写用户数据。

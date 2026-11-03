@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -33,19 +34,34 @@ func TestReleaseArchive(t *testing.T) {
 	if version == "" {
 		t.Fatal("DMEMD_RELEASE_VERSION is required")
 	}
-	name := "dmemd_" + version + "_linux_amd64"
-	archive, err := os.ReadFile(filepath.Join(dir, name+".tar.gz"))
-	if err != nil {
-		t.Fatal(err)
+	wantSums := make([]string, 0, 2)
+	for _, arch := range []string{"amd64", "arm64"} {
+		name := "dmemd_" + version + "_linux_" + arch + ".tar.gz"
+		archive, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(archive)
+		wantSums = append(wantSums, hex.EncodeToString(digest[:])+"  "+name+"\n")
+		t.Run(arch, func(t *testing.T) {
+			verifyReleaseArchive(t, dir, version, arch)
+		})
 	}
 	sums, err := os.ReadFile(filepath.Join(dir, "SHA256SUMS"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	digest := sha256.Sum256(archive)
-	wantSum := hex.EncodeToString(digest[:]) + "  " + name + ".tar.gz\n"
-	if string(sums) != wantSum {
-		t.Fatalf("SHA256SUMS = %q, want %q", sums, wantSum)
+	if string(sums) != strings.Join(wantSums, "") {
+		t.Fatalf("SHA256SUMS = %q, want %q", sums, strings.Join(wantSums, ""))
+	}
+}
+
+func verifyReleaseArchive(t *testing.T, dir, version, arch string) {
+	t.Helper()
+	name := "dmemd_" + version + "_linux_" + arch
+	archive, err := os.ReadFile(filepath.Join(dir, name+".tar.gz"))
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	extracted := t.TempDir()
@@ -116,8 +132,12 @@ func TestReleaseArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer executable.Close()
-	if executable.Machine != elf.EM_X86_64 {
-		t.Fatalf("ELF architecture = %s, want x86-64", executable.Machine)
+	wantMachine := map[string]elf.Machine{
+		"amd64": elf.EM_X86_64,
+		"arm64": elf.EM_AARCH64,
+	}[arch]
+	if executable.Machine != wantMachine {
+		t.Fatalf("ELF architecture = %s, want %s", executable.Machine, wantMachine)
 	}
 	for _, program := range executable.Progs {
 		if program.Type == elf.PT_INTERP || program.Type == elf.PT_DYNAMIC {
@@ -130,6 +150,10 @@ func TestReleaseArchive(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(private, "config"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(private, "data"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(private, "cache"))
+	if runtime.GOOS != "linux" || runtime.GOARCH != arch {
+		t.Logf("archive verified; skipping execution on %s/%s host", runtime.GOOS, runtime.GOARCH)
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	output, err := exec.CommandContext(ctx, binary, "--version").CombinedOutput()

@@ -9,7 +9,7 @@
 | 组件 | 固定版本 | 说明 |
 | --- | --- | --- |
 | Go | `1.27.3` | `.go-version`、`go.mod` 的 `go` 指令与 CI 使用同一版本 |
-| 目标构建平台 | `linux/amd64` | 当前验证平台；其他平台未声明支持 |
+| 目标构建平台 | `linux/amd64`、`linux/arm64` | 发行脚本生成两种纯 Go、静态链接产物；发布 runner 为 linux/amd64 |
 | SQLite 驱动 | `modernc.org/sqlite v1.60.1` | 纯 Go，生产构建不依赖 CGO |
 | 驱动内置 SQLite | `3.53.4` | 由驱动决定，不另外安装 SQLite 作为运行依赖 |
 | Unicode 规范化 | `golang.org/x/text v0.43.0` | 用于 NFC 规范化 |
@@ -68,4 +68,4 @@ $ CGO_ENABLED=0 go build -trimpath -o bin/dmemd ./cmd/dmemd
 2. 驱动升级后重跑 FTS5、WAL、外键、事务回滚与索引重建测试；实现备份后还须重跑备份恢复测试。
 3. 不以命令行 SQLite 替换驱动内置版本作为生产运行依赖；命令行工具只用于可选排障。
 4. `go build` 的发布构建固定 `CGO_ENABLED=0`，并使用 `.go-version` 指定的工具链。
-5. 当前只声明 `linux/amd64` 已验证；其他操作系统或架构需要补充验证后才能声明支持。
+5. 当前发行版本声明支持 `linux/amd64` 和 `linux/arm64`；其他操作系统或架构需要补充构建与运行验证后才能声明支持。

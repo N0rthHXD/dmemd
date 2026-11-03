@@ -7,8 +7,8 @@ VERSION ?= dev
 # node_modules can contain unrelated .go files; keep Go checks scoped to this module.
 GO_PACKAGES = $(shell $(GO) list ./... | grep -v '/web/node_modules/')
 
-.PHONY: all fmt-check vet test test-integration test-quality test-capacity test-race build check clean \
-	web-install web-dev web-check web-build build-ui
+.PHONY: all fmt-check vet test test-integration test-quality test-capacity test-race test-ui build check clean \
+	web-install web-dev web-check web-build build-ui release
 
 all: check
 
@@ -67,6 +67,14 @@ web-build:
 build-ui: web-build
 	mkdir -p bin
 	CGO_ENABLED=0 $(GO) build -trimpath -tags webui -ldflags "-s -w -X main.version=$(VERSION)" -o bin/dmemd ./cmd/dmemd
+
+# Run after web-build so tests exercise the real embedded assets as well.
+test-ui:
+	CGO_ENABLED=0 $(GO) test -tags webui $(GO_PACKAGES)
+
+# The script validates inputs before installing dependencies or creating artifacts.
+release:
+	+@GO="$(GO)" NPM="$(NPM)" VERSION="$(VERSION)" bash scripts/release.sh
 
 clean:
 	rm -rf bin coverage.out coverage.html

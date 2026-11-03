@@ -28,3 +28,33 @@ jobs:
 
       - name: Run unified checks
         run: make check
+
+  release-build:
+    name: Release build rehearsal
+    # Tag pushes are handled by release.yml, without a duplicate rehearsal.
+    if: github.ref_type != 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up exact Go toolchain
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: .go-version
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Set up exact Node toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.node-version
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Set up exact npm version
+        run: npm install --global "npm@$(node -p 'require("./web/package.json").engines.npm')"
+
+      - name: Rehearse release without publishing
+        run: make release VERSION="$(date -u +%y.%m.%d)"
